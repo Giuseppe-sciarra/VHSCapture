@@ -17,7 +17,8 @@ namespace VHSCapture
         SplitContainer splitLog, splitMain, splitRight;
         Card top, cardSources, cardMixer, cardLog, status;
         CanvasView canvas;
-        RoundedButton btnRec, btnSettings, btnFolder, btnTheme, btnLog;
+        RoundedButton btnRec, btnPause, btnProfile, btnSettings, btnFolder, btnTheme, btnLog;
+        DateTime? pausedSince; TimeSpan pausedTotal;
         RoundedButton btnAdd, btnRemove, btnProps, btnUp, btnDown;
         TextBox txtName, txtLog;
         Label lblStatus; Pill lblRec;
@@ -35,7 +36,7 @@ namespace VHSCapture
         bool finalizing, syncingList;
         int frames; DateTime lastFrameAt = DateTime.MinValue;
         readonly System.Text.StringBuilder runLog = new System.Text.StringBuilder();
-        bool autoRetried;
+        bool autoRetried, devicesResolved;
         // diagnostica anteprima
         readonly System.Diagnostics.Stopwatch paintClock = System.Diagnostics.Stopwatch.StartNew();
         double lastPaint, paintMaxGap, paintWindowStart; long painted;
@@ -58,6 +59,7 @@ namespace VHSCapture
             KeyDown += (o, e) =>
             {
                 if (e.KeyCode == Keys.F5) { e.Handled = true; if (!engine.IsRecording) StartPreview(); return; }
+                if (e.KeyCode == Keys.F10) { e.Handled = true; TogglePause(); return; }
                 if (e.KeyCode != Keys.F9) return;
                 e.Handled = true;
                 ToggleRecording();
@@ -136,6 +138,11 @@ namespace VHSCapture
             // come OBS: un solo pulsante. Rosso = avvia, chiaro = ferma. L'anteprima parte da sola (F5 per riavviarla).
             btnRec = Ui.Btn("⏺   Avvia registrazione", "rec", (o, e) => ToggleRecording(), 230);
             tips.SetToolTip(btnRec, "Avvia / ferma registrazione (F9)");
+            btnPause = Ui.Btn("⏸   Pausa", "ghost", (o, e) => TogglePause(), 120);
+            btnPause.Visible = false;
+            tips.SetToolTip(btnPause, "Pausa / riprendi (F10): salti un pezzo senza fare due file");
+            btnProfile = Ui.Btn("📼   Profilo", "ghost", (o, e) => ShowProfileMenu());
+            tips.SetToolTip(btnProfile, "Imposta in un clic sorgente e registrazione per VHS, Hi8, MiniDV, NTSC…");
 
             lblName = new Label { Text = "Nome file", AutoSize = true, Tag = "muted", Margin = new Padding(20, 10, 6, 0) };
             txtName = new TextBox { Width = 240, Margin = new Padding(0, 6, 0, 0), PlaceholderText = "es. Rossi_matrimonio_1994", Font = new Font("Segoe UI", 10f) };
@@ -144,7 +151,7 @@ namespace VHSCapture
             btnTheme = Ui.IconBtn("◐", "Tema chiaro/scuro", (o, e) => { settings.DarkTheme = !settings.DarkTheme; settings.Save(); Theme.Apply(this, settings.DarkTheme); RefreshSourceList(); });
             btnLog = Ui.Btn("Log", "ghost", (o, e) => ToggleLog());
             btnPanels = Ui.IconBtn("◧", "Mostra/nascondi pannello Sorgenti e Mixer", (o, e) => ToggleRightPanel());
-            flow.Controls.AddRange(new Control[] { btnRec, lblName, txtName, btnSettings, btnFolder, btnTheme, btnPanels, btnLog });
+            flow.Controls.AddRange(new Control[] { btnRec, btnPause, btnProfile, lblName, txtName, btnSettings, btnFolder, btnTheme, btnPanels, btnLog });
             Resize += (o, e) => ApplyCompact();
             top.Controls.Add(flow);
 
@@ -613,6 +620,7 @@ namespace VHSCapture
             catch (Exception ex) { AppendLog("Errore avvio registrazione: " + ex.Message); return; }
             recStart = DateTime.Now;
             blankSince = null; blankStartRecSec = -1; contentSamples = 0; autoStopped = false;
+            pausedSince = null; pausedTotal = TimeSpan.Zero;
             AppendLog("Registrazione avviata: " + Path.GetFileName(recFile));
             SetButtons();
         }
@@ -687,6 +695,7 @@ namespace VHSCapture
             }
 
             finalizing = false;
+            pausedSince = null; pausedTotal = TimeSpan.Zero;
             lblRec.Text = "";
             if (restartPreview && !IsDisposed && !engine.IsRunning) StartPreview();
             SetButtons();
@@ -703,6 +712,106 @@ namespace VHSCapture
             canvas.CanvasW = settings.CanvasW; canvas.CanvasH = settings.CanvasH;
             canvas.Invalidate();
             StartPreview();
+        }
+
+        // ===================== profili (come i profili di OBS) =====================
+        record Prof(string Name, string Size, string InFps, string CanvasFps, string Deint, int CropB, bool Wide, string Format, string Note);
+
+        static readonly Prof[] Profiles =
+        {
+            new Prof("VHS / S-VHS PAL", "720x576", "25", "50", "yadif2x", 8, false, "auto", null),
+            new Prof("Hi8 / Video8 / Digital8 PAL", "720x576", "25", "50", "yadif2x", 8, false, "auto", null),
+            new Prof("MiniDV PAL 4:3", "720x576", "25", "50", "yadif2x", 0, false, "auto", null),
+            new Prof("MiniDV PAL 16:9", "720x576", "25", "50", "yadif2x", 0, true, "auto", null),
+            null,
+            new Prof("VHS / Hi8 NTSC", "720x480", "29.97", "59.94", "yadif2x", 6, false, "auto", "NTSC"),
+            new Prof("MiniDV NTSC 4:3", "720x480", "29.97", "59.94", "yadif2x", 0, false, "auto", "NTSC"),
+            new Prof("MiniDV NTSC 16:9", "720x480", "29.97", "59.94", "yadif2x", 0, true, "auto", "NTSC"),
+            null,
+            new Prof("Camera HDMI 1080p60", "1920x1080", "60", "60", "off", 0, true, "mjpeg", null),
+        };
+
+        void ShowProfileMenu()
+        {
+            if (engine.IsRecording) return;
+            var m = new ContextMenuStrip();
+            foreach (var p in Profiles)
+            {
+                if (p == null) { m.Items.Add(new ToolStripSeparator()); continue; }
+                var it = new ToolStripMenuItem(p.Name) { Checked = settings.Profile == p.Name };
+                var pp = p;
+                it.Click += (o, e) => ApplyProfile(pp);
+                m.Items.Add(it);
+            }
+            Theme.StyleMenu(m);
+            m.Show(btnProfile, new Point(0, btnProfile.Height));
+        }
+
+        /// <summary>Imposta in un colpo sorgente (ingresso, deinterlaccio, ritaglio, proporzioni) e registrazione (canvas, fps).</summary>
+        void ApplyProfile(Prof p)
+        {
+            var src = settings.Sources.FirstOrDefault(x => x.Type == SourceType.Capture);
+            if (src == null) { MessageBox.Show(this, "Aggiungi prima il grabber come sorgente (＋).", "VHSCapture"); return; }
+            src.InputSize = p.Size; src.InputFps = p.InFps; src.VideoFormat = p.Format;
+            src.DeinterlaceMode = p.Deint;
+            src.CropL = src.CropT = src.CropR = 0; src.CropB = p.CropB;
+            settings.CanvasW = 1920; settings.CanvasH = 1080; settings.Fps = p.CanvasFps;
+            if (p.Wide) src.FillTo(settings.CanvasW, settings.CanvasH); else src.FitTo(settings.CanvasW, settings.CanvasH);
+            settings.Profile = p.Name;
+            settings.Save();
+            canvas.CanvasW = settings.CanvasW; canvas.CanvasH = settings.CanvasH;
+            RefreshSourceList(); UpdateRecButton(); canvas.Invalidate();
+            AppendLog($"Profilo \"{p.Name}\": ingresso {p.Size} @ {p.InFps}, {(p.Deint == "off" ? "senza deinterlaccio" : "Yadif 2x")}, canvas 1920×1080 @ {p.CanvasFps}, {(p.Wide ? "16:9 a tutto schermo" : "4:3 con bande laterali")}");
+            if (p.Note == "NTSC")
+                MessageBox.Show(this, "Profilo NTSC impostato.\n\nRicorda: il grabber va messo su NTSC_M (Proprietà sorgente → Driver video… → Standard video) e il lettore deve riprodurre davvero l'NTSC, altrimenti l'immagine esce in bianco e nero o scorre.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            StartPreview();
+        }
+
+        // ===================== dispositivi rinominati da Windows =====================
+        /// <summary>
+        /// Dopo un aggiornamento Windows reinstalla spesso i driver USB e rinomina il dispositivo
+        /// (es. "USB Audio" → "2- USB Audio", "Microfono (USB Audio)" → "Microfono (3- USB Audio)").
+        /// Qui lo ritrovo lo stesso confrontando il nome "pulito", e aggiorno le impostazioni.
+        /// </summary>
+        bool TryResolveDevices()
+        {
+            var (videos, audios) = FFmpeg.ListDevices();
+            bool changed = false;
+            foreach (var src in settings.Sources.Where(x => x.Type == SourceType.Capture))
+            {
+                var v = Resolve(src.VideoDevice, videos);
+                if (v != null && v != src.VideoDevice) { AppendLog($"Windows ha rinominato il video \"{src.VideoDevice}\" in \"{v}\": ritrovato e aggiornato"); src.VideoDevice = v; changed = true; }
+                else if (v == null && !string.IsNullOrEmpty(src.VideoDevice) && !videos.Contains(src.VideoDevice))
+                    AppendLog($"⚠ Dispositivo video \"{src.VideoDevice}\" non trovato: è collegato? Scegline un altro nelle Proprietà della sorgente");
+                if (!string.IsNullOrEmpty(src.AudioDevice))
+                {
+                    var a = Resolve(src.AudioDevice, audios);
+                    if (a != null && a != src.AudioDevice) { AppendLog($"Windows ha rinominato l'audio \"{src.AudioDevice}\" in \"{a}\": ritrovato e aggiornato"); src.AudioDevice = a; changed = true; }
+                    else if (a == null && !audios.Contains(src.AudioDevice))
+                        AppendLog($"⚠ Dispositivo audio \"{src.AudioDevice}\" non trovato: è collegato? Scegline un altro nelle Proprietà della sorgente");
+                }
+            }
+            if (changed) { settings.Save(); RefreshSourceList(); RebuildMixer(); }
+            return changed;
+        }
+
+        static string NormDevice(string n)
+        {
+            if (string.IsNullOrEmpty(n)) return "";
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"^\s*\d+\s*-\s*", "");          // "2- USB Audio"
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"\(\s*\d+\s*-\s*", "(");         // "Microfono (2- USB Audio)"
+            return n.Trim().ToLowerInvariant();
+        }
+
+        /// <summary>Il nome esatto se c'è; altrimenti l'unico dispositivo con lo stesso nome "pulito"; altrimenti null.</summary>
+        static string Resolve(string saved, List<string> available)
+        {
+            if (string.IsNullOrEmpty(saved) || available.Contains(saved)) return saved;
+            string ns = NormDevice(saved);
+            var same = available.Where(d => NormDevice(d) == ns).ToList();
+            if (same.Count >= 1) return same[0];
+            var close = available.Where(d => NormDevice(d).Contains(ns) || ns.Contains(NormDevice(d))).ToList();
+            return close.Count == 1 ? close[0] : null;
         }
 
         void ToggleRecording()
@@ -734,6 +843,48 @@ namespace VHSCapture
             }
             btnRec.MinimumSize = new Size(compact ? 96 : 230, 36);
             btnRec.Invalidate();
+            if (btnPause != null)
+            {
+                bool p = pausedSince != null;
+                btnPause.Visible = rec && !finalizing;
+                btnPause.Text = compact ? (p ? "▶" : "⏸") : (p ? "▶   Riprendi" : "⏸   Pausa");
+                btnPause.Variant = p ? "accent" : "ghost";
+                btnPause.MinimumSize = new Size(compact ? 44 : 120, 36);
+                btnPause.Invalidate();
+            }
+            if (btnProfile != null)
+            {
+                btnProfile.Text = compact ? "📼" : "📼   " + (string.IsNullOrEmpty(settings.Profile) ? "Profilo" : settings.Profile);
+                btnProfile.Enabled = !rec && !finalizing;
+            }
+        }
+
+        /// <summary>Tempo registrato davvero (senza le pause): coincide con la durata del file.</summary>
+        TimeSpan RecElapsed()
+        {
+            var t = DateTime.Now - recStart - pausedTotal;
+            if (pausedSince != null) t -= DateTime.Now - pausedSince.Value;
+            return t < TimeSpan.Zero ? TimeSpan.Zero : t;
+        }
+
+        void TogglePause()
+        {
+            if (!engine.IsRecording || finalizing) return;
+            if (pausedSince == null)
+            {
+                engine.PauseRecording();
+                pausedSince = DateTime.Now;
+                AppendLog("Registrazione in pausa");
+            }
+            else
+            {
+                engine.ResumeRecording();
+                pausedTotal += DateTime.Now - pausedSince.Value;
+                pausedSince = null;
+                blankSince = null;
+                AppendLog($"Registrazione ripresa (riparte dall'ultimo keyframe, al massimo {settings.KeyframeSec} s prima)");
+            }
+            UpdateRecButton();
         }
 
         void SetButtons()
@@ -751,7 +902,7 @@ namespace VHSCapture
         void OnFrameShown()
         {
             System.Threading.Interlocked.Increment(ref frames);
-            lastFrameAt = DateTime.Now; autoRetried = false;
+            lastFrameAt = DateTime.Now; autoRetried = false; devicesResolved = false;
             double t = paintClock.Elapsed.TotalSeconds;
             if (lastPaint > 0) paintMaxGap = Math.Max(paintMaxGap, t - lastPaint);
             lastPaint = t; System.Threading.Interlocked.Increment(ref painted);
@@ -774,6 +925,11 @@ namespace VHSCapture
                     // l'encoder ora è sempre acceso: se non si apre, passo a x264 e riparto
                     string lg0; lock (runLog) lg0 = runLog.ToString();
                     // paracadute VU: se la pipe dei livelli non si apre, riparto senza misuratori (anteprima e registrazione prima di tutto)
+                    if (lg0.Contains("Could not find") && lg0.Contains("device with name") && !devicesResolved)
+                    {
+                        devicesResolved = true;
+                        if (TryResolveDevices()) { StartPreview(); return; }
+                    }
                     if (lg0.Contains("Could not bind ZMQ") && !autoRetried)
                     {
                         AppendLog("Porta del controllo live occupata: riparto");
@@ -939,6 +1095,7 @@ namespace VHSCapture
         /// </summary>
         void OnSignal(bool blank, string kind)
         {
+            if (pausedSince != null) { blankSince = null; return; }   // in pausa lo stop automatico non vale
             if (!blank)
             {
                 blankSince = null; blankKind = "";
@@ -948,7 +1105,7 @@ namespace VHSCapture
             if (blankSince == null)
             {
                 blankSince = DateTime.Now; blankKind = kind;
-                blankStartRecSec = engine.IsRecording ? (DateTime.Now - recStart).TotalSeconds : -1;
+                blankStartRecSec = engine.IsRecording ? RecElapsed().TotalSeconds : -1;
             }
             if (!engine.IsRecording || finalizing || !settings.AutoStopOnBlank) return;
             bool armed = contentSamples >= 20;   // 20 campioni a 2/s = 10 s di immagine vera
@@ -997,6 +1154,7 @@ namespace VHSCapture
                     previewDiag = $"anteprima: arrivo {afps:0} fps (pausa max {agap:0} ms) · a schermo {pfps:0} fps (pausa max {paintMaxGap * 1000:0} ms)" + (adrop > 0 ? $" · saltati {adrop}" : "");
                     // ogni 5 s anche nel Log, così basta incollare il Log per la diagnosi
                     diagAcc.Add((afps, agap, pfps, paintMaxGap * 1000, adrop, engine.SourceFps, lastStats?.Fps ?? 0));
+                    if (diagAcc.Count >= 5 && !settings.DiagLog) diagAcc.Clear();
                     if (diagAcc.Count >= 5)
                     {
                         var (rAvg, rMax) = canvas.TakeRenderStats();
@@ -1035,14 +1193,16 @@ namespace VHSCapture
 
             if (engine.IsRecording)
             {
-                var el = DateTime.Now - recStart;
+                var el = RecElapsed();
+                bool isPaused = pausedSince != null;
                 long size = 0;
                 size = RecordedBytes(recFile);
                 bool blink = (DateTime.Now.Millisecond / 500) % 2 == 0;
-                lblRec.Fill = Theme.Rec; lblRec.ForeColor = Color.White;
-                lblRec.Text = $"{(blink ? "●" : "○")} REC  {el:hh\\:mm\\:ss}   {Fmt(size)}   {Path.GetFileName(finalFile).Replace("_%03d", "")}";
-                canvas.RecText = $"{(blink ? "●" : "○")}  REC  {el:hh\\:mm\\:ss}";
-                if (blankSince != null && settings.AutoStopOnBlank)
+                lblRec.Fill = isPaused ? Color.FromArgb(215, 150, 20) : Theme.Rec; lblRec.ForeColor = Color.White;
+                string tag = isPaused ? "⏸ IN PAUSA" : $"{(blink ? "●" : "○")} REC";
+                lblRec.Text = $"{tag}  {el:hh\\:mm\\:ss}   {Fmt(size)}   {Path.GetFileName(finalFile).Replace("_%03d", "")}";
+                canvas.RecText = isPaused ? $"⏸  IN PAUSA  {el:hh\\:mm\\:ss}" : $"{(blink ? "●" : "○")}  REC  {el:hh\\:mm\\:ss}";
+                if (blankSince != null && settings.AutoStopOnBlank && !isPaused)
                 {
                     int left = Math.Max(0, settings.AutoStopSeconds - (int)(DateTime.Now - blankSince.Value).TotalSeconds);
                     canvas.RecText += contentSamples >= 20 ? $"    schermo {blankKind}: stop tra {left} s" : $"    schermo {blankKind} (in attesa del Play)";

@@ -295,6 +295,15 @@ namespace VHSCapture
         public FrameBuf(int w, int h) { W = w; H = h; Data = new byte[w * h * 4]; }
     }
 
+    /// <summary>Chi fornisce i frame di anteprima (il motore): coda di frame pronti + restituzione dei buffer.</summary>
+    public interface IFrameSource
+    {
+        int ReadyFrames { get; }
+        bool TryTakeFrame(out FrameBuf fb);
+        void ReturnFrame(FrameBuf fb);
+        double PreviewRate { get; }
+    }
+
     public class EngineStats
     {
         public double Fps; public long Frame; public long Drop; public long Dup; public double Speed; public long TotalSize; public double CpuPercent;
@@ -323,7 +332,143 @@ namespace VHSCapture
         Thread writer;
         volatile bool armed, recording, closing;
         readonly ManualResetEventSlim closed = new ManualResetEventSlim(true);
-        public bool IsRecording => recording || armed;
+        public bool IsRecording => recording || armed || paused || pausing || resumeArmed;
+
+        // ===== pausa (come OBS): i timestamp vengono riscritti, così nel file non resta nessun buco =====
+        volatile bool pausing, paused, resumeArmed;
+        public bool IsPaused => paused || pausing || resumeArmed;
+        long offset90k;                  // quanto sottrarre a PTS/DTS/PCR dopo le pause
+        long lastAdjVideoDts = -1, lastAdjAudioPts = -1;
+        long lastRawVideoDts = -1, frameDur90k = 3600;   // durata di un frame misurata dal flusso (default 25 fps)
+        readonly Dictionary<int, bool> dropPes = new Dictionary<int, bool>();
+        const long Wrap = 1L << 33;
+
+        /// <summary>Mette in pausa all'inizio del prossimo frame video (l'ultimo frame scritto è intero).</summary>
+        public void Pause() { lock (this) { if (recording) pausing = true; else if (armed) { armed = false; paused = true; } } }
+
+        /// <summary>Riprende dall'ultimo keyframe disponibile (pre-roll ≤ intervallo keyframe), ricucendo i timestamp.</summary>
+        public void Resume()
+        {
+            lock (this)
+            {
+                if (!paused && !pausing) return;
+                if (pausing) { pausing = false; return; }   // pausa chiesta e annullata prima di scattare
+                paused = false;
+                if (haveKey && gop.Count > 0) { StartSegment(gop[0]); foreach (var p in gop) Write(p); recording = true; }
+                else resumeArmed = true;
+            }
+        }
+
+        /// <summary>Calcola lo spostamento dei timestamp perché il segmento riprenda subito dopo l'ultimo frame scritto.</summary>
+        void StartSegment(byte[] keyPkt)
+        {
+            long dts = ReadDts(keyPkt);
+            if (dts >= 0 && lastAdjVideoDts >= 0)
+                offset90k = Mod(dts - (lastAdjVideoDts + frameDur90k));
+            dropPes.Clear();
+        }
+
+        static long Mod(long v) { v %= Wrap; return v < 0 ? v + Wrap : v; }
+
+        static int PayloadStart(byte[] p)
+        {
+            int afc = (p[3] >> 4) & 3;
+            if (afc == 2) return -1;                 // solo adaptation field
+            int o = 4;
+            if (afc == 3) o += 1 + p[4];
+            return o < 188 ? o : -1;
+        }
+
+        static long ReadTs(byte[] p, int o) =>
+            ((long)((p[o] >> 1) & 7) << 30) | ((long)p[o + 1] << 22) | ((long)(p[o + 2] >> 1) << 15) | ((long)p[o + 3] << 7) | ((long)p[o + 4] >> 1);
+
+        static void WriteTs(byte[] p, int o, long v)
+        {
+            p[o] = (byte)((p[o] & 0xF1) | ((v >> 29) & 0x0E));
+            p[o + 1] = (byte)(v >> 22);
+            p[o + 2] = (byte)(((v >> 14) & 0xFE) | 1);
+            p[o + 3] = (byte)(v >> 7);
+            p[o + 4] = (byte)(((v << 1) & 0xFE) | 1);
+        }
+
+        /// <summary>DTS (o PTS se manca) di un pacchetto che apre un PES, altrimenti -1.</summary>
+        static long ReadDts(byte[] p)
+        {
+            if ((p[1] & 0x40) == 0) return -1;
+            int o = PayloadStart(p);
+            if (o < 0 || o + 19 > 188 || p[o] != 0 || p[o + 1] != 0 || p[o + 2] != 1) return -1;
+            int flags = (p[o + 7] >> 6) & 3;
+            if (flags == 3) return ReadTs(p, o + 14);
+            if (flags == 2) return ReadTs(p, o + 9);
+            return -1;
+        }
+
+        /// <summary>Scrive un pacchetto applicando lo spostamento dei timestamp (copia: l'originale può servire al pre-roll).</summary>
+        void Write(byte[] pkt)
+        {
+            int pid = ((pkt[1] & 0x1F) << 8) | pkt[2];
+            bool pusi = (pkt[1] & 0x40) != 0;
+            // PAT/PMT, e tutto finché non c'è stata una pausa: passano come sono (salvo i contatori)
+            lastOriginal = pkt;
+            if (offset90k == 0 || pid == 0 || pid == pmtPid) { TrackAndEnqueue(pkt, pid, pusi); return; }
+            var q = (byte[])pkt.Clone();
+            {
+                // PCR nell'adaptation field
+                int afc = (q[3] >> 4) & 3;
+                if ((afc == 2 || afc == 3) && q[4] >= 7 && (q[5] & 0x10) != 0)
+                {
+                    long b = ((long)q[6] << 25) | ((long)q[7] << 17) | ((long)q[8] << 9) | ((long)q[9] << 1) | ((long)q[10] >> 7);
+                    b = Mod(b - offset90k);
+                    q[6] = (byte)(b >> 25); q[7] = (byte)(b >> 17); q[8] = (byte)(b >> 9); q[9] = (byte)(b >> 1);
+                    q[10] = (byte)((q[10] & 0x7F) | (int)((b & 1) << 7));
+                }
+                // PTS/DTS nell'intestazione del PES
+                if (pusi)
+                {
+                    int o = PayloadStart(q);
+                    if (o >= 0 && o + 19 <= 188 && q[o] == 0 && q[o + 1] == 0 && q[o + 2] == 1)
+                    {
+                        int flags = (q[o + 7] >> 6) & 3;
+                        if (flags >= 2) WriteTs(q, o + 9, Mod(ReadTs(q, o + 9) - offset90k));
+                        if (flags == 3) WriteTs(q, o + 14, Mod(ReadTs(q, o + 14) - offset90k));
+                    }
+                }
+            }
+            TrackAndEnqueue(q, pid, pusi);
+        }
+
+        void TrackAndEnqueue(byte[] q, int pid, bool pusi)
+        {
+            if (pusi && pid != 0 && pid != pmtPid)
+            {
+                long ts = ReadDts(q);
+                if (pid == videoPid) { if (ts >= 0) lastAdjVideoDts = ts; }
+                else if (ts >= 0)
+                {
+                    // audio del pre-roll che si sovrapporrebbe a quello già scritto: il PES intero viene saltato
+                    bool drop = lastAdjAudioPts >= 0 && Mod(ts - lastAdjAudioPts) > Wrap / 2 || ts == lastAdjAudioPts;
+                    dropPes[pid] = drop;
+                    if (!drop) lastAdjAudioPts = ts;
+                }
+            }
+            if (pid != videoPid && pid != 0 && pid != pmtPid && dropPes.TryGetValue(pid, out bool d) && d) return;
+            // contatori di continuità rinumerati: dopo una pausa o l'inizio a metà flusso il demuxer non vede "buchi"
+            // (altrimenti scarta come corrotto il primo frame dopo la giunzione — visto nei test)
+            int afc = (q[3] >> 4) & 3;
+            if (afc == 1 || afc == 3)
+            {
+                int cc = ccOut.TryGetValue(pid, out int prev) ? (prev + 1) & 0x0F : q[3] & 0x0F;
+                if ((q[3] & 0x0F) != cc)
+                {
+                    if (ReferenceEquals(q, lastOriginal)) q = (byte[])q.Clone();
+                    q[3] = (byte)((q[3] & 0xF0) | cc);
+                }
+                ccOut[pid] = cc;
+            }
+            Enqueue(q);
+        }
+        readonly Dictionary<int, int> ccOut = new Dictionary<int, int>();
+        byte[] lastOriginal;
         public string LastCommand { get; private set; }
 
         /// <summary>Chiamato dal thread che legge la pipe TS dell'encoder.</summary>
@@ -358,6 +503,13 @@ namespace VHSCapture
             bool key = false;
             if (pid == videoPid && pusi && (afc == 2 || afc == 3) && pkt[4] > 0 && (pkt[5] & 0x40) != 0) key = true;   // random_access_indicator
 
+            if (pid == videoPid && pusi)
+            {
+                long rd = ReadDts(pkt);
+                if (rd >= 0 && lastRawVideoDts >= 0) { long dd = Mod(rd - lastRawVideoDts); if (dd > 0 && dd < 90000) frameDur90k = dd; }
+                if (rd >= 0) lastRawVideoDts = rd;
+            }
+
             if (key)
             {
                 // nuovo GOP: il pre-roll riparte da qui
@@ -365,7 +517,12 @@ namespace VHSCapture
                 if (armed && pat != null && pmt != null)
                 {
                     armed = false; recording = true;
-                    Enqueue(pat); Enqueue(pmt);
+                    Write(pat); Write(pmt);
+                }
+                if (resumeArmed)
+                {
+                    resumeArmed = false; recording = true;
+                    StartSegment(pkt);
                 }
             }
             if (haveKey && pid != 0 && pid != pmtPid)
@@ -375,7 +532,9 @@ namespace VHSCapture
             }
             // chiusura pulita: si smette di scrivere all'inizio del frame video successivo, così l'ultimo frame è intero
             if (recording && closing && pid == videoPid && pusi) { recording = false; closing = false; closed.Set(); }
-            if (recording) Enqueue(pkt);
+            // pausa pulita: stesso principio
+            if (recording && pausing && pid == videoPid && pusi) { recording = false; pausing = false; paused = true; }
+            if (recording) Write(pkt);
         }
 
         void ParsePat(byte[] p)
@@ -452,10 +611,12 @@ namespace VHSCapture
 
             lock (this)
             {
+                offset90k = 0; lastAdjVideoDts = -1; lastAdjAudioPts = -1; dropPes.Clear(); ccOut.Clear();
+                pausing = paused = resumeArmed = false;
                 if (haveKey && pat != null && pmt != null)
                 {
-                    Enqueue(pat); Enqueue(pmt);
-                    foreach (var p in gop) Enqueue(p);
+                    Write(pat); Write(pmt);
+                    foreach (var p in gop) Write(p);
                     recording = true; armed = false;
                 }
                 else { armed = true; recording = false; }   // parte al prossimo keyframe
@@ -471,6 +632,7 @@ namespace VHSCapture
                 closed.Wait(1000);          // al massimo un frame
             }
             recording = false; armed = false; closing = false; closed.Set();
+            pausing = paused = resumeArmed = false;
             var q = queue; queue = null;
             try { q?.CompleteAdding(); } catch { }
             try { writer?.Join(30000); } catch { }
@@ -689,6 +851,9 @@ namespace VHSCapture
         }
 
         public bool StopRecording() => recorder.Stop();
+        public bool IsPaused => recorder.IsPaused;
+        public void PauseRecording() { lock (recorder) recorder.Pause(); }
+        public void ResumeRecording() { lock (recorder) recorder.Resume(); }
 
         static string MuxArgs(AppSettings s, string outputFile)
         {

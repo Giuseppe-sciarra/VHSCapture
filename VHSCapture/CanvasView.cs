@@ -9,15 +9,6 @@ using System.Windows.Forms;
 
 namespace VHSCapture
 {
-    /// <summary>Chi fornisce i frame di anteprima (il motore): coda di frame pronti + restituzione dei buffer.</summary>
-    public interface IFrameSource
-    {
-        int ReadyFrames { get; }
-        bool TryTakeFrame(out FrameBuf fb);
-        void ReturnFrame(FrameBuf fb);
-        double PreviewRate { get; }
-    }
-
     /// <summary>Anteprima del canvas con selezione, spostamento e ridimensionamento delle sorgenti (stile OBS).</summary>
     public class CanvasView : Control
     {

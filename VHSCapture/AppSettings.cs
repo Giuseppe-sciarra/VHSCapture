@@ -172,6 +172,8 @@ namespace VHSCapture
         public int AutoStopSeconds { get; set; } = 30;
         public bool TrimBlankTail { get; set; } = true;        // taglia la coda blu/nera dal file
         public bool AskNameAtEnd { get; set; } = true;         // a fine registrazione chiede il nome della cassetta e rinomina
+        public string Profile { get; set; } = "";              // ultimo profilo applicato (solo per l'etichetta)
+        public bool DiagLog { get; set; } = false;             // riga di diagnostica anteprima nel Log ogni 5 s
 
         // Controllo live (zmq)
         public bool LiveControl { get; set; } = true;

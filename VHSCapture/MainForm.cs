@@ -614,6 +614,17 @@ namespace VHSCapture
             else if (final.Contains("%03d")) AppendLog("Salvato in più parti: " + string.Join(", ", RecordedFiles(final).Select(Path.GetFileName)));
             else AppendLog("Salvato: " + final);
 
+            // controllo automatico dell'audio nel file: così non si resta col dubbio
+            var toCheck = RecordedFiles(final).FirstOrDefault() ?? RecordedFiles(written).FirstOrDefault();
+            if (toCheck != null && settings.Sources.Any(x => x.Visible && x.HasAudio))
+            {
+                lblRec.Text = "Controllo audio del file…";
+                var (has, mean, max) = await Task.Run(() => FFmpeg.CheckAudio(toCheck));
+                if (!has) AppendLog("⚠ ATTENZIONE: il file NON contiene la traccia audio");
+                else if (max <= -60) AppendLog($"⚠ ATTENZIONE: l'audio nel file è SILENZIO (picco {max:0.0} dB) — controlla il dispositivo audio della sorgente");
+                else AppendLog($"Audio nel file OK: medio {mean:0.0} dB, picco {max:0.0} dB" + (max >= -0.5 ? " — satura, abbassa il volume nel mixer" : ""));
+            }
+
             finalizing = false;
             lblRec.Text = "";
             if (restartPreview && !IsDisposed && !engine.IsRunning) StartPreview();

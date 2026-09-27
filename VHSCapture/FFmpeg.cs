@@ -166,6 +166,24 @@ namespace VHSCapture
             catch (Exception ex) { return ex.Message; }
         }
 
+        /// <summary>Controlla l'audio di un file registrato (primi 30 s): null se non c'è la traccia, altrimenti (media dB, picco dB).</summary>
+        public static (bool hasAudio, double mean, double max) CheckAudio(string file)
+        {
+            try
+            {
+                using var p = Process.Start(Psi($"-hide_banner -nostats -t 30 -i \"{file}\" -map 0:a:0? -vn -af volumedetect -f null NUL"));
+                var so = p.StandardOutput.ReadToEndAsync(); var se = p.StandardError.ReadToEndAsync();
+                p.WaitForExit(60000);
+                string err = se.Result;
+                bool has = Regex.IsMatch(err, @"Stream #0:\d+.*Audio:");
+                var mm = Regex.Match(err, @"mean_volume:\s*(-?[\d.]+|-inf) dB");
+                var mx = Regex.Match(err, @"max_volume:\s*(-?[\d.]+|-inf) dB");
+                double P(Match m) => m.Success && double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : -91;
+                return (has, P(mm), P(mx));
+            }
+            catch { return (false, -91, -91); }
+        }
+
         public static bool RemuxToMp4(string mkv, string mp4, Action<string> log)
         {
             try
@@ -533,7 +551,11 @@ namespace VHSCapture
             var tsPipe = NewPipe(names.Ts, 4 << 20);
             var prPipe = NewPipe(names.Progress, 64 << 10);
             var moPipe = mon ? NewPipe(names.Monitor, 1 << 20) : null;
-            var mePipes = names.Meters.ToDictionary(kv => kv.Key, kv => NewPipe(kv.Value, 256 << 10));
+            // ffmpeg 7 inizializza il grafo DUE volte (una per analizzarlo, poi quella vera) e il filtro dei livelli
+            // apre la pipe entrambe le volte: servono più istanze in ascolto, altrimenti la seconda apertura fallisce.
+            const int meterInstances = 3;
+            var mePipes = names.Meters.ToDictionary(kv => kv.Key,
+                kv => Enumerable.Range(0, meterInstances).Select(_ => NewPipe(kv.Value, 256 << 10, meterInstances)).ToList());
 
             string args = BuildArgs(s, PW, PH, live, names, out inputMap);
             LastCommand = "ffmpeg " + args;
@@ -551,7 +573,7 @@ namespace VHSCapture
             Run("preview", () => PreviewLoop(pvPipe));
             Run("ts", () => TsLoop(tsPipe));
             Run("progress", () => TextLoop(prPipe, OnProgressLine));
-            foreach (var kv in mePipes) { var id = kv.Key; var p = kv.Value; Run("meter", () => TextLoop(p, l => OnMeterLine(id, l))); }
+            foreach (var kv in mePipes) { var id = kv.Key; foreach (var p in kv.Value) { var pp = p; Run("meter", () => TextLoop(pp, l => OnMeterLine(id, l))); } }
             if (moPipe != null) Run("monitor", () => MonitorLoop(moPipe));
 
             if (live)
@@ -562,9 +584,9 @@ namespace VHSCapture
             }
         }
 
-        NamedPipeServerStream NewPipe(string name, int inBuf)
+        NamedPipeServerStream NewPipe(string name, int inBuf, int instances = 1)
         {
-            var p = new NamedPipeServerStream(name, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, inBuf, 0);
+            var p = new NamedPipeServerStream(name, PipeDirection.In, instances, PipeTransmissionMode.Byte, PipeOptions.None, inBuf, 0);
             pipes.Add(p);
             return p;
         }

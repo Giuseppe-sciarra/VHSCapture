@@ -501,7 +501,7 @@ namespace VHSCapture
     //   - audio di ascolto → named pipe
     //  stderr resta solo per il log: niente più righe mescolate.
     // =====================================================================================
-    public class CaptureEngine : IDisposable
+    public class CaptureEngine : IDisposable, IFrameSource
     {
         public int PW { get; private set; } = 960;
         public int PH { get; private set; } = 540;
@@ -547,6 +547,7 @@ namespace VHSCapture
             inputInfo.Clear(); inputSize.Clear(); inInputSection = false;
 
             PW = Math.Clamp(previewW / 2 * 2, 480, 1280);
+            PreviewRate = double.TryParse(PreviewFps(string.IsNullOrWhiteSpace(s.Fps) ? "25" : s.Fps), NumberStyles.Float, CultureInfo.InvariantCulture, out var pr) && pr > 0 ? pr : 30;
             PH = Math.Max(2, (int)Math.Round((double)PW * s.CanvasH / s.CanvasW / 2) * 2);
 
             int n = Interlocked.Increment(ref pipeCounter);
@@ -776,9 +777,26 @@ namespace VHSCapture
 
         // ---------- lettori delle pipe ----------
 
-        FrameBuf[] bufs; int back; volatile bool uiBusy;
+        // ===== anteprima: coda di frame (buffer anti-tremolio) =====
+        // I frame letti dalla pipe finiscono in una coda; il thread di rendering del canvas li presenta a ritmo fisso.
+        // Se arrivano "a coppie" non si perdono: vengono mostrati uno per volta a distanza regolare (come OBS).
+        readonly ConcurrentQueue<FrameBuf> readyFrames = new ConcurrentQueue<FrameBuf>();
+        readonly ConcurrentQueue<FrameBuf> freeFrames = new ConcurrentQueue<FrameBuf>();
+        int poolW, poolH;
+        /// <summary>Segnalato quando arriva un nuovo frame (sveglia il thread di rendering).</summary>
+        public event Action FrameAvailable;
+        /// <summary>Frequenza a cui presentare l'anteprima (= fps del canvas, max 60).</summary>
+        public double PreviewRate { get; private set; } = 30;
 
-        // diagnostica: ritmo con cui ffmpeg consegna l'anteprima e quanti frame la UI non fa in tempo a disegnare
+        public int ReadyFrames => readyFrames.Count;
+        public bool TryTakeFrame(out FrameBuf fb) => readyFrames.TryDequeue(out fb);
+        /// <summary>Restituisce al motore un frame non più mostrato (verrà riusato).</summary>
+        public void ReturnFrame(FrameBuf fb)
+        {
+            if (fb != null && fb.W == poolW && fb.H == poolH) freeFrames.Enqueue(fb);
+        }
+
+        // diagnostica: ritmo di arrivo da ffmpeg
         readonly Stopwatch arrivalClock = Stopwatch.StartNew();
         double lastArrival, maxGap; long arrived, dropped;
         public (double fps, double maxGapMs, long dropped) TakeArrivalStats()
@@ -792,19 +810,26 @@ namespace VHSCapture
             }
         }
         double arrivedWindowStart;
-        public void FrameConsumed() => uiBusy = false;
+        public void FrameConsumed() { }   // compatibilità: con la coda non serve più
 
         void PreviewLoop(NamedPipeServerStream pipe)
         {
             int w = PW, h = PH, size = w * h * 4;
-            var local = new[] { new FrameBuf(w, h), new FrameBuf(w, h) };
-            bufs = local; back = 0; uiBusy = false;
+            // pool nuovo per queste dimensioni (i buffer vecchi eventualmente in giro vengono ignorati al ritorno)
+            while (readyFrames.TryDequeue(out _)) { }
+            while (freeFrames.TryDequeue(out _)) { }
+            poolW = w; poolH = h;
+            for (int i = 0; i < 6; i++) freeFrames.Enqueue(new FrameBuf(w, h));
             byte[] scratch = new byte[size];
             try { pipe.WaitForConnection(); } catch { return; }
             while (true)
             {
-                bool drop = stopping || uiBusy;
-                byte[] target = drop ? scratch : local[back].Data;
+                // se la coda è piena (rendering fermo) si scarta il più vecchio: latenza sempre limitata
+                if (!freeFrames.TryDequeue(out var fb))
+                {
+                    if (readyFrames.TryDequeue(out var oldest)) fb = oldest;
+                }
+                byte[] target = fb != null && !stopping ? fb.Data : scratch;
                 int got = 0;
                 try { while (got < size) { int r = pipe.Read(target, got, size - got); if (r <= 0) return; got += r; } }
                 catch { return; }
@@ -813,12 +838,11 @@ namespace VHSCapture
                     double t = arrivalClock.Elapsed.TotalSeconds;
                     if (lastArrival > 0) maxGap = Math.Max(maxGap, t - lastArrival);
                     lastArrival = t; arrived++;
-                    if (drop && !stopping) dropped++;
+                    if (fb == null && !stopping) dropped++;
                 }
-                if (drop) continue;
-                var fb = local[back];
-                uiBusy = true; back ^= 1;
-                try { FrameReady?.Invoke(fb); } catch { uiBusy = false; }
+                if (fb == null || stopping) continue;
+                readyFrames.Enqueue(fb);
+                try { FrameAvailable?.Invoke(); } catch { }
             }
         }
 
@@ -1171,7 +1195,7 @@ namespace VHSCapture
             }
             sb.Append($"-f mpegts -muxdelay 0 -muxpreload 0 -flush_packets 1 \"{PipeNames.Win(pn.Ts)}\" ");
 
-            sb.Append($"-map \"[pvs]\" -f rawvideo \"{PipeNames.Win(pn.Preview)}\" ");
+            sb.Append($"-map \"[pvs]\" -f rawvideo -flush_packets 1 \"{PipeNames.Win(pn.Preview)}\" ");
             foreach (var ml in meterLabels) sb.Append($"-map \"{ml}\" -f null NUL ");
             foreach (var al in analysisLabels) sb.Append($"-map \"{al}\" -f null NUL ");
             if (mon) sb.Append($"-map \"[amons]\" -f s16le -ar 48000 -ac 2 \"{PipeNames.Win(pn.Monitor)}\"");

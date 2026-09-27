@@ -69,7 +69,7 @@ namespace VHSCapture
             RefreshSourceList();
             RebuildMixer();
 
-            engine.FrameReady += OnFrame;
+            engine.FrameAvailable += () => canvas?.NotifyFrame();
             engine.AudioLevels += (id, rl, pl, rr, pr) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (mixerRows.TryGetValue(id, out var row)) row.Meter.SetLevels(rl, pl, rr, pr); })); } catch { } };
             engine.Stats += st => lastStats = st;
             engine.SignalState += (id, blank, kind) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => OnSignal(blank, kind))); } catch { } };
@@ -165,6 +165,7 @@ namespace VHSCapture
             canvas.OpenProperties += s2 => EditSource(s2);
             canvas.InputSizeOf = s2 => engine.GetInputSize(s2.Id);
             canvas.FrameShown += OnFrameShown;
+            canvas.FrameSource = engine;
             canvas.RemoveRequested += s2 => RemoveSource(s2);
             canvas.LockChanged += s2 => { settings.Save(); srcList.Invalidate(); canvas.Select(null); };
             var canvasCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(8), Radius = 10 };
@@ -457,8 +458,13 @@ namespace VHSCapture
         Bitmap CropPreview(string id)
         {
             var src = settings.Sources.FirstOrDefault(x => x.Id == id);
-            var fb = canvas.Frame;
-            if (src == null || !src.Visible || fb == null || !engine.IsRunning) return null;
+            if (src == null || !src.Visible || !engine.IsRunning) return null;
+            return canvas.WithFrame(fb => CropFrom(fb, src));
+        }
+
+        Bitmap CropFrom(FrameBuf fb, Source src)
+        {
+            if (fb == null) return null;
             if ((DateTime.Now - lastFrameAt).TotalSeconds > 2) return null;
             double sx = (double)fb.W / settings.CanvasW, sy = (double)fb.H / settings.CanvasH;
             var r = Rectangle.Intersect(new Rectangle((int)(src.X * sx), (int)(src.Y * sy), (int)Math.Ceiling(src.W * sx), (int)Math.Ceiling(src.H * sy)),
@@ -741,17 +747,9 @@ namespace VHSCapture
 
         // ---------------- eventi engine ----------------
 
-        /// <summary>Dal thread del motore: il frame va DIRETTO al thread di rendering del canvas, senza passare dall'interfaccia.</summary>
-        void OnFrame(FrameBuf fb)
-        {
-            if (IsDisposed) { engine.FrameConsumed(); return; }
-            canvas.SubmitFrame(fb);
-        }
-
         /// <summary>Dal thread di rendering: frame mostrato → restituito al motore + statistiche.</summary>
         void OnFrameShown()
         {
-            engine.FrameConsumed();
             System.Threading.Interlocked.Increment(ref frames);
             lastFrameAt = DateTime.Now; autoRetried = false;
             double t = paintClock.Elapsed.TotalSeconds;
@@ -993,6 +991,7 @@ namespace VHSCapture
                 {
                     lastDiagAt = DateTime.Now;
                     var (afps, agap, adrop) = engine.TakeArrivalStats();
+                    adrop += canvas.TakeLatencyDrops();
                     double now = paintClock.Elapsed.TotalSeconds;
                     double pfps = paintWindowStart > 0 ? painted / (now - paintWindowStart) : 0;
                     previewDiag = $"anteprima: arrivo {afps:0} fps (pausa max {agap:0} ms) · a schermo {pfps:0} fps (pausa max {paintMaxGap * 1000:0} ms)" + (adrop > 0 ? $" · saltati {adrop}" : "");

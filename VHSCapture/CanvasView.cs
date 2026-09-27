@@ -9,6 +9,15 @@ using System.Windows.Forms;
 
 namespace VHSCapture
 {
+    /// <summary>Chi fornisce i frame di anteprima (il motore): coda di frame pronti + restituzione dei buffer.</summary>
+    public interface IFrameSource
+    {
+        int ReadyFrames { get; }
+        bool TryTakeFrame(out FrameBuf fb);
+        void ReturnFrame(FrameBuf fb);
+        double PreviewRate { get; }
+    }
+
     /// <summary>Anteprima del canvas con selezione, spostamento e ridimensionamento delle sorgenti (stile OBS).</summary>
     public class CanvasView : Control
     {
@@ -17,7 +26,14 @@ namespace VHSCapture
         public List<Source> Sources { get; set; } = new List<Source>();   // ordine: dal basso (0) verso l'alto
         public Source Selected { get; private set; }
         volatile FrameBuf frame;
+        readonly object frameLock = new object();
         public FrameBuf Frame => frame;
+        /// <summary>Sorgente dei frame (il motore). Il canvas li prende a ritmo fisso dal proprio orologio.</summary>
+        public IFrameSource FrameSource { get; set; }
+        /// <summary>Esegue f sul frame mostrato adesso, senza che nel frattempo venga riusato (per l'anteprima nelle Proprietà).</summary>
+        public T WithFrame<T>(Func<FrameBuf, T> f) { lock (frameLock) return f(frame); }
+        long latencyDrops;
+        public long TakeLatencyDrops() => Interlocked.Exchange(ref latencyDrops, 0);
         /// <summary>Chiamato dal thread di rendering dopo aver mostrato un frame (per restituirlo al motore e per le statistiche).</summary>
         public event Action FrameShown;
         /// <summary>Dimensione reale in pixel dell'ingresso (per Alt+trascina = ritaglio).</summary>
@@ -57,22 +73,19 @@ namespace VHSCapture
         Thread renderThread;
         readonly AutoResetEvent renderSignal = new AutoResetEvent(false);
         volatile bool renderStop;
-        volatile bool newFrame;
         volatile Snapshot snap;
         volatile int clientW, clientH;
         IntPtr hwnd;
 
-        /// <summary>Dal thread del motore: nuovo frame da mostrare. Il frame NON va liberato (è un buffer del motore).</summary>
-        public void SubmitFrame(FrameBuf fb)
-        {
-            frame = fb; newFrame = true;
-            renderSignal.Set();
-        }
+        volatile bool uiDirty = true;
+
+        /// <summary>Dal motore: è arrivato un frame nella coda (sveglia il thread di rendering).</summary>
+        public void NotifyFrame() => renderSignal.Set();
 
         /// <summary>Dal thread UI: toglie il frame (pipeline ferma) e ridisegna col messaggio.</summary>
         public void SetFrame(FrameBuf fb)
         {
-            frame = fb; newFrame = false;
+            lock (frameLock) frame = fb;
             Invalidate();
         }
 
@@ -112,10 +125,11 @@ namespace VHSCapture
         protected override void OnPaint(PaintEventArgs e)
         {
             snap = BuildSnapshot();
+            uiDirty = true;
             renderSignal.Set();
         }
 
-        public new void Update() { snap = BuildSnapshot(); renderSignal.Set(); }
+        public new void Update() { snap = BuildSnapshot(); uiDirty = true; renderSignal.Set(); }
 
         // diagnostica: quanto ci mette il thread di rendering a comporre e mostrare un frame
         double renderMsSum, renderMsMax; int renderCount;
@@ -168,55 +182,91 @@ namespace VHSCapture
         [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr hdc);
         [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr hdc, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
 
+        [DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint ms);
+
+        /// <summary>
+        /// Presentazione a ritmo fisso (come OBS): ogni 1/fps secondi si prende UN frame dalla coda e lo si mostra.
+        /// Se i frame arrivano a coppie o a strappi, la coda li distribuisce in modo regolare (1 frame di ritardo).
+        /// </summary>
         void RenderLoop()
         {
-            // buffer in MEMORIA DI SISTEMA (DIB section), non una bitmap "compatibile" con lo schermo:
-            // su quella GDI+ deve rileggere i pixel dalla scheda video a ogni trasparenza ed è lentissimo.
+            try { timeBeginPeriod(1); } catch { }   // attese precise al millisecondo
             IntPtr memDC = IntPtr.Zero, memBmp = IntPtr.Zero, oldBmp = IntPtr.Zero;
             int bw = 0, bh = 0;
             Snapshot lastFull = null;
             var sw = new System.Diagnostics.Stopwatch();
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            double next = 0;
             try
             {
                 while (!renderStop)
                 {
-                    renderSignal.WaitOne(250);
+                    var src = FrameSource;
+                    double rate = src != null && src.PreviewRate > 0 ? src.PreviewRate : 30;
+                    double interval = 1.0 / rate;
+                    double now = clock.Elapsed.TotalSeconds;
+                    bool have = src != null && src.ReadyFrames > 0;
+                    int waitMs = have ? (int)Math.Max(0, Math.Floor((next - now) * 1000)) : 100;
+                    if (waitMs > 0 || !have) renderSignal.WaitOne(waitMs);
                     if (renderStop) break;
+
+                    now = clock.Elapsed.TotalSeconds;
+                    have = src != null && src.ReadyFrames > 0;
+                    bool tick = have && now >= next - 0.001;
+                    bool redraw = uiDirty;
+                    if (!tick && !redraw) continue;
+                    uiDirty = false;
+
+                    FrameBuf toReturn = null; bool shownNew = false;
+                    if (tick)
+                    {
+                        // ritardo sempre contenuto: se la coda cresce (più di 2 in attesa) si scartano i più vecchi
+                        while (src.ReadyFrames > 2 && src.TryTakeFrame(out var extra)) { src.ReturnFrame(extra); Interlocked.Increment(ref latencyDrops); }
+                        if (src.TryTakeFrame(out var f))
+                        {
+                            lock (frameLock) { toReturn = frame; frame = f; }
+                            shownNew = true;
+                        }
+                        // orologio: prossimo frame fra 1/fps; se siamo molto fuori fase (pausa, avvio) si riallinea
+                        next = Math.Abs(now - next) > interval * 2 ? now + interval : next + interval;
+                    }
+
                     var h = hwnd; var sn = snap;
                     int w = clientW, ht = clientH;
-                    if (h == IntPtr.Zero || sn == null || w <= 0 || ht <= 0) continue;
-                    bool shownNew = newFrame; newFrame = false;
-                    var fb = frame;
-                    sw.Restart();
-
-                    IntPtr wdc = GetDC(h);
-                    if (wdc == IntPtr.Zero) continue;
-                    try
+                    if (h != IntPtr.Zero && sn != null && w > 0 && ht > 0)
                     {
-                        if (memDC == IntPtr.Zero || bw != w || bh != ht)
+                        sw.Restart();
+                        IntPtr wdc = GetDC(h);
+                        if (wdc != IntPtr.Zero)
                         {
-                            if (memDC != IntPtr.Zero) { SelectObject(memDC, oldBmp); DeleteObject(memBmp); DeleteDC(memDC); }
-                            memDC = CreateCompatibleDC(wdc);
-                            var bmi = new BITMAPINFOHEADER { biSize = 40, biWidth = w, biHeight = -ht, biPlanes = 1, biBitCount = 32, biCompression = 0 };
-                            memBmp = CreateDIBSection(wdc, ref bmi, 0, out _, IntPtr.Zero, 0);
-                            oldBmp = SelectObject(memDC, memBmp);
-                            bw = w; bh = ht; lastFull = null;
+                            try
+                            {
+                                if (memDC == IntPtr.Zero || bw != w || bh != ht)
+                                {
+                                    if (memDC != IntPtr.Zero) { SelectObject(memDC, oldBmp); DeleteObject(memBmp); DeleteDC(memDC); }
+                                    memDC = CreateCompatibleDC(wdc);
+                                    var bmi = new BITMAPINFOHEADER { biSize = 40, biWidth = w, biHeight = -ht, biPlanes = 1, biBitCount = 32, biCompression = 0 };
+                                    memBmp = CreateDIBSection(wdc, ref bmi, 0, out _, IntPtr.Zero, 0);
+                                    oldBmp = SelectObject(memDC, memBmp);
+                                    bw = w; bh = ht; lastFull = null;
+                                }
+                                using (var g = Graphics.FromHdc(memDC))
+                                {
+                                    var fb = frame;
+                                    bool full = !ReferenceEquals(sn, lastFull) || fb == null;
+                                    DrawScene(g, sn, fb, full);
+                                    lastFull = sn;
+                                }
+                                BitBlt(wdc, 0, 0, w, ht, memDC, 0, 0, 0x00CC0020);
+                            }
+                            catch { }
+                            finally { ReleaseDC(h, wdc); }
                         }
-                        using (var g = Graphics.FromHdc(memDC))
-                        {
-                            // sfondo completo solo quando cambia qualcosa (dimensioni, selezione, messaggi…);
-                            // per i frame normali basta ridisegnare il video e le sovrapposizioni sopra
-                            bool full = !ReferenceEquals(sn, lastFull) || fb == null;
-                            DrawScene(g, sn, fb, full);
-                            lastFull = sn;
-                        }
-                        BitBlt(wdc, 0, 0, w, ht, memDC, 0, 0, 0x00CC0020);
+                        sw.Stop();
+                        lock (renderStatLock) { double ms = sw.Elapsed.TotalMilliseconds; renderMsSum += ms; renderCount++; if (ms > renderMsMax) renderMsMax = ms; }
                     }
-                    catch { }
-                    finally { ReleaseDC(h, wdc); }
 
-                    sw.Stop();
-                    lock (renderStatLock) { double ms = sw.Elapsed.TotalMilliseconds; renderMsSum += ms; renderCount++; if (ms > renderMsMax) renderMsMax = ms; }
+                    if (toReturn != null) src.ReturnFrame(toReturn);
                     if (shownNew) { try { FrameShown?.Invoke(); } catch { } }
                 }
             }

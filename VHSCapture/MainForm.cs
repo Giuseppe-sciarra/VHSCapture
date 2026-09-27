@@ -164,6 +164,7 @@ namespace VHSCapture
             };
             canvas.OpenProperties += s2 => EditSource(s2);
             canvas.InputSizeOf = s2 => engine.GetInputSize(s2.Id);
+            canvas.FrameShown += OnFrameShown;
             canvas.RemoveRequested += s2 => RemoveSource(s2);
             canvas.LockChanged += s2 => { settings.Save(); srcList.Invalidate(); canvas.Select(null); };
             var canvasCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(8), Radius = 10 };
@@ -740,26 +741,22 @@ namespace VHSCapture
 
         // ---------------- eventi engine ----------------
 
-        void OnFrame(FrameBuf bmp)
+        /// <summary>Dal thread del motore: il frame va DIRETTO al thread di rendering del canvas, senza passare dall'interfaccia.</summary>
+        void OnFrame(FrameBuf fb)
         {
-            if (!IsHandleCreated || IsDisposed) { engine.FrameConsumed(); return; }
-            try
-            {
-                BeginInvoke(new Action(() =>
-                {
-                    try
-                    {
-                        canvas.SetFrame(bmp);
-                        canvas.Update();          // disegna subito questo frame
-                        frames++; lastFrameAt = DateTime.Now; autoRetried = false;
-                        double t = paintClock.Elapsed.TotalSeconds;
-                        if (lastPaint > 0) paintMaxGap = Math.Max(paintMaxGap, t - lastPaint);
-                        lastPaint = t; painted++;
-                    }
-                    finally { engine.FrameConsumed(); }
-                }));
-            }
-            catch { engine.FrameConsumed(); }
+            if (IsDisposed) { engine.FrameConsumed(); return; }
+            canvas.SubmitFrame(fb);
+        }
+
+        /// <summary>Dal thread di rendering: frame mostrato → restituito al motore + statistiche.</summary>
+        void OnFrameShown()
+        {
+            engine.FrameConsumed();
+            System.Threading.Interlocked.Increment(ref frames);
+            lastFrameAt = DateTime.Now; autoRetried = false;
+            double t = paintClock.Elapsed.TotalSeconds;
+            if (lastPaint > 0) paintMaxGap = Math.Max(paintMaxGap, t - lastPaint);
+            lastPaint = t; System.Threading.Interlocked.Increment(ref painted);
         }
 
         void OnEngineExited(int code)

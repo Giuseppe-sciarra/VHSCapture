@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace VHSCapture
@@ -15,7 +16,10 @@ namespace VHSCapture
         public int CanvasH { get; set; } = 1080;
         public List<Source> Sources { get; set; } = new List<Source>();   // ordine: dal basso (0) verso l'alto
         public Source Selected { get; private set; }
-        public FrameBuf Frame { get; private set; }
+        volatile FrameBuf frame;
+        public FrameBuf Frame => frame;
+        /// <summary>Chiamato dal thread di rendering dopo aver mostrato un frame (per restituirlo al motore e per le statistiche).</summary>
+        public event Action FrameShown;
         /// <summary>Dimensione reale in pixel dell'ingresso (per Alt+trascina = ritaglio).</summary>
         public Func<Source, (int w, int h)?> InputSizeOf { get; set; }
         public string Message { get; set; } = "";
@@ -38,16 +42,160 @@ namespace VHSCapture
 
         public CanvasView()
         {
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            // niente doppio buffer di WinForms e niente cancellazione dello sfondo: disegna tutto il thread di rendering
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.Opaque | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer, false);
             BackColor = Color.Black;
             TabStop = true;
         }
 
-        /// <summary>Il frame appartiene al motore (doppio buffer riusato): qui NON va fatto Dispose.</summary>
+        // =====================================================================================
+        //  Thread di rendering dedicato (come OBS): i frame arrivano qui direttamente dal motore,
+        //  senza passare dal thread dell'interfaccia. L'interfaccia fornisce solo un'istantanea
+        //  di cosa disegnare sopra (selezione, etichette, badge REC).
+        // =====================================================================================
+        Thread renderThread;
+        readonly AutoResetEvent renderSignal = new AutoResetEvent(false);
+        volatile bool renderStop;
+        volatile bool newFrame;
+        volatile Snapshot snap;
+        volatile int clientW, clientH;
+        IntPtr hwnd;
+
+        /// <summary>Dal thread del motore: nuovo frame da mostrare. Il frame NON va liberato (è un buffer del motore).</summary>
+        public void SubmitFrame(FrameBuf fb)
+        {
+            frame = fb; newFrame = true;
+            renderSignal.Set();
+        }
+
+        /// <summary>Dal thread UI: toglie il frame (pipeline ferma) e ridisegna col messaggio.</summary>
         public void SetFrame(FrameBuf fb)
         {
-            Frame = fb;
+            frame = fb; newFrame = false;
             Invalidate();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            hwnd = Handle;
+            clientW = ClientSize.Width; clientH = ClientSize.Height;
+            snap = BuildSnapshot();
+            if (renderThread == null)
+            {
+                renderStop = false;
+                renderThread = new Thread(RenderLoop) { IsBackground = true, Name = "canvas-render", Priority = ThreadPriority.AboveNormal };
+                renderThread.Start();
+            }
+        }
+
+        protected override void OnHandleDestroyed(EventArgs e)
+        {
+            renderStop = true; renderSignal.Set();
+            try { renderThread?.Join(500); } catch { }
+            renderThread = null;
+            hwnd = IntPtr.Zero;
+            base.OnHandleDestroyed(e);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            clientW = ClientSize.Width; clientH = ClientSize.Height;
+            Invalidate();
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e) { /* disegna il thread di rendering */ }
+
+        /// <summary>Il thread UI qui NON disegna: aggiorna l'istantanea e sveglia il thread di rendering.</summary>
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            snap = BuildSnapshot();
+            renderSignal.Set();
+        }
+
+        public new void Update() { snap = BuildSnapshot(); renderSignal.Set(); }
+
+        class Snapshot
+        {
+            public int W, H; public Rectangle Dr; public bool Dark;
+            public string Message, RecText;
+            public Rectangle[] Thin; public Rectangle Sel; public bool HasSel, SelLocked; public Rectangle[] SelHandles; public string SelLabel;
+        }
+
+        Snapshot BuildSnapshot()
+        {
+            var dr = DisplayRect();
+            var sn = new Snapshot
+            {
+                W = ClientSize.Width, H = ClientSize.Height, Dr = dr, Dark = Theme.Dark,
+                Message = string.IsNullOrEmpty(Message) ? "Nessuna anteprima" : Message, RecText = RecText,
+                Thin = Sources.Where(x => x.Visible && x != Selected).Select(x => ToScreen(RectOf(x))).ToArray(),
+            };
+            if (Selected != null && Selected.Visible)
+            {
+                sn.HasSel = true; sn.SelLocked = Selected.Locked;
+                sn.Sel = ToScreen(RectOf(Selected));
+                sn.SelHandles = Handles(sn.Sel);
+                string lbl = (Selected.Locked ? "(bloccata)  " : "") + $"{Selected.Name}   {Selected.W}×{Selected.H}   pos {Selected.X},{Selected.Y}";
+                if (Selected.CropL + Selected.CropT + Selected.CropR + Selected.CropB > 0) lbl += $"   ritaglio {Selected.CropL},{Selected.CropT},{Selected.CropR},{Selected.CropB}";
+                sn.SelLabel = lbl;
+            }
+            return sn;
+        }
+
+        [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hWnd);
+        [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int w, int h);
+        [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+        [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+        [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr hdc, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
+
+        void RenderLoop()
+        {
+            IntPtr memDC = IntPtr.Zero, memBmp = IntPtr.Zero, oldBmp = IntPtr.Zero;
+            int bw = 0, bh = 0;
+            try
+            {
+                while (!renderStop)
+                {
+                    renderSignal.WaitOne(250);
+                    if (renderStop) break;
+                    var h = hwnd; var sn = snap;
+                    int w = clientW, ht = clientH;
+                    if (h == IntPtr.Zero || sn == null || w <= 0 || ht <= 0) continue;
+                    bool shownNew = newFrame; newFrame = false;
+                    var fb = frame;
+
+                    IntPtr wdc = GetDC(h);
+                    if (wdc == IntPtr.Zero) continue;
+                    try
+                    {
+                        if (memDC == IntPtr.Zero || bw != w || bh != ht)
+                        {
+                            if (memDC != IntPtr.Zero) { SelectObject(memDC, oldBmp); DeleteObject(memBmp); DeleteDC(memDC); }
+                            memDC = CreateCompatibleDC(wdc);
+                            memBmp = CreateCompatibleBitmap(wdc, w, ht);
+                            oldBmp = SelectObject(memDC, memBmp);
+                            bw = w; bh = ht;
+                        }
+                        // composizione nel buffer: sfondo, video, sovrapposizioni → poi un'unica copia sulla finestra (niente sfarfallio)
+                        using (var g = Graphics.FromHdc(memDC)) DrawScene(g, sn, fb);
+                        BitBlt(wdc, 0, 0, w, ht, memDC, 0, 0, 0x00CC0020);
+                    }
+                    catch { }
+                    finally { ReleaseDC(h, wdc); }
+
+                    if (shownNew) { try { FrameShown?.Invoke(); } catch { } }
+                }
+            }
+            finally
+            {
+                if (memDC != IntPtr.Zero) { SelectObject(memDC, oldBmp); DeleteObject(memBmp); DeleteDC(memDC); }
+            }
         }
 
         // ---- disegno veloce del frame con GDI (StretchDIBits): molto più rapido di GDI+ DrawImage ----
@@ -107,36 +255,33 @@ namespace VHSCapture
         }
 
         // ---------- paint ----------
-        protected override void OnPaint(PaintEventArgs e)
+        static void DrawScene(Graphics g, Snapshot sn, FrameBuf fb)
         {
-            var g = e.Graphics;
-            g.Clear(Theme.Dark ? Color.FromArgb(22, 22, 24) : Color.FromArgb(52, 52, 56));
-            var dr = DisplayRect();
+            g.Clear(sn.Dark ? Color.FromArgb(22, 22, 24) : Color.FromArgb(52, 52, 56));
+            var dr = sn.Dr;
             if (dr.Width <= 0) return;
 
-            g.FillRectangle(Brushes.Black, dr);
-            if (Frame != null)
+            if (fb != null)
             {
-                try { DrawFrame(g, Frame, dr); } catch { }
+                try { DrawFrame(g, fb, dr); } catch { }
             }
             else
             {
-                var f = MsgFont;
+                g.FillRectangle(Brushes.Black, dr);
                 using var b = new SolidBrush(Color.Gray);
                 var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                g.DrawString(string.IsNullOrEmpty(Message) ? "Nessuna anteprima" : Message, f, b, dr, sf);
+                g.DrawString(sn.Message, MsgFont, b, dr, sf);
             }
-            if (RecText != null)
+            if (sn.RecText != null)
             {
                 // bordo rosso + badge: si vede subito che stai registrando, e il video continua a scorrere sotto
                 using (var pen = new Pen(Theme.Rec, 3)) g.DrawRectangle(pen, dr.X - 2, dr.Y - 2, dr.Width + 3, dr.Height + 3);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                var f = RecFont;
-                var sz = g.MeasureString(RecText, f);
+                var sz = g.MeasureString(sn.RecText, RecFont);
                 var br = new Rectangle(dr.X + 12, dr.Y + 12, (int)sz.Width + 20, (int)sz.Height + 8);
                 using (var path = Ui.Rounded(br, br.Height / 2))
                 using (var b = new SolidBrush(Color.FromArgb(220, Theme.Rec))) g.FillPath(b, path);
-                g.DrawString(RecText, f, Brushes.White, br.X + 10, br.Y + 4);
+                g.DrawString(sn.RecText, RecFont, Brushes.White, br.X + 10, br.Y + 4);
                 g.SmoothingMode = SmoothingMode.None;
             }
             else
@@ -144,13 +289,12 @@ namespace VHSCapture
 
             // contorni sorgenti non selezionate (tenui)
             using (var thin = new Pen(Color.FromArgb(110, 255, 255, 255)) { DashStyle = DashStyle.Dot })
-                foreach (var s in Sources.Where(x => x.Visible && x != Selected))
-                    g.DrawRectangle(thin, ToScreen(RectOf(s)));
+                foreach (var r in sn.Thin) g.DrawRectangle(thin, r);
 
-            if (Selected != null && Selected.Visible)
+            if (sn.HasSel)
             {
-                var sr = ToScreen(RectOf(Selected));
-                if (Selected.Locked)
+                var sr = sn.Sel;
+                if (sn.SelLocked)
                 {
                     using var lp = new Pen(Theme.Accent, 2) { DashStyle = DashStyle.Dash };
                     g.DrawRectangle(lp, sr);
@@ -160,17 +304,14 @@ namespace VHSCapture
                     using var pen = new Pen(Theme.Rec, 2);
                     g.DrawRectangle(pen, sr);
                     using var hb = new SolidBrush(Theme.Rec);
-                    foreach (var h in Handles(sr)) g.FillRectangle(hb, h);
+                    foreach (var h in sn.SelHandles) g.FillRectangle(hb, h);
                 }
-                var f = LabelFont;
-                string lbl = (Selected.Locked ? "(bloccata)  " : "") + $"{Selected.Name}   {Selected.W}×{Selected.H}   pos {Selected.X},{Selected.Y}";
-                if (Selected.CropL + Selected.CropT + Selected.CropR + Selected.CropB > 0) lbl += $"   ritaglio {Selected.CropL},{Selected.CropT},{Selected.CropR},{Selected.CropB}";
-                var sz = g.MeasureString(lbl, f);
+                var sz = g.MeasureString(sn.SelLabel, LabelFont);
                 var lr = new RectangleF(sr.X, sr.Y - sz.Height - 2, sz.Width + 6, sz.Height);
                 if (lr.Y < dr.Y) lr.Y = sr.Y + 2;
                 using var bb = new SolidBrush(Color.FromArgb(200, 0, 0, 0));
                 g.FillRectangle(bb, lr);
-                g.DrawString(lbl, f, Brushes.White, lr.X + 3, lr.Y);
+                g.DrawString(sn.SelLabel, LabelFont, Brushes.White, lr.X + 3, lr.Y);
             }
         }
 

@@ -18,7 +18,7 @@ namespace VHSCapture
         public HMeter()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-            Height = 30;
+            Height = 38;
         }
 
         public void SetLevels(double rmsL, double peakL, double rmsR, double peakR)
@@ -42,44 +42,44 @@ namespace VHSCapture
 
         protected override void OnPaint(PaintEventArgs e)
         {
+            // stile OBS: zone sempre visibili in tenue, il livello le accende; linea bianca = picco trattenuto
             var g = e.Graphics;
             g.Clear(Parent?.BackColor ?? Theme.Panel);
-            int x0 = 0, w = Width - 1;
-            int barH = 6, gap = 2, y0 = 1;
+            int w = Width - 1, barH = 7, gap = 3, y0 = 1;
             double frac(double db) => Math.Clamp((db + 60.0) / 60.0, 0, 1);
-            int xY = x0 + (int)(w * frac(-20)), xR = x0 + (int)(w * frac(-9));
-            int a = Muted ? 90 : 255;
+            int xY = (int)(w * frac(-20)), xR = (int)(w * frac(-9));
+            int alpha = Muted ? 110 : 255;
 
-            using var bg = new SolidBrush(Theme.Dark ? Color.FromArgb(28, 28, 30) : Color.FromArgb(222, 222, 228));
-            using var green = new SolidBrush(Color.FromArgb(a, 60, 190, 90));
-            using var yellow = new SolidBrush(Color.FromArgb(a, 240, 200, 40));
-            using var red = new SolidBrush(Color.FromArgb(a, 230, 60, 60));
-            using var gD = new SolidBrush(Color.FromArgb(a * 35 / 100, 60, 190, 90));
-            using var yD = new SolidBrush(Color.FromArgb(a * 35 / 100, 240, 200, 40));
-            using var rD = new SolidBrush(Color.FromArgb(a * 35 / 100, 230, 60, 60));
-            using var holdPen = new Pen(Color.FromArgb(a, Theme.Fore), 2);
+            Color G = Color.FromArgb(76, 204, 96), Y = Color.FromArgb(240, 200, 40), R = Color.FromArgb(235, 70, 60);
+            int dimA = Theme.Dark ? 55 : 70;
+            using var gDim = new SolidBrush(Color.FromArgb(dimA, G)); using var yDim = new SolidBrush(Color.FromArgb(dimA, Y)); using var rDim = new SolidBrush(Color.FromArgb(dimA, R));
+            using var gOn = new SolidBrush(Color.FromArgb(alpha, G)); using var yOn = new SolidBrush(Color.FromArgb(alpha, Y)); using var rOn = new SolidBrush(Color.FromArgb(alpha, R));
+            using var pkBr = new SolidBrush(Color.FromArgb(alpha * 55 / 100, Theme.Fore));
+            using var holdPen = new Pen(Color.FromArgb(alpha, Theme.Dark ? Color.White : Color.Black), 2);
 
             for (int c = 0; c < 2; c++)
             {
                 int y = y0 + c * (barH + gap);
-                g.FillRectangle(bg, x0, y, w, barH);
-                Bar(g, x0, y, w, barH, frac(peak[c]), xY, xR, gD, yD, rD);
-                Bar(g, x0, y, w, barH, frac(rms[c]), xY, xR, green, yellow, red);
-                if (hold[c] > -60) { int hx = x0 + (int)(w * frac(hold[c])); g.DrawLine(holdPen, hx, y, hx, y + barH); }
+                Bar(g, 0, y, w, barH, 1.0, xY, xR, gDim, yDim, rDim);          // zone di sfondo
+                Bar(g, 0, y, w, barH, frac(rms[c]), xY, xR, gOn, yOn, rOn);     // livello (RMS)
+                int px = (int)(w * frac(peak[c]));                              // picco istantaneo: tacca sottile
+                if (peak[c] > -60) g.FillRectangle(pkBr, Math.Max(0, px - 1), y, 2, barH);
+                if (hold[c] > -60) { int hx = (int)(w * frac(hold[c])); g.DrawLine(holdPen, hx, y - 1, hx, y + barH); }
             }
 
-            // scala in dB come OBS
-            int ty = y0 + 2 * (barH + gap) + 1;
-            using var tick = new Pen(Theme.Border);
-            using var f = new Font("Segoe UI", 6.5f);
-            foreach (int db in new[] { -60, -50, -40, -30, -20, -10, -5, 0 })
+            // scala: tacche ogni 5 dB, numeri ogni 10 (come OBS, senza sovrapposizioni)
+            int ty = y0 + 2 * (barH + gap);
+            using var tick = new Pen(Theme.Muted);
+            using var f = new Font("Segoe UI", 7f);
+            for (int db = -60; db <= 0; db += 5)
             {
-                int tx = x0 + (int)(w * frac(db));
-                g.DrawLine(tick, tx, ty, tx, ty + 3);
+                int tx = (int)(w * frac(db));
+                g.DrawLine(tick, tx, ty, tx, ty + (db % 10 == 0 ? 4 : 2));
+                if (db % 10 != 0 && db != -5) continue;
                 string t = db.ToString();
-                var sz = TextRenderer.MeasureText(t, f);
+                var sz = TextRenderer.MeasureText(t, f, Size.Empty, TextFormatFlags.NoPadding);
                 int lx = Math.Clamp(tx - sz.Width / 2, 0, Width - sz.Width);
-                TextRenderer.DrawText(g, t, f, new Point(lx, ty + 3), Theme.Muted);
+                TextRenderer.DrawText(g, t, f, new Point(lx, ty + 5), Theme.Muted, TextFormatFlags.NoPadding);
             }
         }
 
@@ -107,17 +107,17 @@ namespace VHSCapture
         {
             Src = s;
             Tag = "panel";
-            Height = 104;
+            Height = 112;
             Padding = new Padding(0, 0, 0, 8);
 
             var name = new Label { Text = s.Name, AutoSize = true, Left = 0, Top = 0, Font = new Font("Segoe UI Semibold", 9.5f) };
             lblVal = new Label { AutoSize = false, Width = 70, Height = 18, Top = 0, TextAlign = ContentAlignment.TopRight, Anchor = AnchorStyles.Top | AnchorStyles.Right };
             var dev = new Label { Text = "🎤 " + s.AudioDevice, AutoSize = false, Left = 0, Top = 19, Height = 16, Tag = "muted", Font = new Font("Segoe UI", 8f), AutoEllipsis = true, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
             lblState = new Label { AutoSize = false, Width = 110, Height = 16, Top = 19, TextAlign = ContentAlignment.TopRight, Font = new Font("Segoe UI", 8f), Anchor = AnchorStyles.Top | AnchorStyles.Right };
-            Meter = new HMeter { Left = 0, Top = 38, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right, Muted = s.Muted };
-            fader = new SafeTrackBar { Left = -6, Top = 70, Height = 28, Minimum = -60, Maximum = 12, TickStyle = TickStyle.None, AutoSize = false, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right, Value = Math.Clamp((int)Math.Round(s.VolumeDb), -60, 12) };
+            Meter = new HMeter { Left = 0, Top = 40, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right, Muted = s.Muted };
+            fader = new SafeTrackBar { Left = -6, Top = 80, Height = 28, Minimum = -60, Maximum = 12, TickStyle = TickStyle.None, AutoSize = false, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right, Value = Math.Clamp((int)Math.Round(s.VolumeDb), -60, 12) };
             btnMute = Ui.IconBtn(s.Muted ? "🔇" : "🔊", "Muto", null);
-            btnMute.Top = 68; btnMute.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            btnMute.Top = 78; btnMute.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             if (s.Muted) btnMute.Variant = "danger";
 
             fader.ValueChanged += (o, e) => { Src.VolumeDb = fader.Value; UpdateVal(); VolumeChanged?.Invoke(Src); };

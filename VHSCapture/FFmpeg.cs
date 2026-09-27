@@ -250,7 +250,7 @@ namespace VHSCapture
     }
 
     // =====================================================================================
-    //  Frame di anteprima (BGRA top-down), disegnato con StretchDIBits: niente Bitmap, niente GDI+
+    //  Frame di anteprima (BGRA top-down), disegnato con StretchDIBits
     // =====================================================================================
     public class FrameBuf
     {
@@ -264,7 +264,205 @@ namespace VHSCapture
     }
 
     // =====================================================================================
-    //  Motore di cattura
+    //  Registratore: riceve l'MPEG-TS già codificato e lo scrive su file con un processo
+    //  ffmpeg separato (come obs-ffmpeg-mux). La pipeline di cattura non si ferma MAI.
+    // =====================================================================================
+    public class TsRecorder
+    {
+        const int PKT = 188;
+        public event Action<string> Log;
+
+        // stato del flusso
+        byte[] pat, pmt;
+        int pmtPid = -1, videoPid = -1;
+        readonly List<byte[]> gop = new List<byte[]>();   // pacchetti dall'ultimo keyframe (pre-roll)
+        long gopBytes;
+        bool haveKey;
+        readonly byte[] carry = new byte[PKT]; int carryLen;
+
+        // registrazione
+        Process mux;
+        System.Collections.Concurrent.BlockingCollection<byte[]> queue;
+        Thread writer;
+        volatile bool armed, recording, closing;
+        readonly ManualResetEventSlim closed = new ManualResetEventSlim(true);
+        public bool IsRecording => recording || armed;
+        public string LastCommand { get; private set; }
+
+        /// <summary>Chiamato dal thread che legge la pipe TS dell'encoder.</summary>
+        public void Feed(byte[] buf, int n)
+        {
+            int i = 0;
+            // riallinea ai pacchetti da 188 byte
+            if (carryLen > 0)
+            {
+                int need = PKT - carryLen, take = Math.Min(need, n);
+                Buffer.BlockCopy(buf, 0, carry, carryLen, take); carryLen += take; i = take;
+                if (carryLen == PKT) { OnPacket(carry, 0); carryLen = 0; }
+            }
+            while (i + PKT <= n)
+            {
+                if (buf[i] != 0x47) { i++; continue; }   // perso l'allineamento: cerca il sync byte
+                OnPacket(buf, i); i += PKT;
+            }
+            if (i < n) { Buffer.BlockCopy(buf, i, carry, 0, n - i); carryLen = n - i; }
+        }
+
+        void OnPacket(byte[] b, int o)
+        {
+            int pid = ((b[o + 1] & 0x1F) << 8) | b[o + 2];
+            bool pusi = (b[o + 1] & 0x40) != 0;
+            int afc = (b[o + 3] >> 4) & 3;
+            var pkt = new byte[PKT]; Buffer.BlockCopy(b, o, pkt, 0, PKT);
+
+            if (pid == 0 && pusi) { pat = pkt; ParsePat(pkt); }
+            else if (pid == pmtPid && pusi) { pmt = pkt; ParsePmt(pkt); }
+
+            bool key = false;
+            if (pid == videoPid && pusi && (afc == 2 || afc == 3) && pkt[4] > 0 && (pkt[5] & 0x40) != 0) key = true;   // random_access_indicator
+
+            if (key)
+            {
+                // nuovo GOP: il pre-roll riparte da qui
+                gop.Clear(); gopBytes = 0; haveKey = true;
+                if (armed && pat != null && pmt != null)
+                {
+                    armed = false; recording = true;
+                    Enqueue(pat); Enqueue(pmt);
+                }
+            }
+            if (haveKey && pid != 0 && pid != pmtPid)
+            {
+                if (gopBytes < 64L << 20) { gop.Add(pkt); gopBytes += PKT; }
+                else { gop.Clear(); gopBytes = 0; haveKey = false; }
+            }
+            // chiusura pulita: si smette di scrivere all'inizio del frame video successivo, così l'ultimo frame è intero
+            if (recording && closing && pid == videoPid && pusi) { recording = false; closing = false; closed.Set(); }
+            if (recording) Enqueue(pkt);
+        }
+
+        void ParsePat(byte[] p)
+        {
+            int ptr = 4 + 1 + p[4];            // pointer_field
+            int secLen = ((p[ptr + 1] & 0x0F) << 8) | p[ptr + 2];
+            int end = Math.Min(ptr + 3 + secLen - 4, PKT);
+            for (int i = ptr + 8; i + 4 <= end; i += 4)
+            {
+                int prog = (p[i] << 8) | p[i + 1];
+                int pidv = ((p[i + 2] & 0x1F) << 8) | p[i + 3];
+                if (prog != 0) { pmtPid = pidv; return; }
+            }
+        }
+
+        void ParsePmt(byte[] p)
+        {
+            int ptr = 4 + 1 + p[4];
+            int secLen = ((p[ptr + 1] & 0x0F) << 8) | p[ptr + 2];
+            int end = Math.Min(ptr + 3 + secLen - 4, PKT);
+            int progInfoLen = ((p[ptr + 10] & 0x0F) << 8) | p[ptr + 11];
+            int i = ptr + 12 + progInfoLen;
+            while (i + 5 <= end)
+            {
+                int type = p[i];
+                int pidv = ((p[i + 1] & 0x1F) << 8) | p[i + 2];
+                int esLen = ((p[i + 3] & 0x0F) << 8) | p[i + 4];
+                if (type == 0x1B || type == 0x24) { videoPid = pidv; return; }   // H.264 / HEVC
+                i += 5 + esLen;
+            }
+        }
+
+        void Enqueue(byte[] pkt)
+        {
+            var q = queue;
+            if (q == null) return;
+            // mai lanciare eccezioni qui: bloccherebbe la lettura della pipe TS e quindi tutta la pipeline
+            try { q.TryAdd(pkt); } catch { }
+        }
+
+        /// <summary>Inizia a registrare: scrive subito dall'ultimo keyframe (nessun frame perso, nessuno scatto).</summary>
+        public void Start(string muxArgs)
+        {
+            Stop(false);
+            LastCommand = "ffmpeg " + muxArgs;
+            Log?.Invoke("mux: " + LastCommand);
+            var psi = FFmpeg.Psi(muxArgs);
+            mux = new Process { StartInfo = psi };
+            mux.ErrorDataReceived += (o, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) Log?.Invoke("mux: " + e.Data); };
+            mux.OutputDataReceived += (o, e) => { };
+            mux.Start();
+            mux.BeginErrorReadLine(); mux.BeginOutputReadLine();
+            try { mux.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { }
+
+            queue = new System.Collections.Concurrent.BlockingCollection<byte[]>(new System.Collections.Concurrent.ConcurrentQueue<byte[]>(), 1_500_000); // ~280 MB max
+            var q = queue; var stdin = mux.StandardInput.BaseStream;
+            writer = new Thread(() =>
+            {
+                var buf = new byte[PKT * 512]; int used = 0;
+                try
+                {
+                    foreach (var pkt in q.GetConsumingEnumerable())
+                    {
+                        Buffer.BlockCopy(pkt, 0, buf, used, PKT); used += PKT;
+                        if (used == buf.Length || q.Count == 0) { stdin.Write(buf, 0, used); used = 0; if (q.Count == 0) stdin.Flush(); }
+                    }
+                    if (used > 0) stdin.Write(buf, 0, used);
+                    stdin.Flush();
+                }
+                catch (Exception ex) { Log?.Invoke("mux: scrittura interrotta: " + ex.Message); }
+                try { stdin.Close(); } catch { }
+            }) { IsBackground = true, Name = "mux-writer" };
+            writer.Start();
+
+            lock (this)
+            {
+                if (haveKey && pat != null && pmt != null)
+                {
+                    Enqueue(pat); Enqueue(pmt);
+                    foreach (var p in gop) Enqueue(p);
+                    recording = true; armed = false;
+                }
+                else { armed = true; recording = false; }   // parte al prossimo keyframe
+            }
+        }
+
+        /// <summary>Ferma: chiude lo stdin del muxer, che finalizza il file. Ritorna true se il muxer è uscito pulito.</summary>
+        public bool Stop(bool wait = true)
+        {
+            if (recording && wait)
+            {
+                closed.Reset(); closing = true;
+                closed.Wait(1000);          // al massimo un frame
+            }
+            recording = false; armed = false; closing = false; closed.Set();
+            var q = queue; queue = null;
+            try { q?.CompleteAdding(); } catch { }
+            try { writer?.Join(30000); } catch { }
+            writer = null;
+            var m = mux; mux = null;
+            if (m == null) return true;
+            bool ok = true;
+            try
+            {
+                if (!m.WaitForExit(wait ? 60000 : 5000)) { Log?.Invoke("mux non risponde, chiusura forzata"); try { m.Kill(); } catch { } ok = false; }
+                else ok = m.ExitCode == 0;
+            }
+            catch { ok = false; }
+            try { m.Dispose(); } catch { }
+            return ok;
+        }
+
+        public bool MuxAlive => mux != null && !mux.HasExited;
+    }
+
+    // =====================================================================================
+    //  Motore di cattura: UN processo ffmpeg sempre acceso (come la pipeline di OBS).
+    //  Compone il canvas, codifica SEMPRE (encoder hardware), manda:
+    //   - anteprima BGRA  → named pipe
+    //   - MPEG-TS codificato → named pipe → TsRecorder (registra senza fermare niente)
+    //   - livelli audio   → una named pipe per sorgente
+    //   - statistiche     → named pipe (-progress)
+    //   - audio di ascolto → named pipe
+    //  stderr resta solo per il log: niente più righe mescolate.
     // =====================================================================================
     public class CaptureEngine : IDisposable
     {
@@ -272,92 +470,112 @@ namespace VHSCapture
         public int PH { get; private set; } = 540;
 
         public event Action<FrameBuf> FrameReady;
-        public event Action<string, double, double, double, double> AudioLevels;   // id sorgente, rmsL, peakL, rmsR, peakR (dB)
-        public event Action<byte[], int> MonitorData;                       // PCM s16le 48k stereo
+        public event Action<string, double, double, double, double> AudioLevels;
+        public event Action<byte[], int> MonitorData;
         public event Action<EngineStats> Stats;
         public event Action<string> Log;
         public event Action<int> Exited;
 
         public bool IsRunning => proc != null && !proc.HasExited;
-        public bool IsRecording { get; private set; }
+        public bool IsRecording => recorder.IsRecording;
         public bool LiveControl => zmq != null && zmq.Enabled;
         public string LastCommand { get; private set; }
+        public TsRecorder Recorder => recorder;
 
         Process proc; volatile bool stopping;
         ZmqControl zmq;
-        NamedPipeServerStream pvPipe, monPipe;
-        Thread pvThread, monThread;
+        readonly TsRecorder recorder = new TsRecorder();
+        readonly List<NamedPipeServerStream> pipes = new List<NamedPipeServerStream>();
+        readonly List<Thread> threads = new List<Thread>();
         HashSet<string> activeIds = new HashSet<string>(), activeAudioIds = new HashSet<string>();
-        bool hasMix;   // esiste il ramo di mix (registrazione o ascolto): lì c'è il filtro del muto
-        Dictionary<int, string> inputMap = new Dictionary<int, string>();   // indice input ffmpeg → id sorgente
+        bool hasMix;
+        Dictionary<int, string> inputMap = new Dictionary<int, string>();
         readonly ConcurrentDictionary<string, string> inputInfo = new ConcurrentDictionary<string, string>();
         readonly ConcurrentDictionary<string, (int w, int h)> inputSize = new ConcurrentDictionary<string, (int, int)>();
         static int pipeCounter;
-
-        // cpu
         TimeSpan lastCpu; DateTime lastCpuAt;
 
-        /// <summary>Avvia ffmpeg. previewW = larghezza anteprima desiderata (≈ larghezza del riquadro a schermo).</summary>
-        public void Start(AppSettings s, string outputFile, int previewW, bool monitor)
+        public CaptureEngine() { recorder.Log += l => Log?.Invoke(l); }
+
+        public void Start(AppSettings s, int previewW, bool monitor)
         {
             Stop();
             stopping = false;
-            IsRecording = outputFile != null;
             inputInfo.Clear(); inputSize.Clear(); inInputSection = false;
 
             PW = Math.Clamp(previewW / 2 * 2, 480, 1280);
             PH = Math.Max(2, (int)Math.Round((double)PW * s.CanvasH / s.CanvasW / 2) * 2);
 
             int n = Interlocked.Increment(ref pipeCounter);
-            string pvName = $"vhscapture_pv_{Environment.ProcessId}_{n}";
-            string monName = $"vhscapture_mon_{Environment.ProcessId}_{n}";
-
-            // pipe con buffer grande: una lettura per frame invece di centinaia (la pipe di stdout è da 4 KB)
-            pvPipe = new NamedPipeServerStream(pvName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, PW * PH * 4 * 3, 0);
-            bool hasAudio = s.Sources.Any(x => x.Visible && x.HasAudio && IsUsable(x));
-            bool mon = monitor && hasAudio;
-            if (mon) monPipe = new NamedPipeServerStream(monName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, 1 << 20, 0);
-
+            string tag = $"{Environment.ProcessId}_{n}";
             bool live = s.LiveControl && FFmpeg.HasZmq;
             activeIds = new HashSet<string>(s.Sources.Where(x => x.Visible && IsUsable(x)).Select(x => x.Id));
-            activeAudioIds = new HashSet<string>(s.Sources.Where(x => x.Visible && IsUsable(x) && x.HasAudio).Select(x => x.Id));
+            var audioIds = s.Sources.Where(x => x.Visible && IsUsable(x) && x.HasAudio).Select(x => x.Id).ToList();
+            activeAudioIds = new HashSet<string>(audioIds);
+            bool mon = monitor && audioIds.Count > 0;
+            hasMix = audioIds.Count > 0;
 
-            string args = BuildArgs(s, outputFile, PW, PH, live, @"\\.\pipe\" + pvName, mon ? @"\\.\pipe\" + monName : null, out inputMap);
-            hasMix = hasAudio && (outputFile != null || mon);
+            // nomi delle pipe (nel filtro si usano con le barre dritte: niente escape da gestire)
+            var names = new PipeNames
+            {
+                Preview = "vhscap_pv_" + tag,
+                Ts = "vhscap_ts_" + tag,
+                Progress = "vhscap_pr_" + tag,
+                Monitor = mon ? "vhscap_mo_" + tag : null,
+                Meters = audioIds.ToDictionary(id => id, id => "vhscap_me_" + id + "_" + tag),
+            };
+
+            // server delle pipe PRIMA di avviare ffmpeg
+            var pvPipe = NewPipe(names.Preview, PW * PH * 4 * 3);
+            var tsPipe = NewPipe(names.Ts, 4 << 20);
+            var prPipe = NewPipe(names.Progress, 64 << 10);
+            var moPipe = mon ? NewPipe(names.Monitor, 1 << 20) : null;
+            var mePipes = names.Meters.ToDictionary(kv => kv.Key, kv => NewPipe(kv.Value, 256 << 10));
+
+            string args = BuildArgs(s, PW, PH, live, names, out inputMap);
             LastCommand = "ffmpeg " + args;
             Log?.Invoke(LastCommand);
 
-            var psi = FFmpeg.Psi(args);
-            proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            proc = new Process { StartInfo = FFmpeg.Psi(args), EnableRaisingEvents = true };
             proc.ErrorDataReceived += OnErr;
             proc.OutputDataReceived += (o, e) => { };
             proc.Exited += (o, e) => { try { Exited?.Invoke(((Process)o).ExitCode); } catch { } };
             proc.Start();
-            proc.BeginErrorReadLine();
-            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine(); proc.BeginOutputReadLine();
             if (s.HighPriority) { try { proc.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { } }
             lastCpu = TimeSpan.Zero; lastCpuAt = DateTime.Now;
 
-            var pvp = pvPipe;
-            pvThread = new Thread(() => PreviewLoop(pvp)) { IsBackground = true, Name = "preview" };
-            pvThread.Start();
-            if (mon)
-            {
-                var mp = monPipe;
-                monThread = new Thread(() => MonitorLoop(mp)) { IsBackground = true, Name = "monitor" };
-                monThread.Start();
-            }
+            Run("preview", () => PreviewLoop(pvPipe));
+            Run("ts", () => TsLoop(tsPipe));
+            Run("progress", () => TextLoop(prPipe, OnProgressLine));
+            foreach (var kv in mePipes) { var id = kv.Key; var p = kv.Value; Run("meter", () => TextLoop(p, l => OnMeterLine(id, l))); }
+            if (moPipe != null) Run("monitor", () => MonitorLoop(moPipe));
 
             if (live)
             {
-                zmq = new ZmqControl(5555); // porta di default del filtro zmq di ffmpeg
+                zmq = new ZmqControl(5555);
                 zmq.Log += l => Log?.Invoke(l);
                 zmq.Start();
             }
         }
 
+        NamedPipeServerStream NewPipe(string name, int inBuf)
+        {
+            var p = new NamedPipeServerStream(name, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None, inBuf, 0);
+            pipes.Add(p);
+            return p;
+        }
+
+        void Run(string name, Action a)
+        {
+            var t = new Thread(() => { try { a(); } catch { } }) { IsBackground = true, Name = name };
+            threads.Add(t); t.Start();
+        }
+
         public void Stop()
         {
+            // se si stava registrando, prima si chiude bene il file
+            if (recorder.IsRecording) recorder.Stop();
             try { zmq?.Dispose(); } catch { }
             zmq = null;
             var p = proc; proc = null;
@@ -369,7 +587,7 @@ namespace VHSCapture
                     if (!p.HasExited)
                     {
                         try { p.StandardInput.Write("q"); p.StandardInput.Flush(); } catch { }
-                        if (!p.WaitForExit(IsRecording ? 20000 : 5000))
+                        if (!p.WaitForExit(5000))
                         {
                             Log?.Invoke("ffmpeg non risponde, kill forzato");
                             try { p.Kill(); } catch { }
@@ -380,16 +598,38 @@ namespace VHSCapture
                 catch { }
                 try { p.Dispose(); } catch { }
             }
-            // chiudere le pipe sblocca anche un eventuale WaitForConnection
-            try { pvPipe?.Dispose(); } catch { }
-            try { monPipe?.Dispose(); } catch { }
-            try { pvThread?.Join(1500); } catch { }
-            try { monThread?.Join(1500); } catch { }
-            pvPipe = null; monPipe = null;
-            IsRecording = false;
+            foreach (var pp in pipes) { try { pp.Dispose(); } catch { } }
+            pipes.Clear();
+            foreach (var t in threads) { try { t.Join(1000); } catch { } }
+            threads.Clear();
         }
 
         public void Dispose() => Stop();
+
+        // ---------- registrazione (la pipeline NON si ferma) ----------
+
+        public void StartRecording(AppSettings s, string outputFile)
+        {
+            if (!IsRunning) throw new InvalidOperationException("Pipeline non avviata");
+            recorder.Start(MuxArgs(s, outputFile));
+        }
+
+        public bool StopRecording() => recorder.Stop();
+
+        static string MuxArgs(AppSettings s, string outputFile)
+        {
+            var sb = new StringBuilder("-hide_banner -loglevel warning -y -fflags +genpts+discardcorrupt -probesize 5M -analyzeduration 2M -f mpegts -i pipe:0 -map 0 -c copy ");
+            bool mkv = outputFile.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
+            string movflags = s.FragmentedMp4 && !mkv ? "+frag_keyframe+empty_moov+default_base_moof" : null;
+            if (s.SplitMinutes > 0 && !mkv)
+            {
+                sb.Append($"-f segment -segment_time {s.SplitMinutes * 60} -reset_timestamps 1 -segment_format mp4 ");
+                if (movflags != null) sb.Append($"-segment_format_options movflags={movflags} ");
+            }
+            else if (movflags != null) sb.Append($"-movflags {movflags} ");
+            sb.Append($"\"{outputFile}\"");
+            return sb.ToString();
+        }
 
         public string GetInputInfo(string id) => inputInfo.TryGetValue(id, out var v) ? v : null;
         public (int w, int h)? GetInputSize(string id) => inputSize.TryGetValue(id, out var v) ? v : ((int, int)?)null;
@@ -401,11 +641,9 @@ namespace VHSCapture
                 var p = proc; if (p == null || p.HasExited) return 0;
                 p.Refresh();
                 var cpu = p.TotalProcessorTime; var now = DateTime.Now;
-                double el = (now - lastCpuAt).TotalMilliseconds;
-                double used = (cpu - lastCpu).TotalMilliseconds;
+                double el = (now - lastCpuAt).TotalMilliseconds, used = (cpu - lastCpu).TotalMilliseconds;
                 lastCpu = cpu; lastCpuAt = now;
-                if (el <= 0) return 0;
-                return Math.Clamp(used / el / Environment.ProcessorCount * 100.0, 0, 100);
+                return el <= 0 ? 0 : Math.Clamp(used / el / Environment.ProcessorCount * 100.0, 0, 100);
             }
             catch { return 0; }
         }
@@ -459,74 +697,133 @@ namespace VHSCapture
         {
             if (!LiveControl || !src.HasAudio || !activeAudioIds.Contains(src.Id)) return;
             var ci = CultureInfo.InvariantCulture;
-            // guadagno prima del misuratore (il VU segue il fader), muto solo sul ramo di mix (il VU resta visibile, come OBS)
             zmq.Queue(src.Id + ":vol", $"volume@a{src.Id} volume {src.VolumeGain.ToString("0.#####", ci)}");
             if (hasMix) zmq.Queue(src.Id + ":mute", $"volume@m{src.Id} volume {(src.Muted ? "0" : "1")}");
         }
 
-        // ---------- stderr: log, progress, livelli audio, info ingressi ----------
+        // ---------- lettori delle pipe ----------
+
+        FrameBuf[] bufs; int back; volatile bool uiBusy;
+        public void FrameConsumed() => uiBusy = false;
+
+        void PreviewLoop(NamedPipeServerStream pipe)
+        {
+            int w = PW, h = PH, size = w * h * 4;
+            var local = new[] { new FrameBuf(w, h), new FrameBuf(w, h) };
+            bufs = local; back = 0; uiBusy = false;
+            byte[] scratch = new byte[size];
+            try { pipe.WaitForConnection(); } catch { return; }
+            while (true)
+            {
+                bool drop = stopping || uiBusy;
+                byte[] target = drop ? scratch : local[back].Data;
+                int got = 0;
+                try { while (got < size) { int r = pipe.Read(target, got, size - got); if (r <= 0) return; got += r; } }
+                catch { return; }
+                if (drop) continue;
+                var fb = local[back];
+                uiBusy = true; back ^= 1;
+                try { FrameReady?.Invoke(fb); } catch { uiBusy = false; }
+            }
+        }
+
+        void TsLoop(NamedPipeServerStream pipe)
+        {
+            var buf = new byte[188 * 1024];
+            try { pipe.WaitForConnection(); } catch { return; }
+            while (true)
+            {
+                int r;
+                try { r = pipe.Read(buf, 0, buf.Length); } catch { return; }
+                if (r <= 0) return;
+                lock (recorder) recorder.Feed(buf, r);
+            }
+        }
+
+        void TextLoop(NamedPipeServerStream pipe, Action<string> onLine)
+        {
+            try { pipe.WaitForConnection(); } catch { return; }
+            using var rd = new StreamReader(pipe, Encoding.UTF8, false, 16384);
+            string line;
+            while (true)
+            {
+                try { line = rd.ReadLine(); } catch { return; }
+                if (line == null) return;
+                try { onLine(line); } catch { }
+            }
+        }
+
+        void MonitorLoop(NamedPipeServerStream pipe)
+        {
+            byte[] buf = new byte[48000 * 4 / 25];
+            try { pipe.WaitForConnection(); } catch { return; }
+            while (true)
+            {
+                int r;
+                try { r = pipe.Read(buf, 0, buf.Length); } catch { return; }
+                if (r <= 0) return;
+                if (!stopping) { try { MonitorData?.Invoke(buf, r); } catch { } }
+            }
+        }
+
+        // livelli: ogni sorgente ha la sua pipe, quindi niente righe mescolate
+        class MeterState { public double rl = -90, pl = -90, rr = -90, pr = -90; public bool any; }
+        readonly ConcurrentDictionary<string, MeterState> meters = new ConcurrentDictionary<string, MeterState>();
+
+        void OnMeterLine(string id, string line)
+        {
+            var m = meters.GetOrAdd(id, _ => new MeterState());
+            if (line.StartsWith("frame:"))
+            {
+                if (m.any) AudioLevels?.Invoke(id, m.rl, m.pl, m.rr, m.pr);
+                m.rl = m.pl = m.rr = m.pr = -90; m.any = false;
+                return;
+            }
+            if (!line.StartsWith("lavfi.astats.")) return;
+            int eq = line.IndexOf('='); if (eq < 0) return;
+            string key = line.Substring(13, eq - 13), v = line.Substring(eq + 1).Trim();
+            double db = v == "-inf" || v == "nan" ? -90 : (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) ? d : -90);
+            switch (key)
+            {
+                case "1.RMS_level": m.rl = db; m.any = true; break;
+                case "2.RMS_level": m.rr = db; break;
+                case "1.Peak_level": m.pl = db; m.any = true; break;
+                case "2.Peak_level": m.pr = db; break;
+            }
+        }
+
+        readonly EngineStats st = new EngineStats();
+        void OnProgressLine(string line)
+        {
+            int ix = line.IndexOf('='); if (ix <= 0) return;
+            string k = line.Substring(0, ix).Trim(), v = line.Substring(ix + 1).Trim();
+            var ci = CultureInfo.InvariantCulture;
+            switch (k)
+            {
+                case "frame": long.TryParse(v, out st.Frame); break;
+                case "fps": double.TryParse(v, NumberStyles.Float, ci, out st.Fps); break;
+                case "drop_frames": long.TryParse(v, out st.Drop); break;
+                case "dup_frames": long.TryParse(v, out st.Dup); break;
+                case "total_size": long.TryParse(v, out st.TotalSize); break;
+                case "speed": double.TryParse(v.TrimEnd('x'), NumberStyles.Float, ci, out st.Speed); break;
+                case "progress":
+                    Stats?.Invoke(new EngineStats { Fps = st.Fps, Frame = st.Frame, Drop = st.Drop, Dup = st.Dup, Speed = st.Speed, TotalSize = st.TotalSize });
+                    break;
+            }
+        }
+
+        // ---------- stderr: solo log + info ingressi ----------
 
         static readonly Regex rxStream = new Regex(@"Stream #(\d+):\d+.*?: Video: (\w+)");
         static readonly Regex rxSize = new Regex(@"[\s,](\d{2,5})x(\d{2,5})[\s,\[]");
         static readonly Regex rxRawFmt = new Regex(@"rawvideo \([^)]*\), (\w+)");
         static readonly Regex rxFps = new Regex(@"([\d.]+) fps");
         bool inInputSection;
-        double rmsL = -90, rmsR = -90, pkL = -90, pkR = -90;
-        string meterSrc;
-        readonly EngineStats st = new EngineStats();
 
         void OnErr(object sender, DataReceivedEventArgs e)
         {
             if (e.Data == null) return;
             string line = e.Data;
-
-            // livelli audio (ametadata)
-            if (line.StartsWith("lavfi.astats."))
-            {
-                int eq = line.IndexOf('='); if (eq < 0) return;
-                string key = line.Substring(13, eq - 13); string v = line.Substring(eq + 1).Trim();
-                double db = v == "-inf" || v == "nan" ? -90 : (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) ? d : -90);
-                switch (key)
-                {
-                    case "1.RMS_level": rmsL = db; break;
-                    case "2.RMS_level": rmsR = db; break;
-                    case "1.Peak_level": pkL = db; break;
-                    case "2.Peak_level": pkR = db; break;
-                }
-                return;
-            }
-            if (line.StartsWith("vhs.src=")) { meterSrc = line.Substring(8).Trim(); return; }
-            if (line.StartsWith("frame:"))
-            {
-                // inizio di un nuovo blocco: consegno il precedente
-                if (meterSrc != null) AudioLevels?.Invoke(meterSrc, rmsL, pkL, rmsR, pkR);
-                meterSrc = null; rmsL = pkL = rmsR = pkR = -90;
-                return;
-            }
-
-            // progress (-progress pipe:2)
-            int ix = line.IndexOf('=');
-            if (ix > 0 && ix < 24 && !line.Contains(' ') && Regex.IsMatch(line, @"^[a-z_0-9]+=", RegexOptions.None))
-            {
-                string k = line.Substring(0, ix), v = line.Substring(ix + 1);
-                var ci = CultureInfo.InvariantCulture;
-                switch (k)
-                {
-                    case "frame": long.TryParse(v, out st.Frame); break;
-                    case "fps": double.TryParse(v, NumberStyles.Float, ci, out st.Fps); break;
-                    case "drop_frames": long.TryParse(v, out st.Drop); break;
-                    case "dup_frames": long.TryParse(v, out st.Dup); break;
-                    case "total_size": long.TryParse(v, out st.TotalSize); break;
-                    case "speed": double.TryParse(v.TrimEnd('x'), NumberStyles.Float, ci, out st.Speed); break;
-                    case "progress":
-                        var copy = new EngineStats { Fps = st.Fps, Frame = st.Frame, Drop = st.Drop, Dup = st.Dup, Speed = st.Speed, TotalSize = st.TotalSize };
-                        Stats?.Invoke(copy);
-                        break;
-                }
-                return;
-            }
-
-            // info ingressi (formato/risoluzione/fps effettivi)
             if (line.StartsWith("Input #")) inInputSection = true;
             else if (line.StartsWith("Output #") || line.StartsWith("Stream mapping")) inInputSection = false;
             var ms = inInputSection ? rxStream.Match(line) : Match.Empty;
@@ -538,72 +835,30 @@ namespace VHSCapture
                 {
                     int w = int.Parse(sz.Groups[1].Value), h = int.Parse(sz.Groups[2].Value);
                     var mf = rxFps.Match(line);
-                    string fps = mf.Success ? mf.Groups[1].Value : "?";
                     if (codec == "rawvideo") { var rf = rxRawFmt.Match(line); if (rf.Success) codec = rf.Groups[1].Value; }
                     inputSize[sid] = (w, h);
-                    inputInfo[sid] = $"{w}×{h} · {fps} fps · {codec}";
+                    inputInfo[sid] = $"{w}×{h} · {(mf.Success ? mf.Groups[1].Value : "?")} fps · {codec}";
                 }
             }
-
-            if (line.Trim().Length == 0) return;
-            if (IsNoise(line)) return;
+            if (line.Trim().Length == 0 || IsNoise(line)) return;
             Log?.Invoke(line);
         }
 
-        static bool IsNoise(string l)
-        {
-            // righe informative di ffmpeg che non servono nel Log
-            return l.StartsWith("  Metadata:") || l.StartsWith("      ") || l.StartsWith("    encoder") || l.StartsWith("  Side data") ||
-                   l.Contains("Press [q] to stop") || l.StartsWith("Stream mapping:") || l.StartsWith("  Stream #0:0 (") ||
-                   l.StartsWith("  Duration:") || l.Contains("[aost#") || l.Contains("[vost#") && !l.Contains("rror");
-        }
-
-        // ---------- anteprima ----------
-
-        FrameBuf[] bufs; int back; volatile bool uiBusy;
-
-        /// <summary>La UI lo chiama dopo aver disegnato il frame: il motore può consegnare il prossimo.</summary>
-        public void FrameConsumed() => uiBusy = false;
-
-        void PreviewLoop(NamedPipeServerStream pipe)
-        {
-            int w = PW, h = PH, size = w * h * 4;
-            var local = new[] { new FrameBuf(w, h), new FrameBuf(w, h) };
-            bufs = local; back = 0; uiBusy = false;
-            byte[] scratch = new byte[size];
-            try { pipe.WaitForConnection(); } catch { return; }
-
-            while (true)
-            {
-                // se la UI è indietro leggo in un buffer di scarto: la pipe va SEMPRE svuotata, altrimenti ffmpeg si blocca
-                bool drop = stopping || uiBusy;
-                byte[] target = drop ? scratch : local[back].Data;
-                int got = 0;
-                try { while (got < size) { int r = pipe.Read(target, got, size - got); if (r <= 0) return; got += r; } }
-                catch { return; }
-                if (drop) continue;
-
-                var fb = local[back];
-                uiBusy = true;
-                back ^= 1;
-                try { FrameReady?.Invoke(fb); } catch { uiBusy = false; }
-            }
-        }
-
-        void MonitorLoop(NamedPipeServerStream pipe)
-        {
-            byte[] buf = new byte[48000 * 4 / 25];   // 40 ms
-            try { pipe.WaitForConnection(); } catch { return; }
-            while (true)
-            {
-                int r;
-                try { r = pipe.Read(buf, 0, buf.Length); } catch { return; }
-                if (r <= 0) return;
-                if (!stopping) { try { MonitorData?.Invoke(buf, r); } catch { } }
-            }
-        }
+        static bool IsNoise(string l) =>
+            l.StartsWith("  Metadata:") || l.StartsWith("    ") || l.StartsWith("  Side data") || l.Contains("Press [q] to stop") ||
+            l.StartsWith("Stream mapping:") || l.StartsWith("  Stream #") && l.Contains("->") || l.StartsWith("  Duration:") ||
+            l.Contains("-progress period set") || l.StartsWith("[Parsed_astats") || l.StartsWith("frame=") ||
+            (l.Contains("[out#") && l.Contains("muxing overhead"));
 
         // ---------- costruzione grafo ----------
+
+        public class PipeNames
+        {
+            public string Preview, Ts, Progress, Monitor;
+            public Dictionary<string, string> Meters = new Dictionary<string, string>();
+            public static string Win(string n) => @"\\.\pipe\" + n;
+            public static string Fwd(string n) => "//./pipe/" + n;   // per le opzioni dei filtri: niente backslash da escapare
+        }
 
         static string F(double v, string fmt = "0.###") => v.ToString(fmt, CultureInfo.InvariantCulture);
 
@@ -621,7 +876,7 @@ namespace VHSCapture
             "bilinear" => "bilinear", "lanczos" => "lanczos", "area" => "area", "fast_bilinear" => "fast_bilinear", _ => "bicubic",
         };
 
-        public static string BuildArgs(AppSettings s, string outputFile, int pw, int ph, bool zmq, string pvPath, string monPath, out Dictionary<int, string> map)
+        public static string BuildArgs(AppSettings s, int pw, int ph, bool zmq, PipeNames pn, out Dictionary<int, string> map)
         {
             map = new Dictionary<int, string>();
             var sb = new StringBuilder();
@@ -629,10 +884,8 @@ namespace VHSCapture
             string fps = string.IsNullOrWhiteSpace(s.Fps) ? "25" : s.Fps;
             var visible = s.Sources.Where(x => x.Visible).ToList();
 
-            // -y globale: le pipe "esistono già" e senza -y ffmpeg chiederebbe se sovrascrivere
-            sb.Append("-hide_banner -y -loglevel info -nostats -progress pipe:2 -stats_period 1 ");
+            sb.Append($"-hide_banner -y -loglevel info -nostats -progress \"{PipeNames.Win(pn.Progress)}\" -stats_period 1 ");
             sb.Append($"-filter_complex_threads {Math.Clamp(Environment.ProcessorCount, 2, 8)} ");
-            // tela (input 0). Niente -re: il ritmo lo impone il dispositivo live.
             sb.Append($"-f lavfi -i color=c=black:s={s.CanvasW}x{s.CanvasH}:r={fps} ");
 
             var idx = new Dictionary<Source, int>();
@@ -680,7 +933,6 @@ namespace VHSCapture
                 {
                     var d = DeintFilter(src.DeinterlaceMode);
                     if (d != null) chain.Add(d);
-                    // crop quasi gratis (sposta solo i puntatori), sempre presente così è regolabile al volo
                     chain.Add($"crop@s{src.Id}=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT}:exact=1");
                     chain.Add($"eq@s{src.Id}=brightness={F(src.Brightness)}:contrast={F(src.Contrast)}:saturation={F(src.Saturation)}:gamma={F(src.Gamma)}");
                     chain.Add($"hue@s{src.Id}=h={F(src.Hue, "0.#")}");
@@ -697,80 +949,56 @@ namespace VHSCapture
                 k++;
             }
 
-            bool recV = outputFile != null;
+            // video: canvas → encoder (sempre) + anteprima
             string pvFps = PreviewFps(fps);
-            if (recV) graph.Append($"{cur}fps={fps},format=yuv420p,split=2[rec][pv];[pv]fps={pvFps},scale={pw}:{ph}:flags=fast_bilinear,format=bgra[pvs];");
-            else graph.Append($"{cur}fps={pvFps},scale={pw}:{ph}:flags=fast_bilinear,format=bgra[pvs];");
+            graph.Append($"{cur}fps={fps},format=yuv420p,split=2[venc][pv];[pv]fps={pvFps},scale={pw}:{ph}:flags=fast_bilinear,format=bgra[pvs];");
 
-            // ---- audio ----
-            // per ogni sorgente: offset → 48k → guadagno → [misuratore della sorgente] + [ramo di mix con muto]
+            // audio: per sorgente → misuratore (pipe propria) + ramo di mix con muto → encoder (+ ascolto)
             var audioSrcs = idx.Keys.Where(x => x.HasAudio).ToList();
             bool hasAudio = audioSrcs.Count > 0;
-            bool rec = outputFile != null;
-            bool mon = hasAudio && monPath != null;
-            bool mix = hasAudio && (rec || mon);
-            string meterOpts = "astats=metadata=1:reset=1:measure_perchannel=RMS_level+Peak_level:measure_overall=none";
-            // doppio escape: il parser del grafo toglie un backslash, il parser delle opzioni l'altro → file=pipe:2
-            string printOpts = "ametadata=mode=print:file=pipe\\\\:2";
+            bool mon = hasAudio && pn.Monitor != null;
             var meterLabels = new List<string>();
             var mixLabels = new List<string>();
             int a = 0;
             foreach (var src in audioSrcs)
             {
                 string off = src.AudioOffsetMs != 0 ? $"asetpts=PTS+{F(src.AudioOffsetMs / 1000.0, "0.000")}/TB," : "";
-                string head = $"[{idx[src]}:a]{off}aresample=48000:async=1,volume@a{src.Id}=volume={F(src.VolumeGain, "0.#####")}";
-                string meter = $"asetnsamples=n=1600:p=0,ametadata=mode=add:key=vhs.src:value={src.Id},{meterOpts},{printOpts}";
-                if (mix)
-                {
-                    graph.Append($"{head},asplit=2[am{a}][ax{a}];");
-                    graph.Append($"[am{a}]{meter}[amo{a}];");
-                    graph.Append($"[ax{a}]volume@m{src.Id}=volume={(src.Muted ? "0" : "1")}[amx{a}];");
-                    mixLabels.Add($"[amx{a}]");
-                }
-                else graph.Append($"{head},{meter}[amo{a}];");
-                meterLabels.Add($"[amo{a}]");
+                string meterPipe = pn.Meters.TryGetValue(src.Id, out var mp) ? PipeNames.Fwd(mp) : "NUL";
+                graph.Append($"[{idx[src]}:a]{off}aresample=48000:async=1,volume@a{src.Id}=volume={F(src.VolumeGain, "0.#####")},asplit=2[am{a}][ax{a}];");
+                graph.Append($"[am{a}]asetnsamples=n=1600:p=0,astats=metadata=1:reset=1:measure_perchannel=RMS_level+Peak_level:measure_overall=none," +
+                             $"ametadata=mode=print:file={meterPipe}[amo{a}];");
+                graph.Append($"[ax{a}]volume@m{src.Id}=volume={(src.Muted ? "0" : "1")}[amx{a}];");
+                meterLabels.Add($"[amo{a}]"); mixLabels.Add($"[amx{a}]");
                 a++;
             }
-            if (mix)
+            if (hasAudio)
             {
                 string amix;
                 if (mixLabels.Count == 1) amix = mixLabels[0];
                 else { graph.Append($"{string.Join("", mixLabels)}amix=inputs={mixLabels.Count}:duration=longest:normalize=0[amix];"); amix = "[amix]"; }
-                if (rec && mon) graph.Append($"{amix}asplit=2[arec][amon];");
-                else if (rec) graph.Append($"{amix}anull[arec];");
-                else graph.Append($"{amix}anull[amon];");
-                if (mon) graph.Append("[amon]aformat=sample_fmts=s16:channel_layouts=stereo[amons];");
+                if (mon) { graph.Append($"{amix}asplit=2[aenc][amon];[amon]aformat=sample_fmts=s16:channel_layouts=stereo[amons];"); }
+                else graph.Append($"{amix}anull[aenc];");
             }
 
             sb.Append($"-filter_complex \"{graph.ToString().TrimEnd(';')}\" ");
 
-            if (rec)
+            // encoder sempre acceso → MPEG-TS sulla pipe (il registratore decide quando scrivere su file)
+            sb.Append("-map \"[venc]\" ");
+            if (hasAudio) sb.Append("-map \"[aenc]\" ");
+            sb.Append(EncoderArgs(s, fps));
+            if (hasAudio)
             {
-                sb.Append("-map \"[rec]\" ");
-                if (hasAudio) sb.Append("-map \"[arec]\" ");
-                sb.Append(EncoderArgs(s, fps));
-                if (hasAudio)
-                {
-                    sb.Append($"-c:a aac -b:a {s.AudioBitrate}k ");
-                    if (s.AudioMono) sb.Append("-ac 1 ");
-                }
-                bool mkv = outputFile.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
-                string movflags = s.FragmentedMp4 && !mkv ? "+frag_keyframe+empty_moov+default_base_moof" : null;
-                if (s.SplitMinutes > 0 && !mkv)
-                {
-                    sb.Append($"-f segment -segment_time {s.SplitMinutes * 60} -reset_timestamps 1 -segment_format mp4 ");
-                    if (movflags != null) sb.Append($"-segment_format_options movflags={movflags} ");
-                }
-                else if (movflags != null) sb.Append($"-movflags {movflags} ");
-                sb.Append($"\"{outputFile}\" ");
+                sb.Append($"-c:a aac -b:a {s.AudioBitrate}k ");
+                if (s.AudioMono) sb.Append("-ac 1 ");
             }
-            sb.Append($"-map \"[pvs]\" -f rawvideo \"{pvPath}\" ");
+            sb.Append($"-f mpegts -muxdelay 0 -muxpreload 0 -flush_packets 1 \"{PipeNames.Win(pn.Ts)}\" ");
+
+            sb.Append($"-map \"[pvs]\" -f rawvideo \"{PipeNames.Win(pn.Preview)}\" ");
             foreach (var ml in meterLabels) sb.Append($"-map \"{ml}\" -f null NUL ");
-            if (mon) sb.Append($"-map \"[amons]\" -f s16le -ar 48000 -ac 2 \"{monPath}\"");
+            if (mon) sb.Append($"-map \"[amons]\" -f s16le -ar 48000 -ac 2 \"{PipeNames.Win(pn.Monitor)}\"");
             return sb.ToString();
         }
 
-        /// <summary>Anteprima fino a 60 fps (come OBS, che mostra il canvas alla sua frequenza).</summary>
         static string PreviewFps(string fps)
         {
             if (double.TryParse(fps, NumberStyles.Float, CultureInfo.InvariantCulture, out double f) && f > 60) return "60";

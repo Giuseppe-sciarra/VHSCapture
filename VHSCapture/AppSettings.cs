@@ -164,6 +164,7 @@ namespace VHSCapture
         public int SplitMinutes { get; set; } = 0;             // come "Divisione automatica dei file" di OBS (0 = off)
         public bool HighPriority { get; set; } = true;         // come "Priorità del processo" di OBS
         public bool AudioMonitor { get; set; } = false;        // come "Monitoraggio audio" di OBS: senti l'audio dalle casse
+        public int MonitorDevice { get; set; } = -1;           // uscita audio per l'ascolto (-1 = predefinita di Windows)
         public int KeyframeSec { get; set; } = 2;              // intervallo keyframe (OBS: 2 s)
 
         // Controllo live (zmq)

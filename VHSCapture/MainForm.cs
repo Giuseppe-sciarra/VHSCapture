@@ -35,7 +35,7 @@ namespace VHSCapture
         bool finalizing, syncingList;
         int frames; DateTime lastFrameAt = DateTime.MinValue;
         readonly System.Text.StringBuilder runLog = new System.Text.StringBuilder();
-        bool autoRetried, retryRecording;
+        bool autoRetried;
 
         public MainForm()
         {
@@ -94,7 +94,7 @@ namespace VHSCapture
                 {
                     if (MessageBox.Show(this, "Stai registrando. Fermare e uscire?", "VHSCapture", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     { e.Cancel = true; return; }
-                    StopRecording(false);
+                    engine.StopRecording();   // chiude bene il file prima di uscire
                 }
                 engine.Stop();
                 monitor.Stop();
@@ -125,7 +125,7 @@ namespace VHSCapture
             new ToolTip().SetToolTip(btnStop, "Ferma registrazione (F9)");
             lblName = new Label { Text = "Nome file", AutoSize = true, Tag = "muted", Margin = new Padding(20, 10, 6, 0) };
             txtName = new TextBox { Width = 240, Margin = new Padding(0, 6, 0, 0), PlaceholderText = "es. Rossi_matrimonio_1994", Font = new Font("Segoe UI", 10f) };
-            btnSettings = Ui.Btn("⚙   Uscita", "ghost", (o, e) => OpenSettings()); btnSettings.Margin = new Padding(20, 0, 8, 0);
+            btnSettings = Ui.Btn("⚙   Impostazioni", "ghost", (o, e) => OpenSettings()); btnSettings.Margin = new Padding(20, 0, 8, 0);
             btnFolder = Ui.Btn("📁   Apri cartella", "ghost", (o, e) => { try { Process.Start(new ProcessStartInfo("explorer.exe", settings.ResolvedOutputFolder())); } catch { } });
             btnTheme = Ui.IconBtn("◐", "Tema chiaro/scuro", (o, e) => { settings.DarkTheme = !settings.DarkTheme; settings.Save(); Theme.Apply(this, settings.DarkTheme); RefreshSourceList(); });
             btnLog = Ui.Btn("Log", "ghost", (o, e) => ToggleLog());
@@ -314,12 +314,12 @@ namespace VHSCapture
             btnRec.Text = compact ? "⏺  REC" : "⏺   Registra";
             btnRec.MinimumSize = new Size(compact ? 80 : 130, 36);
             btnStop.Text = compact ? "⏹" : "⏹   Stop";
-            btnSettings.Text = compact ? "⚙" : "⚙   Uscita";
+            btnSettings.Text = compact ? "⚙" : "⚙   Impostazioni";
             btnFolder.Text = compact ? "📁" : "📁   Apri cartella";
             lblName.Visible = !compact;
             txtName.Width = compact ? 150 : 240;
             btnSettings.Margin = new Padding(compact ? 8 : 20, 0, 8, 0);
-            foreach (var b in new[] { btnPreview, btnStop, btnSettings, btnFolder }) new ToolTip().SetToolTip(b, b == btnPreview ? "Anteprima" : b == btnStop ? "Stop (F9)" : b == btnSettings ? "Impostazioni di uscita" : "Apri cartella");
+            foreach (var b in new[] { btnPreview, btnStop, btnSettings, btnFolder }) new ToolTip().SetToolTip(b, b == btnPreview ? "Anteprima" : b == btnStop ? "Stop (F9)" : b == btnSettings ? "Impostazioni" : "Apri cartella");
             top.PerformLayout();
         }
 
@@ -530,7 +530,7 @@ namespace VHSCapture
             lock (runLog) runLog.Clear();
             canvas.Message = settings.Sources.Any(x => x.Visible) ? "Avvio anteprima…" : "Nessuna sorgente: premi ＋ per aggiungere il grabber";
             canvas.SetFrame(null);
-            try { engine.Start(settings, null, PreviewWidth(), settings.AudioMonitor); StartMonitorIfNeeded(); }
+            try { engine.Start(settings, PreviewWidth(), settings.AudioMonitor); StartMonitorIfNeeded(); }
             catch (Exception ex) { AppendLog("Errore avvio: " + ex.Message); }
             SetButtons();
         }
@@ -571,11 +571,12 @@ namespace VHSCapture
                 recFile = settings.SafeRecording ? Path.Combine(folder, baseName + ".mkv") : finalFile;
 
             restartTimer.Stop();
-            frames = 0; ResetMeters();
-            lock (runLog) runLog.Clear();
-            try { engine.Start(settings, recFile, PreviewWidth(), settings.AudioMonitor); StartMonitorIfNeeded(); }
+            // come OBS: la pipeline resta accesa, si attacca solo il muxer. Nessuno scatto, nessun frame perso.
+            if (!engine.IsRunning) StartPreview();
+            try { engine.StartRecording(settings, recFile); }
             catch (Exception ex) { AppendLog("Errore avvio registrazione: " + ex.Message); return; }
             recStart = DateTime.Now;
+            AppendLog("Registrazione avviata: " + Path.GetFileName(recFile));
             SetButtons();
         }
 
@@ -588,7 +589,8 @@ namespace VHSCapture
             canvas.RecText = null; canvas.Invalidate();
 
             string written = recFile, final = finalFile;
-            await Task.Run(() => engine.Stop());
+            bool muxOk = await Task.Run(() => engine.StopRecording());
+            if (!muxOk) AppendLog("Il muxer non è uscito pulito: controlla il file");
 
             bool HasData(string f) => RecordedBytes(f) > 4096;
 
@@ -596,8 +598,7 @@ namespace VHSCapture
             {
                 try { foreach (var fx in RecordedFiles(written)) File.Delete(fx); } catch { }
                 AppendLog("Registrazione NON salvata: ffmpeg non ha scritto niente (vedi errori sopra)");
-                if (!retryRecording)
-                    MessageBox.Show(this, "La registrazione non è partita e non è stato salvato nulla.\nControlla il Log.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, "La registrazione non è partita e non è stato salvato nulla.\nControlla il Log.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             else if (settings.SafeRecording && !string.Equals(written, final, StringComparison.OrdinalIgnoreCase))
             {
@@ -615,18 +616,18 @@ namespace VHSCapture
 
             finalizing = false;
             lblRec.Text = "";
-            if (retryRecording && !IsDisposed) { retryRecording = false; SetButtons(); StartRecording(); return; }
-            if (restartPreview && !IsDisposed) StartPreview();
+            if (restartPreview && !IsDisposed && !engine.IsRunning) StartPreview();
             SetButtons();
         }
 
         void OpenSettings()
         {
-            if (engine.IsRecording) { MessageBox.Show(this, "Ferma la registrazione prima di cambiare le impostazioni di uscita.", "VHSCapture"); return; }
+            if (engine.IsRecording) { MessageBox.Show(this, "Ferma la registrazione prima di cambiare le impostazioni.", "VHSCapture"); return; }
             using var f = new SettingsForm(settings);
             var r = f.ShowDialog(this);
             Theme.Apply(this, settings.DarkTheme);
             if (r != DialogResult.OK) return;
+            RefreshSourceList(); RebuildMixer();
             canvas.CanvasW = settings.CanvasW; canvas.CanvasH = settings.CanvasH;
             canvas.Invalidate();
             StartPreview();
@@ -674,16 +675,18 @@ namespace VHSCapture
                 {
                     if (engine.IsRecording)
                     {
-                        string lg; lock (runLog) lg = runLog.ToString();
-                        bool encFail = lg.Contains("Error while opening encoder") || lg.Contains("Could not open encoder") || lg.Contains("Error creating a MFX session");
-                        if (encFail && settings.Encoder != "libx264")
-                        {
-                            AppendLog($"L'encoder {settings.Encoder} non si apre su questo PC: riprovo con x264 software");
-                            settings.Encoder = "libx264"; settings.Save();
-                            retryRecording = true;
-                        }
-                        else AppendLog("ATTENZIONE: ffmpeg è uscito durante la registrazione — chiudo il file");
-                        StopRecording(!retryRecording);
+                        AppendLog("ATTENZIONE: la pipeline si è fermata durante la registrazione — chiudo il file");
+                        StopRecording(true);
+                        return;
+                    }
+                    // l'encoder ora è sempre acceso: se non si apre, passo a x264 e riparto
+                    string lg0; lock (runLog) lg0 = runLog.ToString();
+                    bool encFail = lg0.Contains("Error while opening encoder") || lg0.Contains("Could not open encoder") || lg0.Contains("Error creating a MFX session");
+                    if (encFail && settings.Encoder != "libx264" && !autoRetried)
+                    {
+                        AppendLog($"L'encoder {settings.Encoder} non si apre su questo PC: passo a x264 software");
+                        settings.Encoder = "libx264"; settings.Save(); autoRetried = true;
+                        StartPreview();
                         return;
                     }
                     if (frames == 0 && code != 0 && !autoRetried && TryAutoFallback()) return;
@@ -752,7 +755,7 @@ namespace VHSCapture
         {
             if (settings.AudioMonitor && settings.Sources.Any(x => x.Visible && x.HasAudio))
             {
-                try { monitor.Start(); } catch (Exception ex) { AppendLog("Ascolto audio non disponibile: " + ex.Message); }
+                try { monitor.DeviceNumber = settings.MonitorDevice; monitor.Start(); } catch (Exception ex) { AppendLog("Ascolto audio non disponibile: " + ex.Message); }
             }
             else monitor.Stop();
         }

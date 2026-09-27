@@ -160,7 +160,7 @@ namespace VHSCapture
                     foreach (var h in Handles(sr)) g.FillRectangle(hb, h);
                 }
                 using var f = new Font("Segoe UI", 8.5f);
-                string lbl = (Selected.Locked ? "🔒 " : "") + $"{Selected.Name}   {Selected.W}×{Selected.H}   pos {Selected.X},{Selected.Y}";
+                string lbl = (Selected.Locked ? "(bloccata)  " : "") + $"{Selected.Name}   {Selected.W}×{Selected.H}   pos {Selected.X},{Selected.Y}";
                 if (Selected.CropL + Selected.CropT + Selected.CropR + Selected.CropB > 0) lbl += $"   ritaglio {Selected.CropL},{Selected.CropT},{Selected.CropR},{Selected.CropB}";
                 var sz = g.MeasureString(lbl, f);
                 var lr = new RectangleF(sr.X, sr.Y - sz.Height - 2, sz.Width + 6, sz.Height);

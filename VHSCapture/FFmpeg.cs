@@ -258,7 +258,7 @@ namespace VHSCapture
                 if (!p.HasExited)
                 {
                     try { p.StandardInput.Write("q"); p.StandardInput.Flush(); } catch { }
-                    if (!p.WaitForExit(IsRecording ? 15000 : 3000))
+                    if (!p.WaitForExit(IsRecording ? 20000 : 5000))
                     {
                         Log?.Invoke("ffmpeg non risponde, kill forzato");
                         try { p.Kill(); } catch { }
@@ -329,23 +329,44 @@ namespace VHSCapture
             Log?.Invoke(line);
         }
 
+        // doppio buffer riusato: niente allocazioni per frame (evita gli scatti del garbage collector)
+        Bitmap[] bufs;
+        int back;
+        volatile bool uiBusy;
+
+        /// <summary>La UI chiama questo dopo aver disegnato il frame: il motore può preparare il prossimo.</summary>
+        public void FrameConsumed() => uiBusy = false;
+
         void ReadLoop()
         {
             var p = proc; if (p == null) return;
             Stream st; try { st = p.StandardOutput.BaseStream; } catch { return; }
-            int w = PW, h = PH, size = w * h * 3;
+            int w = PW, h = PH, stride = w * 4, size = stride * h;
             byte[] buf = new byte[size];
-            while (!stopping)
+            var local = new[] { new Bitmap(w, h, PixelFormat.Format32bppPArgb), new Bitmap(w, h, PixelFormat.Format32bppPArgb) };
+            bufs = local; back = 0; uiBusy = false;
+
+            while (true)
             {
                 int got = 0;
                 try { while (got < size) { int n = st.Read(buf, got, size - got); if (n <= 0) return; got += n; } }
                 catch { return; }
-                var bmp = new Bitmap(w, h, PixelFormat.Format24bppRgb);
-                var bd = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
-                if (bd.Stride == w * 3) Marshal.Copy(buf, 0, bd.Scan0, size);
-                else for (int y = 0; y < h; y++) Marshal.Copy(buf, y * w * 3, bd.Scan0 + y * bd.Stride, w * 3);
-                bmp.UnlockBits(bd);
-                try { FrameReady?.Invoke(bmp); } catch { bmp.Dispose(); }
+
+                // in chiusura continuo a svuotare la pipe, altrimenti ffmpeg resta bloccato e non si chiude
+                if (stopping || uiBusy) continue;
+
+                var bmp = local[back];
+                try
+                {
+                    var bd = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppPArgb);
+                    if (bd.Stride == stride) Marshal.Copy(buf, 0, bd.Scan0, size);
+                    else for (int y = 0; y < h; y++) Marshal.Copy(buf, y * stride, bd.Scan0 + y * bd.Stride, stride);
+                    bmp.UnlockBits(bd);
+                }
+                catch { continue; }
+                uiBusy = true;
+                back ^= 1;
+                try { FrameReady?.Invoke(bmp); } catch { uiBusy = false; }
             }
         }
 
@@ -361,8 +382,10 @@ namespace VHSCapture
             var visible = s.Sources.Where(x => x.Visible).ToList();
 
             sb.Append("-hide_banner -loglevel warning -nostats ");
-            // input 0: tela nera, -re per andare a tempo reale
-            sb.Append($"-re -f lavfi -i color=c=black:s={s.CanvasW}x{s.CanvasH}:r={fps} ");
+            // input 0: tela nera. Niente -re: il ritmo lo impone il dispositivo live (il filtergraph chiede
+            // frame alla tela solo quando servono). Con -re la tela andava a strappi rispetto al grabber.
+            sb.Append($"-filter_complex_threads {Math.Clamp(Environment.ProcessorCount, 2, 8)} ");
+            sb.Append($"-f lavfi -i color=c=black:s={s.CanvasW}x{s.CanvasH}:r={fps} ");
 
             var idx = new Dictionary<Source, int>();
             int n = 1;
@@ -419,8 +442,9 @@ namespace VHSCapture
 
             // uscita video
             bool rec = outputFile != null;
-            if (rec) graph.Append($"{cur}fps={fps},format=yuv420p,split=2[rec][pv];[pv]scale={pw}:{ph}[pvs];");
-            else graph.Append($"{cur}fps={fps},scale={pw}:{ph}[pvs];");
+            string pvFps = PreviewFps(fps);
+            if (rec) graph.Append($"{cur}fps={fps},format=yuv420p,split=2[rec][pv];[pv]fps={pvFps},scale={pw}:{ph}:flags=fast_bilinear[pvs];");
+            else graph.Append($"{cur}fps={pvFps},scale={pw}:{ph}:flags=fast_bilinear[pvs];");
 
             // audio
             var audioSrcs = idx.Keys.Where(x => x.HasAudio).ToList();
@@ -458,9 +482,16 @@ namespace VHSCapture
                 }
                 sb.Append($"-y \"{outputFile}\" ");
             }
-            sb.Append("-map \"[pvs]\" -f rawvideo -pix_fmt bgr24 pipe:1 ");
+            sb.Append("-map \"[pvs]\" -f rawvideo -pix_fmt bgra pipe:1 ");
             if (hasAudio) sb.Append("-map \"[apvs]\" -f null NUL");
             return sb.ToString();
+        }
+
+        /// <summary>L'anteprima non serve oltre 30 fps: meno lavoro per ffmpeg e per la UI.</summary>
+        static string PreviewFps(string fps)
+        {
+            if (double.TryParse(fps, NumberStyles.Float, CultureInfo.InvariantCulture, out double f) && f > 30) return "30";
+            return fps;
         }
 
         static string EncoderArgs(AppSettings s)

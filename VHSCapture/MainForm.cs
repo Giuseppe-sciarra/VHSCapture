@@ -459,6 +459,7 @@ namespace VHSCapture
 
             restartTimer.Stop();
             frames = 0; vu.Reset();
+            lock (runLog) runLog.Clear();
             try { engine.Start(settings, recFile); }
             catch (Exception ex) { AppendLog("Errore avvio registrazione: " + ex.Message); return; }
             recStart = DateTime.Now;
@@ -521,16 +522,21 @@ namespace VHSCapture
 
         void OnFrame(Bitmap bmp)
         {
-            if (!IsHandleCreated || IsDisposed) { bmp.Dispose(); return; }
+            if (!IsHandleCreated || IsDisposed) { engine.FrameConsumed(); return; }
             try
             {
                 BeginInvoke(new Action(() =>
                 {
-                    canvas.SetFrame(bmp);
-                    frames++; lastFrameAt = DateTime.Now; autoRetried = false;
+                    try
+                    {
+                        canvas.SetFrame(bmp);
+                        canvas.Update();          // disegna subito questo frame
+                        frames++; lastFrameAt = DateTime.Now; autoRetried = false;
+                    }
+                    finally { engine.FrameConsumed(); }
                 }));
             }
-            catch { bmp.Dispose(); }
+            catch { engine.FrameConsumed(); }
         }
 
         void OnEngineExited(int code)

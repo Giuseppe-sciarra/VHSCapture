@@ -35,9 +35,10 @@ namespace VHSCapture
             TabStop = true;
         }
 
+        /// <summary>Il frame appartiene al motore (doppio buffer riusato): qui NON va fatto Dispose.</summary>
         public void SetFrame(Bitmap bmp)
         {
-            var old = Frame; Frame = bmp; old?.Dispose();
+            Frame = bmp;
             Invalidate();
         }
 
@@ -82,8 +83,12 @@ namespace VHSCapture
             g.FillRectangle(Brushes.Black, dr);
             if (Frame != null)
             {
+                g.CompositingMode = CompositingMode.SourceCopy;
+                g.CompositingQuality = CompositingQuality.HighSpeed;
+                g.PixelOffsetMode = PixelOffsetMode.HighSpeed;
                 g.InterpolationMode = InterpolationMode.Bilinear;
-                g.DrawImage(Frame, dr);
+                try { g.DrawImage(Frame, dr); } catch { }
+                g.CompositingMode = CompositingMode.SourceOver;
             }
             else
             {

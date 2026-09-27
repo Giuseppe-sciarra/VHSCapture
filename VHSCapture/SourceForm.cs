@@ -31,6 +31,10 @@ namespace VHSCapture
         NumericUpDown nRtBuf; ComboBox cbDeint, cbFormat, cbScale; NumericUpDown nCropL, nCropT, nCropR, nCropB, nAudioOff;
         Label lblInfo, lblModes;
         readonly Func<string, string> getInputInfo;
+        // standard video (PAL/NTSC/Personalizzato)
+        ComboBox cbStandard; Label lblStd; bool applyingStd;
+        /// <summary>Frame rate della registrazione richiesto dallo standard scelto qui (null = nessuna richiesta).</summary>
+        public string CanvasFpsRequest { get; private set; }
         TextBox txtImage;
         Panel colorSwatch;
         NumericUpDown nX, nY, nW, nH;
@@ -63,11 +67,92 @@ namespace VHSCapture
             structTimer = new System.Windows.Forms.Timer { Interval = 600 };
             structTimer.Tick += (o, e) => { structTimer.Stop(); PullStructural(); structuralSent = true; onStructural?.Invoke(work); };
 
+            if (cbStandard != null)
+            {
+                cbSize.TextChanged += (o, e) => DetectStandard();
+                cbFps.TextChanged += (o, e) => DetectStandard();
+                cbDeint.SelectedIndexChanged += (o, e) => DetectStandard();
+                foreach (var n in new[] { nCropL, nCropT, nCropR, nCropB }) n.ValueChanged += (o, e) => DetectStandard();
+                DetectStandard();
+                if (structuralLocked) cbStandard.Enabled = false;   // in registrazione non si cambia
+            }
+
             // se al caricamento qualcosa è stato corretto (es. risoluzione non supportata → auto) applicalo subito
             if (work.Type == SourceType.Capture && !structuralLocked && cbSize.Text != snapshot.InputSize) StructChanged();
         }
 
         bool structuralSent;
+
+        /// <summary>Compila i campi con i valori dello standard (e chiede alla registrazione il suo frame rate).</summary>
+        void ApplyStandard(VideoStandard v)
+        {
+            applyingStd = true;
+            try
+            {
+                cbSize.Text = v.Size;
+                cbFps.Text = v.InFps;
+                cbDeint.SelectedIndex = 2;   // Yadif 2x
+                nCropL.Value = 0; nCropT.Value = 0; nCropR.Value = 0; nCropB.Value = v.CropB;
+                // proporzioni 4:3 al centro del canvas 1920x1080, bande ai lati
+                work.InputSize = v.Size; PullCrop();
+                work.FitTo(1920, 1080);
+                PushTransform();
+                CanvasFpsRequest = v.CanvasFps;
+                PullCrop(); onLive?.Invoke(work);
+                StructChanged();
+            }
+            finally { applyingStd = false; }
+        }
+
+        /// <summary>I valori attuali corrispondono a PAL, NTSC o sono stati personalizzati? Il menu lo mostra sempre.</summary>
+        void DetectStandard()
+        {
+            if (cbStandard == null || applyingStd) return;
+            var tmp = new Source
+            {
+                InputSize = string.IsNullOrWhiteSpace(cbSize.Text) ? "auto" : cbSize.Text.Trim(),
+                InputFps = string.IsNullOrWhiteSpace(cbFps.Text) ? "auto" : cbFps.Text.Trim(),
+                DeinterlaceMode = cbDeint.SelectedIndex switch { 1 => "yadif", 2 => "yadif2x", 3 => "bwdif", 4 => "bwdif2x", _ => "off" },
+                CropL = (int)nCropL.Value, CropT = (int)nCropT.Value, CropR = (int)nCropR.Value, CropB = (int)nCropB.Value,
+            };
+            var d = VideoStandard.Detect(tmp);
+            int idx = d == VideoStandard.PAL ? 0 : d == VideoStandard.NTSC ? 1 : 2;
+            if (cbStandard.SelectedIndex != idx)
+            {
+                bool was = applyingStd; applyingStd = true;
+                cbStandard.SelectedIndex = idx;
+                applyingStd = was;
+            }
+            UpdateStdNote();
+        }
+
+        void UpdateStdNote()
+        {
+            if (lblStd == null) return;
+            lblStd.Text = cbStandard.SelectedIndex switch
+            {
+                0 => "PAL  —  VHS, S-VHS, Hi8, Video8, MiniDV (Italia/Europa)\n" +
+                     "Ingresso:          720 × 576  ·  25 fps (50 semiquadri)\n" +
+                     "Deinterlaccio:   Yadif 2x  →  50 fotogrammi pieni\n" +
+                     "Ritaglio:           8 righe in basso (striscia di rumore)\n" +
+                     "Immagine:        4:3 al centro, bande nere ai lati\n" +
+                     "Registrazione:  1920 × 1080  ·  50 fps",
+                1 => "NTSC  —  cassette americane / giapponesi\n" +
+                     "Ingresso:          720 × 480  ·  29,97 fps (59,94 semiquadri)\n" +
+                     "Deinterlaccio:   Yadif 2x  →  59,94 fotogrammi pieni\n" +
+                     "Ritaglio:           6 righe in basso\n" +
+                     "Immagine:        4:3 al centro, bande nere ai lati\n" +
+                     "Registrazione:  1920 × 1080  ·  59,94 fps\n" +
+                     "⚠ Grabber su NTSC_M (Driver video…) e lettore che riproduca l'NTSC",
+                _ => "Personalizzato  —  valori scelti a mano, lo standard non è applicato.\n" +
+                     "Scegli PAL o NTSC per rimettere i valori standard.",
+            };
+            bool dark = Theme.Dark;
+            lblStd.BackColor = cbStandard.SelectedIndex == 2
+                ? (dark ? Color.FromArgb(60, 50, 30) : Color.FromArgb(255, 244, 220))     // personalizzato: tono ambra
+                : (dark ? Color.FromArgb(32, 44, 60) : Color.FromArgb(230, 240, 252));    // standard: tono blu
+            lblStd.ForeColor = dark ? Color.FromArgb(230, 230, 235) : Color.FromArgb(30, 30, 35);
+        }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
@@ -113,6 +198,23 @@ namespace VHSCapture
             Row(tGen, "Nome", txtName, null);
             if (work.Type == SourceType.Capture)
             {
+                cbStandard = Combo();
+                cbStandard.Items.AddRange(new object[] {
+                    "PAL  —  720×576 @ 25  →  1080p @ 50",
+                    "NTSC  —  720×480 @ 29,97  →  1080p @ 59,94",
+                    "Personalizzato" });
+                Row(tGen, "Standard video", cbStandard, null);
+                cbStandard.Width = 360;
+                // riquadro di riepilogo: a colpo d'occhio cosa fa lo standard scelto
+                lblStd = new Label { AutoSize = true, MaximumSize = new Size(560, 0), Padding = new Padding(10, 8, 10, 8), Margin = new Padding(0, 2, 0, 8), Font = new Font("Segoe UI", 9.25f), Tag = "keep" };
+                Full(tGen, lblStd);
+                cbStandard.SelectedIndexChanged += (o, e) =>
+                {
+                    if (loading || applyingStd) return;
+                    if (cbStandard.SelectedIndex == 0) ApplyStandard(VideoStandard.PAL);
+                    else if (cbStandard.SelectedIndex == 1) ApplyStandard(VideoStandard.NTSC);
+                    UpdateStdNote();
+                };
                 cbVideo = Combo(); cbAudio = Combo();
                 var btnRefresh = Ui.Btn("↻ Aggiorna", "ghost");
                 btnRefresh.Click += (o, e) => RefreshDevices(true);

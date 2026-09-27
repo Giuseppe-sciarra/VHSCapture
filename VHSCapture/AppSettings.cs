@@ -146,6 +146,23 @@ namespace VHSCapture
         public void Center(int cw, int ch) { X = (cw - W) / 2; Y = (ch - H) / 2; }
     }
 
+    /// <summary>Standard video analogici: tutto ciò che passa dal grabber (VHS, S-VHS, Hi8, Video8, MiniDV) è PAL o NTSC.</summary>
+    public class VideoStandard
+    {
+        public string Name, Size, InFps, CanvasFps, Deint; public int CropB;
+        public static readonly VideoStandard PAL = new VideoStandard { Name = "PAL", Size = "720x576", InFps = "25", CanvasFps = "50", Deint = "yadif2x", CropB = 8 };
+        public static readonly VideoStandard NTSC = new VideoStandard { Name = "NTSC", Size = "720x480", InFps = "29.97", CanvasFps = "59.94", Deint = "yadif2x", CropB = 6 };
+
+        /// <summary>Lo standard a cui corrispondono i valori della sorgente, o null se sono stati personalizzati.</summary>
+        public static VideoStandard Detect(Source s)
+        {
+            foreach (var v in new[] { PAL, NTSC })
+                if (s.InputSize == v.Size && s.InputFps == v.InFps && s.DeinterlaceMode == v.Deint &&
+                    s.CropL == 0 && s.CropT == 0 && s.CropR == 0 && s.CropB == v.CropB) return v;
+            return null;
+        }
+    }
+
     public class AppSettings
     {
         // Canvas / output

@@ -34,10 +34,10 @@ namespace VHSCapture
             snapshot = src.Clone(); work = src.Clone(); cfg = settings; onLive = live; structuralLocked = lockStructural;
             withDeviceFree = deviceFree; log = logger;
             Text = "Proprietà — " + src.Name;
-            FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
+            FormBorderStyle = FormBorderStyle.Sizable; MaximizeBox = true; MinimizeBox = false; ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
             Font = new Font("Segoe UI", 9.5f);
-            ClientSize = new Size(660, 720);
+            ClientSize = new Size(700, 760); MinimumSize = new Size(600, 420);
             Build();
             LoadValues();
             loading = false;
@@ -59,7 +59,7 @@ namespace VHSCapture
             if (work.Type == SourceType.Capture)
             {
                 cbVideo = Combo(); cbAudio = Combo();
-                var btnRefresh = new Button { Text = "↻ Aggiorna", AutoSize = true };
+                var btnRefresh = Ui.Btn("↻ Aggiorna", "ghost");
                 btnRefresh.Click += (o, e) => RefreshDevices(true);
                 Row(tGen, "Dispositivo video", cbVideo, btnRefresh);
                 Row(tGen, "Dispositivo audio", cbAudio, null);
@@ -76,9 +76,9 @@ namespace VHSCapture
 
                 // pagine di configurazione del driver (come "Configura video" di OBS)
                 var pDrv = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0, 4, 0, 0) };
-                var bDrvVideo = new Button { Text = "Impostazioni driver video…", AutoSize = true };
-                var bCross = new Button { Text = "Ingresso (Composito / S-Video)…", AutoSize = true };
-                var bDrvAudio = new Button { Text = "Impostazioni driver audio…", AutoSize = true };
+                var bDrvVideo = Ui.Btn("Impostazioni driver video…", "ghost");
+                var bCross = Ui.Btn("Ingresso (Composito / S-Video)…", "ghost");
+                var bDrvAudio = Ui.Btn("Impostazioni driver audio…", "ghost");
                 bDrvVideo.Click += (o, e) => OpenDriverPage("video");
                 bCross.Click += (o, e) => OpenDriverPage("crossbar");
                 bDrvAudio.Click += (o, e) => OpenDriverPage("audio");
@@ -92,7 +92,7 @@ namespace VHSCapture
             else if (work.Type == SourceType.Image)
             {
                 txtImage = new TextBox();
-                btnImage = new Button { Text = "Sfoglia…", AutoSize = true };
+                btnImage = Ui.Btn("Sfoglia…", "ghost");
                 btnImage.Click += (o, e) =>
                 {
                     using var d = new OpenFileDialog { Filter = "Immagini|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp|Tutti|*.*" };
@@ -104,7 +104,7 @@ namespace VHSCapture
             else
             {
                 colorSwatch = new Panel { Width = 60, Height = 24, BorderStyle = BorderStyle.FixedSingle };
-                btnColor = new Button { Text = "Scegli colore…", AutoSize = true };
+                btnColor = Ui.Btn("Scegli colore…", "ghost");
                 btnColor.Click += (o, e) =>
                 {
                     using var d = new ColorDialog { Color = colorSwatch.BackColor, FullOpen = true };
@@ -126,12 +126,12 @@ namespace VHSCapture
             Row(tTr, "Posizione", pXY, null);
             Row(tTr, "Dimensione", pWH, null);
             var pBtns = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0) };
-            var bFit = new Button { Text = "Adatta allo schermo", AutoSize = true };
-            var bFill = new Button { Text = "Riempi (stira)", AutoSize = true };
-            var bCenter = new Button { Text = "Centra", AutoSize = true };
-            var bNat = new Button { Text = "Dimensione originale", AutoSize = true };
-            var b43 = new Button { Text = "Forza 4:3", AutoSize = true };
-            var b169 = new Button { Text = "Forza 16:9", AutoSize = true };
+            var bFit = Ui.Btn("Adatta allo schermo", "ghost");
+            var bFill = Ui.Btn("Riempi (stira)", "ghost");
+            var bCenter = Ui.Btn("Centra", "ghost");
+            var bNat = Ui.Btn("Dimensione originale", "ghost");
+            var b43 = Ui.Btn("Forza 4:3", "ghost");
+            var b169 = Ui.Btn("Forza 16:9", "ghost");
             bFit.Click += (o, e) => { PullTransform(); work.FitTo(cfg.CanvasW, cfg.CanvasH); PushTransform(); };
             bFill.Click += (o, e) => { PullTransform(); work.FillTo(cfg.CanvasW, cfg.CanvasH); PushTransform(); };
             bCenter.Click += (o, e) => { PullTransform(); work.Center(cfg.CanvasW, cfg.CanvasH); PushTransform(); };
@@ -152,7 +152,7 @@ namespace VHSCapture
             (tGam, lGam) = Slider(tCol, "Gamma", 10, 300, 100);
             (tHue, lHue) = Slider(tCol, "Tonalità (°)", -180, 180, 0);
             if (work.Type != SourceType.Capture) { tCon.Enabled = false; tGam.Enabled = false; }
-            var bReset = new Button { Text = "Ripristina colori", AutoSize = true };
+            var bReset = Ui.Btn("Ripristina colori", "ghost");
             bReset.Click += (o, e) => { tBri.Value = 0; tCon.Value = 100; tSat.Value = 100; tGam.Value = 100; tHue.Value = 0; };
             tCol.Controls.Add(bReset, 1, tCol.RowCount); tCol.RowCount++;
             foreach (var t in new[] { tBri, tCon, tSat, tGam, tHue }) t.ValueChanged += (o, e) => { UpdateColorLabels(); if (loading) return; PullColor(); onLive?.Invoke(work); };
@@ -172,9 +172,9 @@ namespace VHSCapture
             }
 
             // ---- pulsanti ----
-            var pBtn = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, Height = 48, Padding = new Padding(8) };
-            var btnOk = new Button { Text = "OK", Width = 100, Height = 30, Tag = "accent" };
-            var btnCancel = new Button { Text = "Annulla", Width = 100, Height = 30 };
+            var pBtn = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, Height = 56, Padding = new Padding(10) };
+            var btnOk = Ui.Btn("OK", "accent", null, 110);
+            var btnCancel = Ui.Btn("Annulla", "normal", null, 110);
             btnOk.Click += (o, e) => { if (Commit()) { DialogResult = DialogResult.OK; Close(); } };
             btnCancel.Click += (o, e) => { DialogResult = DialogResult.Cancel; Close(); };
             pBtn.Controls.Add(btnOk); pBtn.Controls.Add(btnCancel);
@@ -204,8 +204,8 @@ namespace VHSCapture
         }
 
         // ---------- helpers ----------
-        static GroupBox Group(string t) => new GroupBox { Text = t, Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 8), Margin = new Padding(0, 0, 0, 10) };
-        static TableLayoutPanel Grid(GroupBox g)
+        static Card Group(string t) => new Card { HeaderText = t, Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(12, 30, 12, 10), Margin = new Padding(0, 0, 0, 10) };
+        static TableLayoutPanel Grid(Card g)
         {
             var t = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true, RowCount = 0 };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));

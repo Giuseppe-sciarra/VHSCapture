@@ -13,12 +13,13 @@ namespace VHSCapture
         readonly AppSettings settings = AppSettings.Load();
         readonly CaptureEngine engine = new CaptureEngine();
 
-        Panel top, right, bottom;
+        SplitContainer splitLog, splitMain, splitRight;
+        Card top, cardSources, cardMixer, cardLog, status;
         CanvasView canvas;
-        Button btnPreview, btnRec, btnStop, btnSettings, btnFolder, btnTheme, btnLog;
-        Button btnAdd, btnRemove, btnProps, btnUp, btnDown;
+        RoundedButton btnPreview, btnRec, btnStop, btnSettings, btnFolder, btnTheme, btnLog;
+        RoundedButton btnAdd, btnRemove, btnProps, btnUp, btnDown;
         TextBox txtName, txtLog;
-        Label lblStatus, lblRec;
+        Label lblStatus; Pill lblRec;
         ListView lvSources;
         Panel mixer; VuMeter vu;
         System.Windows.Forms.Timer timer, restartTimer;
@@ -35,6 +36,7 @@ namespace VHSCapture
             MinimumSize = new Size(1000, 620);
             ClientSize = new Size(settings.WindowW, settings.WindowH);
             StartPosition = FormStartPosition.CenterScreen;
+            if (settings.WindowMax) WindowState = FormWindowState.Maximized;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             BuildUi();
@@ -55,6 +57,7 @@ namespace VHSCapture
 
             Load += (o, e) =>
             {
+                ApplySplitters();
                 if (!FFmpeg.Exists)
                 {
                     MessageBox.Show(this, "ffmpeg.exe non trovato accanto a VHSCapture.exe.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -72,8 +75,12 @@ namespace VHSCapture
                     StopRecording(false);
                 }
                 engine.Stop();
-                settings.WindowW = ClientSize.Width; settings.WindowH = ClientSize.Height;
-                settings.ShowLog = bottom.Visible;
+                settings.WindowMax = WindowState == FormWindowState.Maximized;
+                if (WindowState == FormWindowState.Normal) { settings.WindowW = ClientSize.Width; settings.WindowH = ClientSize.Height; }
+                settings.ShowLog = !splitLog.Panel2Collapsed;
+                settings.RightPanelW = splitMain.Width - splitMain.SplitterDistance;
+                settings.MixerH = splitRight.Height - splitRight.SplitterDistance;
+                if (!splitLog.Panel2Collapsed) settings.LogH = splitLog.Height - splitLog.SplitterDistance;
                 settings.Save();
             };
         }
@@ -82,89 +89,114 @@ namespace VHSCapture
 
         void BuildUi()
         {
-            top = new Panel { Dock = DockStyle.Top, Height = 54, Padding = new Padding(10), Tag = "panel" };
-            var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-            btnPreview = Btn("▶  Anteprima", null, (o, e) => StartPreview());
-            btnRec = Btn("⏺  Registra", "rec", (o, e) => StartRecording());
-            btnStop = Btn("⏹  Stop", null, (o, e) => StopRecording(true)); btnStop.Enabled = false;
-            var lblName = new Label { Text = "Nome:", AutoSize = true, Margin = new Padding(18, 8, 4, 0) };
-            txtName = new TextBox { Width = 220, Margin = new Padding(0, 4, 0, 0), PlaceholderText = "es. Rossi_matrimonio_1994" };
-            btnSettings = Btn("⚙  Uscita", null, (o, e) => OpenSettings()); btnSettings.Margin = new Padding(18, 4, 4, 4);
-            btnFolder = Btn("📁  Apri cartella", null, (o, e) => { try { Process.Start(new ProcessStartInfo("explorer.exe", settings.ResolvedOutputFolder())); } catch { } });
-            btnTheme = Btn("◐", null, (o, e) => { settings.DarkTheme = !settings.DarkTheme; settings.Save(); Theme.Apply(this, settings.DarkTheme); }); btnTheme.Width = 36;
-            btnLog = Btn("Log", null, (o, e) => { bottom.Visible = !bottom.Visible; }); btnLog.Width = 50;
+            const int gap = 10;
+
+            // ---- barra superiore ----
+            top = new Card { Dock = DockStyle.Top, Height = 62, Padding = new Padding(12, 12, 12, 12), Margin = new Padding(0), Radius = 10 };
+            var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Tag = "panel" };
+            btnPreview = Ui.Btn("▶   Anteprima", "normal", (o, e) => StartPreview());
+            btnRec = Ui.Btn("⏺   Registra", "rec", (o, e) => StartRecording(), 130);
+            btnStop = Ui.Btn("⏹   Stop", "normal", (o, e) => StopRecording(true)); btnStop.Enabled = false;
+            var lblName = new Label { Text = "Nome file", AutoSize = true, Tag = "muted", Margin = new Padding(20, 10, 6, 0) };
+            txtName = new TextBox { Width = 240, Margin = new Padding(0, 6, 0, 0), PlaceholderText = "es. Rossi_matrimonio_1994", Font = new Font("Segoe UI", 10f) };
+            btnSettings = Ui.Btn("⚙   Uscita", "ghost", (o, e) => OpenSettings()); btnSettings.Margin = new Padding(20, 0, 8, 0);
+            btnFolder = Ui.Btn("📁   Apri cartella", "ghost", (o, e) => { try { Process.Start(new ProcessStartInfo("explorer.exe", settings.ResolvedOutputFolder())); } catch { } });
+            btnTheme = Ui.IconBtn("◐", "Tema chiaro/scuro", (o, e) => { settings.DarkTheme = !settings.DarkTheme; settings.Save(); Theme.Apply(this, settings.DarkTheme); });
+            btnLog = Ui.Btn("Log", "ghost", (o, e) => ToggleLog());
             flow.Controls.AddRange(new Control[] { btnPreview, btnRec, btnStop, lblName, txtName, btnSettings, btnFolder, btnTheme, btnLog });
             top.Controls.Add(flow);
 
-            bottom = new Panel { Dock = DockStyle.Bottom, Height = 110, Padding = new Padding(10, 0, 10, 8), Visible = settings.ShowLog, Tag = "panel" };
-            txtLog = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, Font = new Font("Consolas", 9f), WordWrap = false };
-            bottom.Controls.Add(txtLog);
-
-            var status = new Panel { Dock = DockStyle.Bottom, Height = 34, Padding = new Padding(12, 0, 12, 0), Tag = "panel" };
-            lblRec = new Label { AutoSize = true, Dock = DockStyle.Left, Font = new Font("Segoe UI Semibold", 10f), Padding = new Padding(0, 8, 0, 0) };
+            // ---- barra di stato ----
+            status = new Card { Dock = DockStyle.Bottom, Height = 44, Padding = new Padding(12, 6, 12, 6), Radius = 10 };
+            lblRec = new Pill { Dock = DockStyle.Left };
             lblStatus = new Label { AutoSize = true, Dock = DockStyle.Right, Tag = "muted", Padding = new Padding(0, 8, 0, 0) };
             status.Controls.Add(lblStatus); status.Controls.Add(lblRec);
 
-            // ---- pannello destro: sorgenti + mixer ----
-            right = new Panel { Dock = DockStyle.Right, Width = 330, Padding = new Padding(10), Tag = "panel" };
-
-            var lblSrc = new Label { Text = "SORGENTI", Dock = DockStyle.Top, Height = 22, Tag = "muted", Font = new Font("Segoe UI Semibold", 8.5f) };
-            lvSources = new ListView { Dock = DockStyle.Top, Height = 190, View = View.Details, CheckBoxes = true, FullRowSelect = true, HeaderStyle = ColumnHeaderStyle.None, MultiSelect = false, HideSelection = false };
-            lvSources.Columns.Add("Nome", 280);
-            lvSources.ItemChecked += (o, e) => { if (syncingList) return; var s = e.Item.Tag as Source; if (s != null && s.Visible != e.Item.Checked) { if (engine.IsRecording) { syncingList = true; e.Item.Checked = s.Visible; syncingList = false; return; } s.Visible = e.Item.Checked; settings.Save(); RestartIfRunning(); canvas.Invalidate(); } };
-            lvSources.SelectedIndexChanged += (o, e) => { if (syncingList) return; var s = lvSources.SelectedItems.Count > 0 ? lvSources.SelectedItems[0].Tag as Source : null; canvas.Select(s); UpdateSourceButtons(); };
-            lvSources.DoubleClick += (o, e) => { if (canvas.Selected != null) EditSource(canvas.Selected); };
-
-            var srcBtns = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 40, WrapContents = false, Padding = new Padding(0, 6, 0, 0) };
-            btnAdd = SmallBtn("＋", "Aggiungi sorgente", (o, e) => ShowAddMenu());
-            btnRemove = SmallBtn("－", "Rimuovi sorgente", (o, e) => { if (canvas.Selected != null) RemoveSource(canvas.Selected); });
-            btnProps = SmallBtn("⚙", "Proprietà", (o, e) => { if (canvas.Selected != null) EditSource(canvas.Selected); });
-            btnUp = SmallBtn("▲", "Porta sopra", (o, e) => MoveSource(+1));
-            btnDown = SmallBtn("▼", "Porta sotto", (o, e) => MoveSource(-1));
-            srcBtns.Controls.AddRange(new Control[] { btnAdd, btnRemove, btnProps, btnUp, btnDown });
-
-            var lblMix = new Label { Text = "MIXER AUDIO", Dock = DockStyle.Top, Height = 22, Tag = "muted", Font = new Font("Segoe UI Semibold", 8.5f), Padding = new Padding(0, 8, 0, 0) };
-            var mixHost = new Panel { Dock = DockStyle.Fill, Tag = "panel" };
-            vu = new VuMeter { Dock = DockStyle.Right, Width = 30 };
-            mixer = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Tag = "panel" };
-            mixHost.Controls.Add(mixer); mixHost.Controls.Add(vu);
-
-            right.Controls.Add(mixHost);
-            right.Controls.Add(lblMix);
-            right.Controls.Add(srcBtns);
-            right.Controls.Add(lvSources);
-            right.Controls.Add(lblSrc);
-
             // ---- canvas ----
-            canvas = new CanvasView { Dock = DockStyle.Fill, CanvasW = settings.CanvasW, CanvasH = settings.CanvasH, Sources = settings.Sources };
-            canvas.Message = "Premi ▶ Anteprima";
-            canvas.SelectionChanged += s => { SyncListSelection(s); UpdateSourceButtons(); };
-            canvas.TransformChanged += (s, final) =>
+            canvas = new CanvasView { Dock = DockStyle.Fill, CanvasW = settings.CanvasW, CanvasH = settings.CanvasH, Sources = settings.Sources, Message = "Premi ▶ Anteprima" };
+            canvas.SelectionChanged += s2 => { SyncListSelection(s2); UpdateSourceButtons(); };
+            canvas.TransformChanged += (s2, final) =>
             {
-                engine.ApplyTransform(s);
+                engine.ApplyTransform(s2);
                 if (final) { settings.Save(); if (!engine.LiveControl) RestartIfRunning(); }
             };
-            canvas.OpenProperties += s => EditSource(s);
-            canvas.RemoveRequested += s => RemoveSource(s);
+            canvas.OpenProperties += s2 => EditSource(s2);
+            canvas.RemoveRequested += s2 => RemoveSource(s2);
+            var canvasCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(8), Radius = 10 };
+            canvasCard.Controls.Add(canvas);
 
-            Controls.Add(canvas);
-            Controls.Add(right);
-            Controls.Add(bottom);
-            Controls.Add(status);
-            Controls.Add(top);
+            // ---- sorgenti ----
+            cardSources = new Card { Dock = DockStyle.Fill, HeaderText = "SORGENTI", Padding = new Padding(12, 30, 12, 12), Radius = 10 };
+            lvSources = new ListView { Dock = DockStyle.Fill, View = View.Details, CheckBoxes = true, FullRowSelect = true, HeaderStyle = ColumnHeaderStyle.None, MultiSelect = false, HideSelection = false, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 10f) };
+            lvSources.Columns.Add("Nome", 600);
+            lvSources.ItemChecked += (o, e) => { if (syncingList) return; var sx = e.Item.Tag as Source; if (sx != null && sx.Visible != e.Item.Checked) { if (engine.IsRecording) { syncingList = true; e.Item.Checked = sx.Visible; syncingList = false; return; } sx.Visible = e.Item.Checked; settings.Save(); RestartIfRunning(); canvas.Invalidate(); } };
+            lvSources.SelectedIndexChanged += (o, e) => { if (syncingList) return; var sx = lvSources.SelectedItems.Count > 0 ? lvSources.SelectedItems[0].Tag as Source : null; canvas.Select(sx); UpdateSourceButtons(); };
+            lvSources.DoubleClick += (o, e) => { if (canvas.Selected != null) EditSource(canvas.Selected); };
+            var srcBtns = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 44, WrapContents = false, Padding = new Padding(0, 8, 0, 0), Tag = "panel" };
+            btnAdd = Ui.IconBtn("＋", "Aggiungi sorgente", (o, e) => ShowAddMenu());
+            btnRemove = Ui.IconBtn("－", "Rimuovi sorgente", (o, e) => { if (canvas.Selected != null) RemoveSource(canvas.Selected); });
+            btnProps = Ui.IconBtn("⚙", "Proprietà", (o, e) => { if (canvas.Selected != null) EditSource(canvas.Selected); });
+            btnUp = Ui.IconBtn("▲", "Porta sopra", (o, e) => MoveSource(+1));
+            btnDown = Ui.IconBtn("▼", "Porta sotto", (o, e) => MoveSource(-1));
+            srcBtns.Controls.AddRange(new Control[] { btnAdd, btnRemove, btnProps, btnUp, btnDown });
+            cardSources.Controls.Add(lvSources);
+            cardSources.Controls.Add(srcBtns);
+
+            // ---- mixer ----
+            cardMixer = new Card { Dock = DockStyle.Fill, HeaderText = "MIXER AUDIO", Padding = new Padding(12, 30, 12, 12), Radius = 10 };
+            vu = new VuMeter { Dock = DockStyle.Right, Width = 30 };
+            mixer = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Tag = "panel" };
+            cardMixer.Controls.Add(mixer); cardMixer.Controls.Add(vu);
+
+            // ---- log ----
+            cardLog = new Card { Dock = DockStyle.Fill, HeaderText = "LOG FFMPEG", Padding = new Padding(12, 30, 12, 12), Radius = 10 };
+            txtLog = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, Font = new Font("Consolas", 9f), WordWrap = false, BorderStyle = BorderStyle.None };
+            cardLog.Controls.Add(txtLog);
+
+            // ---- split: destra (sorgenti | mixer) ----
+            splitRight = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = gap, Panel1MinSize = 120, Panel2MinSize = 100 };
+            splitRight.Panel1.Controls.Add(cardSources);
+            splitRight.Panel2.Controls.Add(cardMixer);
+
+            // ---- split: canvas | destra ----
+            splitMain = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = gap, Panel1MinSize = 400, Panel2MinSize = 260 };
+            splitMain.Panel1.Controls.Add(canvasCard);
+            splitMain.Panel2.Controls.Add(splitRight);
+
+            // ---- split: sopra | log ----
+            splitLog = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = gap, Panel1MinSize = 300, Panel2MinSize = 80, Panel2Collapsed = !settings.ShowLog };
+            splitLog.Panel1.Controls.Add(splitMain);
+            splitLog.Panel2.Controls.Add(cardLog);
+
+            var body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(gap, gap, gap, gap) };
+            body.Controls.Add(splitLog);
+
+            var topWrap = new Panel { Dock = DockStyle.Top, Height = 62 + gap, Padding = new Padding(gap, gap, gap, 0) };
+            topWrap.Controls.Add(top);
+            var statusWrap = new Panel { Dock = DockStyle.Bottom, Height = 44 + gap, Padding = new Padding(gap, 0, gap, gap) };
+            statusWrap.Controls.Add(status);
+
+            Controls.Add(body);
+            Controls.Add(statusWrap);
+            Controls.Add(topWrap);
         }
 
-        static Button Btn(string text, string tag, EventHandler click)
+        void ApplySplitters()
         {
-            var b = new Button { Text = text, AutoSize = true, MinimumSize = new Size(0, 34), Padding = new Padding(8, 0, 8, 0), Tag = tag, Margin = new Padding(0, 4, 4, 4) };
-            b.Click += click; return b;
+            try
+            {
+                splitMain.SplitterDistance = Math.Max(splitMain.Panel1MinSize, splitMain.Width - Math.Max(260, settings.RightPanelW) - splitMain.SplitterWidth);
+                splitRight.SplitterDistance = Math.Max(splitRight.Panel1MinSize, splitRight.Height - Math.Max(100, settings.MixerH) - splitRight.SplitterWidth);
+                if (!splitLog.Panel2Collapsed) splitLog.SplitterDistance = Math.Max(splitLog.Panel1MinSize, splitLog.Height - Math.Max(80, settings.LogH) - splitLog.SplitterWidth);
+            }
+            catch { }
         }
-        static Button SmallBtn(string text, string tip, EventHandler click)
+
+        void ToggleLog()
         {
-            var b = new Button { Text = text, Width = 36, Height = 30, Margin = new Padding(0, 0, 4, 0) };
-            b.Click += click;
-            new ToolTip().SetToolTip(b, tip);
-            return b;
+            splitLog.Panel2Collapsed = !splitLog.Panel2Collapsed;
+            if (!splitLog.Panel2Collapsed)
+                try { splitLog.SplitterDistance = Math.Max(splitLog.Panel1MinSize, splitLog.Height - Math.Max(80, settings.LogH) - splitLog.SplitterWidth); } catch { }
         }
 
         // ---------------- sorgenti ----------------
@@ -291,24 +323,26 @@ namespace VHSCapture
 
         void RebuildMixer()
         {
+            mixer.SuspendLayout();
             mixer.Controls.Clear();
-            int y = 4;
-            foreach (var s in settings.Sources.Where(x => x.HasAudio))
+            int y = 0, w = Math.Max(120, mixer.ClientSize.Width - 4);
+            foreach (var sx in settings.Sources.Where(x => x.HasAudio))
             {
-                var row = new Panel { Left = 0, Top = y, Width = mixer.Width - 24, Height = 56, Tag = "panel", Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
-                var name = new Label { Text = s.Name, Left = 0, Top = 0, AutoSize = true };
-                var val = new Label { Text = s.VolumeDb + " dB", Left = row.Width - 60, Top = 0, Width = 60, TextAlign = ContentAlignment.TopRight, Tag = "muted", Anchor = AnchorStyles.Top | AnchorStyles.Right };
-                var tb = new TrackBar { Left = 0, Top = 18, Width = row.Width - 60, Height = 30, Minimum = -60, Maximum = 12, Value = Math.Clamp((int)Math.Round(s.VolumeDb), -60, 12), TickStyle = TickStyle.None, AutoSize = false, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right, Tag = s };
-                var mute = new CheckBox { Text = "Muto", Left = row.Width - 56, Top = 22, AutoSize = true, Checked = s.Muted, Anchor = AnchorStyles.Top | AnchorStyles.Right, Tag = s };
-                tb.ValueChanged += (o, e) => { s.VolumeDb = tb.Value; val.Text = tb.Value + " dB"; engine.ApplyVolume(s); };
+                var row = new Panel { Left = 0, Top = y, Width = w, Height = 62, Tag = "panel", Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
+                var name = new Label { Text = sx.Name, Left = 0, Top = 2, AutoSize = true, Font = new Font("Segoe UI Semibold", 9.5f) };
+                var val = new Label { Text = sx.VolumeDb.ToString("0") + " dB", Left = row.Width - 64, Top = 2, Width = 64, TextAlign = ContentAlignment.TopRight, Tag = "muted", Anchor = AnchorStyles.Top | AnchorStyles.Right };
+                var tb = new TrackBar { Left = 0, Top = 22, Width = row.Width - 70, Height = 32, Minimum = -60, Maximum = 12, Value = Math.Clamp((int)Math.Round(sx.VolumeDb), -60, 12), TickStyle = TickStyle.None, AutoSize = false, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right, Tag = sx };
+                var mute = new CheckBox { Text = "Muto", Left = row.Width - 62, Top = 28, AutoSize = true, Checked = sx.Muted, Anchor = AnchorStyles.Top | AnchorStyles.Right, Tag = sx };
+                tb.ValueChanged += (o, e) => { sx.VolumeDb = tb.Value; val.Text = tb.Value + " dB"; engine.ApplyVolume(sx); };
                 tb.MouseUp += (o, e) => { settings.Save(); if (!engine.LiveControl) ScheduleRestart(); };
-                mute.CheckedChanged += (o, e) => { s.Muted = mute.Checked; engine.ApplyVolume(s); settings.Save(); if (!engine.LiveControl) ScheduleRestart(); };
+                mute.CheckedChanged += (o, e) => { sx.Muted = mute.Checked; engine.ApplyVolume(sx); settings.Save(); if (!engine.LiveControl) ScheduleRestart(); };
                 row.Controls.AddRange(new Control[] { name, val, tb, mute });
                 mixer.Controls.Add(row);
-                y += 60;
+                y += 66;
             }
             if (mixer.Controls.Count == 0)
-                mixer.Controls.Add(new Label { Text = "Nessuna sorgente audio", Left = 0, Top = 6, AutoSize = true, Tag = "muted" });
+                mixer.Controls.Add(new Label { Text = "Nessuna sorgente audio", Left = 0, Top = 4, AutoSize = true, Tag = "muted" });
+            mixer.ResumeLayout();
             Theme.Apply(this, settings.DarkTheme);
         }
 
@@ -380,7 +414,7 @@ namespace VHSCapture
             if (!engine.IsRecording) return;
             finalizing = true;
             SetButtons();
-            lblRec.Text = "Chiusura file…"; lblRec.ForeColor = Theme.Fore;
+            lblRec.Text = "Chiusura file…"; lblRec.Fill = Color.Transparent; lblRec.ForeColor = Theme.Fore;
 
             string written = recFile, final = finalFile;
             await Task.Run(() => engine.Stop());
@@ -456,7 +490,7 @@ namespace VHSCapture
                         AppendLog("ATTENZIONE: ffmpeg è uscito durante la registrazione — chiudo il file");
                         StopRecording(false);
                     }
-                    if (frames == 0 && code != 0) canvas.Message = "ffmpeg non è partito: apri il Log per l'errore";
+                    if (frames == 0 && code != 0) { canvas.Message = "ffmpeg non è partito — vedi il Log qui sotto"; if (splitLog.Panel2Collapsed) ToggleLog(); }
                     else canvas.Message = "Anteprima ferma";
                     canvas.SetFrame(null);
                     vu.Reset();
@@ -493,7 +527,7 @@ namespace VHSCapture
                 long size = 0;
                 try { if (File.Exists(recFile)) size = new FileInfo(recFile).Length; } catch { }
                 bool blink = (DateTime.Now.Millisecond / 500) % 2 == 0;
-                lblRec.ForeColor = Theme.Rec;
+                lblRec.Fill = Theme.Rec; lblRec.ForeColor = Color.White;
                 lblRec.Text = $"{(blink ? "●" : "○")} REC  {el:hh\\:mm\\:ss}   {Fmt(size)}   {Path.GetFileName(finalFile)}";
                 if (settings.MaxMinutes > 0 && el.TotalMinutes >= settings.MaxMinutes)
                 {
@@ -505,8 +539,9 @@ namespace VHSCapture
             }
             else if (!finalizing)
             {
-                lblRec.ForeColor = Theme.Fore;
-                lblRec.Text = engine.IsRunning ? "Anteprima" : "";
+                lblRec.Fill = engine.IsRunning ? Theme.Accent : Color.Transparent;
+                lblRec.ForeColor = engine.IsRunning ? Color.White : Theme.Fore;
+                lblRec.Text = engine.IsRunning ? "●  Anteprima" : "";
             }
         }
 

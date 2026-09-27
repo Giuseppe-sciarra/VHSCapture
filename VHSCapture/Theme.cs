@@ -29,12 +29,22 @@ namespace VHSCapture
             f.Invalidate(true);
         }
 
+        static bool InCard(Control c) { for (var p = c.Parent; p != null; p = p.Parent) { if (p is Card) return true; if (p is Form) return false; } return false; }
+
         static void ApplyRec(Control c)
         {
             switch (c)
             {
                 case Form _:
                     c.BackColor = Back; c.ForeColor = Fore; break;
+                case RoundedButton rb:
+                    rb.Invalidate(); break;
+                case Card cd:
+                    cd.BackColor = Panel; cd.ForeColor = Fore; cd.Invalidate(); break;
+                case Pill pl:
+                    pl.ForeColor = Fore; pl.Invalidate(); break;
+                case SplitContainer sc:
+                    sc.BackColor = Back; sc.Panel1.BackColor = Back; sc.Panel2.BackColor = Back; break;
                 case Button b:
                     if (b.Tag as string == "accent") { b.BackColor = Accent; b.ForeColor = Color.White; }
                     else if (b.Tag as string == "rec") { b.BackColor = Rec; b.ForeColor = Color.White; }
@@ -62,12 +72,12 @@ namespace VHSCapture
                 case ListView lv:
                     lv.BackColor = Input; lv.ForeColor = Fore; lv.BorderStyle = BorderStyle.FixedSingle; break;
                 case TrackBar tb:
-                    tb.BackColor = (tb.Parent?.Tag as string == "panel") ? Panel : Back; break;
+                    tb.BackColor = (tb.Parent?.Tag as string == "panel" || InCard(tb)) ? Panel : Back; break;
                 case VuMeter _:
                 case CanvasView _:
                     break;
                 default:
-                    c.BackColor = (c.Tag as string == "panel") ? Panel : Back; c.ForeColor = Fore; break;
+                    c.BackColor = (c.Tag as string == "panel" || InCard(c)) ? Panel : Back; c.ForeColor = Fore; break;
             }
             foreach (Control ch in c.Controls) ApplyRec(ch);
         }

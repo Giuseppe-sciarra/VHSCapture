@@ -129,6 +129,10 @@ namespace VHSCapture
         public bool ShowLog { get; set; } = false;
         public int WindowW { get; set; } = 1280;
         public int WindowH { get; set; } = 800;
+        public bool WindowMax { get; set; } = false;
+        public int RightPanelW { get; set; } = 340;
+        public int MixerH { get; set; } = 260;
+        public int LogH { get; set; } = 140;
 
         // --- campi della v1 (solo per migrazione) ---
         public string VideoDevice { get; set; } = "";

@@ -75,7 +75,7 @@ namespace VHSCapture
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
-            g.Clear(Theme.Dark ? Color.FromArgb(18, 18, 18) : Color.FromArgb(40, 40, 40));
+            g.Clear(Theme.Dark ? Color.FromArgb(22, 22, 24) : Color.FromArgb(52, 52, 56));
             var dr = DisplayRect();
             if (dr.Width <= 0) return;
 
@@ -107,7 +107,7 @@ namespace VHSCapture
                 using var hb = new SolidBrush(Theme.Rec);
                 foreach (var h in Handles(sr)) g.FillRectangle(hb, h);
                 using var f = new Font("Segoe UI", 8.5f);
-                string lbl = $"{Selected.Name}  {Selected.W}×{Selected.H} @ {Selected.X},{Selected.Y}";
+                string lbl = $"{Selected.Name}   {Selected.W}×{Selected.H}   pos {Selected.X},{Selected.Y}";
                 var sz = g.MeasureString(lbl, f);
                 var lr = new RectangleF(sr.X, sr.Y - sz.Height - 2, sz.Width + 6, sz.Height);
                 if (lr.Y < dr.Y) lr.Y = sr.Y + 2;

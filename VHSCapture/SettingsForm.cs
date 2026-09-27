@@ -20,9 +20,9 @@ namespace VHSCapture
         {
             s = settings;
             Text = "Impostazioni di uscita";
-            FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
+            FormBorderStyle = FormBorderStyle.Sizable; MaximizeBox = true; MinimizeBox = false; ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
-            ClientSize = new Size(640, 640);
+            ClientSize = new Size(680, 700); MinimumSize = new Size(560, 420);
             Font = new Font("Segoe UI", 9.5f);
             Build();
             LoadValues();
@@ -85,7 +85,7 @@ namespace VHSCapture
             var gOut = Group("Salvataggio");
             var tOut = Grid(gOut);
             txtFolder = new TextBox { Dock = DockStyle.Fill };
-            var btnBrowse = new Button { Text = "Sfoglia…", AutoSize = true };
+            var btnBrowse = Ui.Btn("Sfoglia…", "ghost");
             btnBrowse.Click += (o, e) =>
             {
                 using var d = new FolderBrowserDialog { SelectedPath = txtFolder.Text };
@@ -109,9 +109,9 @@ namespace VHSCapture
             tAdv.Controls.Add(lz, 1, tAdv.RowCount); tAdv.SetColumnSpan(lz, 2); tAdv.RowCount++;
             root.Controls.Add(gAdv);
 
-            var pBtn = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, Height = 48, Padding = new Padding(8) };
-            var btnOk = new Button { Text = "Salva", Width = 100, Height = 30, Tag = "accent" };
-            var btnCancel = new Button { Text = "Annulla", Width = 100, Height = 30 };
+            var pBtn = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, Height = 56, Padding = new Padding(10) };
+            var btnOk = Ui.Btn("Salva", "accent", null, 110);
+            var btnCancel = Ui.Btn("Annulla", "normal", null, 110);
             btnOk.Click += (o, e) => { if (SaveValues()) { DialogResult = DialogResult.OK; Close(); } };
             btnCancel.Click += (o, e) => { DialogResult = DialogResult.Cancel; Close(); };
             pBtn.Controls.Add(btnOk); pBtn.Controls.Add(btnCancel);
@@ -119,8 +119,8 @@ namespace VHSCapture
             AcceptButton = btnOk; CancelButton = btnCancel;
         }
 
-        static GroupBox Group(string title) => new GroupBox { Text = title, Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10, 6, 10, 8), Margin = new Padding(0, 0, 0, 10) };
-        static TableLayoutPanel Grid(GroupBox g)
+        static Card Group(string title) => new Card { HeaderText = title, Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(12, 30, 12, 10), Margin = new Padding(0, 0, 0, 10) };
+        static TableLayoutPanel Grid(Card g)
         {
             var t = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true, RowCount = 0 };
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));

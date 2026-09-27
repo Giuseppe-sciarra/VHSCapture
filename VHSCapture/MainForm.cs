@@ -1166,7 +1166,7 @@ namespace VHSCapture
                     }
                     painted = 0; paintMaxGap = 0; paintWindowStart = now;
                 }
-                if (previewDiag != "") parts.Add(previewDiag);
+                if (previewDiag != "" && settings.DiagLog) parts.Add(previewDiag);
                 double sf = engine.SourceFps;
                 if (sf > 0)
                 {

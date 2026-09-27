@@ -149,16 +149,17 @@ namespace VHSCapture
             {
                 W = ClientSize.Width, H = ClientSize.Height, Dr = dr, Dark = Theme.Dark,
                 Message = string.IsNullOrEmpty(Message) ? "Nessuna anteprima" : Message, RecText = RecText,
-                Thin = Sources.Where(x => x.Visible && x != Selected).Select(x => ToScreen(RectOf(x))).ToArray(),
+                Thin = new Rectangle[0],   // niente contorni di servizio sull'anteprima
             };
-            if (Selected != null && Selected.Visible)
+            // cornice di selezione solo quando serve davvero: sorgente selezionata, non bloccata, e non in registrazione
+            if (Selected != null && Selected.Visible && !Selected.Locked && RecText == null)
             {
                 sn.HasSel = true; sn.SelLocked = Selected.Locked;
                 sn.Sel = ToScreen(RectOf(Selected));
                 sn.SelHandles = Handles(sn.Sel);
                 string lbl = (Selected.Locked ? "(bloccata)  " : "") + $"{Selected.Name}   {Selected.W}×{Selected.H}   pos {Selected.X},{Selected.Y}";
                 if (Selected.CropL + Selected.CropT + Selected.CropR + Selected.CropB > 0) lbl += $"   ritaglio {Selected.CropL},{Selected.CropT},{Selected.CropR},{Selected.CropB}";
-                sn.SelLabel = lbl;
+                sn.SelLabel = null;   // niente righe di testo tecniche sull'anteprima
             }
             return sn;
         }
@@ -353,8 +354,7 @@ namespace VHSCapture
                 g.DrawString(sn.RecText, RecFont, Brushes.White, br.X + 10, br.Y + 4);
                 g.SmoothingMode = SmoothingMode.None;
             }
-            else
-                using (var pen = new Pen(Color.FromArgb(90, 90, 90))) g.DrawRectangle(pen, dr.X - 1, dr.Y - 1, dr.Width + 1, dr.Height + 1);
+            
 
             // contorni sorgenti non selezionate (tenui)
             using (var thin = new Pen(Color.FromArgb(110, 255, 255, 255)) { DashStyle = DashStyle.Dot })
@@ -375,12 +375,15 @@ namespace VHSCapture
                     using var hb = new SolidBrush(Theme.Rec);
                     foreach (var h in sn.SelHandles) g.FillRectangle(hb, h);
                 }
-                var sz = g.MeasureString(sn.SelLabel, LabelFont);
-                var lr = new RectangleF(sr.X, sr.Y - sz.Height - 2, sz.Width + 6, sz.Height);
-                if (lr.Y < dr.Y) lr.Y = sr.Y + 2;
-                using var bb = new SolidBrush(Color.FromArgb(200, 0, 0, 0));
-                g.FillRectangle(bb, lr);
-                g.DrawString(sn.SelLabel, LabelFont, Brushes.White, lr.X + 3, lr.Y);
+                if (sn.SelLabel != null)
+                {
+                    var sz = g.MeasureString(sn.SelLabel, LabelFont);
+                    var lr = new RectangleF(sr.X, sr.Y - sz.Height - 2, sz.Width + 6, sz.Height);
+                    if (lr.Y < dr.Y) lr.Y = sr.Y + 2;
+                    using var bb = new SolidBrush(Color.FromArgb(200, 0, 0, 0));
+                    g.FillRectangle(bb, lr);
+                    g.DrawString(sn.SelLabel, LabelFont, Brushes.White, lr.X + 3, lr.Y);
+                }
             }
         }
 

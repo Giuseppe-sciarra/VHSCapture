@@ -36,6 +36,11 @@ namespace VHSCapture
         int frames; DateTime lastFrameAt = DateTime.MinValue;
         readonly System.Text.StringBuilder runLog = new System.Text.StringBuilder();
         bool autoRetried;
+        // diagnostica anteprima
+        readonly System.Diagnostics.Stopwatch paintClock = System.Diagnostics.Stopwatch.StartNew();
+        double lastPaint, paintMaxGap, paintWindowStart; long painted;
+        string previewDiag = "";
+        readonly List<(double af, double ag, double pf, double pg, long dr, double src, double outf)> diagAcc = new List<(double, double, double, double, long, double, double)>();
         // fine cassetta
         DateTime? blankSince; string blankKind = ""; double blankStartRecSec = -1; int contentSamples; bool autoStopped;
 
@@ -747,6 +752,9 @@ namespace VHSCapture
                         canvas.SetFrame(bmp);
                         canvas.Update();          // disegna subito questo frame
                         frames++; lastFrameAt = DateTime.Now; autoRetried = false;
+                        double t = paintClock.Elapsed.TotalSeconds;
+                        if (lastPaint > 0) paintMaxGap = Math.Max(paintMaxGap, t - lastPaint);
+                        lastPaint = t; painted++;
                     }
                     finally { engine.FrameConsumed(); }
                 }));
@@ -927,6 +935,7 @@ namespace VHSCapture
             return -1;
         }
 
+        DateTime lastDiagAt = DateTime.MinValue;
         DateTime lastDiskCheck = DateTime.MinValue, lastCpuSample = DateTime.MinValue; long lastFree = -1;
 
         /// <summary>
@@ -982,6 +991,26 @@ namespace VHSCapture
                 if ((DateTime.Now - lastCpuSample).TotalSeconds >= 1) { lastCpu = engine.CpuPercent(); lastCpuSample = DateTime.Now; }
                 var st = lastStats;
                 if (st != null) parts.Add($"uscita {st.Fps:0.0} fps");
+                // ogni secondo: ritmo di arrivo da ffmpeg e ritmo di disegno a schermo, con la pausa più lunga
+                if ((DateTime.Now - lastDiagAt).TotalSeconds >= 1)
+                {
+                    lastDiagAt = DateTime.Now;
+                    var (afps, agap, adrop) = engine.TakeArrivalStats();
+                    double now = paintClock.Elapsed.TotalSeconds;
+                    double pfps = paintWindowStart > 0 ? painted / (now - paintWindowStart) : 0;
+                    previewDiag = $"anteprima: arrivo {afps:0} fps (pausa max {agap:0} ms) · a schermo {pfps:0} fps (pausa max {paintMaxGap * 1000:0} ms)" + (adrop > 0 ? $" · saltati {adrop}" : "");
+                    // ogni 5 s anche nel Log, così basta incollare il Log per la diagnosi
+                    diagAcc.Add((afps, agap, pfps, paintMaxGap * 1000, adrop, engine.SourceFps, lastStats?.Fps ?? 0));
+                    if (diagAcc.Count >= 5)
+                    {
+                        AppendLog($"[diagnostica 5 s] sorgente {diagAcc.Average(d => d.src):0.0} fps · uscita {diagAcc.Average(d => d.outf):0.0} fps · " +
+                                  $"arrivo anteprima {diagAcc.Average(d => d.af):0.0} fps (pausa max {diagAcc.Max(d => d.ag):0} ms) · " +
+                                  $"a schermo {diagAcc.Average(d => d.pf):0.0} fps (pausa max {diagAcc.Max(d => d.pg):0} ms) · saltati {diagAcc.Sum(d => d.dr)} · CPU ffmpeg {lastCpu:0}%");
+                        diagAcc.Clear();
+                    }
+                    painted = 0; paintMaxGap = 0; paintWindowStart = now;
+                }
+                if (previewDiag != "") parts.Add(previewDiag);
                 double sf = engine.SourceFps;
                 if (sf > 0)
                 {

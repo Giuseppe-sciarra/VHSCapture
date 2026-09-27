@@ -778,6 +778,21 @@ namespace VHSCapture
         // ---------- lettori delle pipe ----------
 
         FrameBuf[] bufs; int back; volatile bool uiBusy;
+
+        // diagnostica: ritmo con cui ffmpeg consegna l'anteprima e quanti frame la UI non fa in tempo a disegnare
+        readonly Stopwatch arrivalClock = Stopwatch.StartNew();
+        double lastArrival, maxGap; long arrived, dropped;
+        public (double fps, double maxGapMs, long dropped) TakeArrivalStats()
+        {
+            lock (arrivalClock)
+            {
+                double now = arrivalClock.Elapsed.TotalSeconds;
+                var r = (arrivedWindowStart > 0 && now > arrivedWindowStart ? arrived / (now - arrivedWindowStart) : 0, maxGap * 1000, dropped);
+                arrived = 0; dropped = 0; maxGap = 0; arrivedWindowStart = now;
+                return r;
+            }
+        }
+        double arrivedWindowStart;
         public void FrameConsumed() => uiBusy = false;
 
         void PreviewLoop(NamedPipeServerStream pipe)
@@ -794,6 +809,13 @@ namespace VHSCapture
                 int got = 0;
                 try { while (got < size) { int r = pipe.Read(target, got, size - got); if (r <= 0) return; got += r; } }
                 catch { return; }
+                lock (arrivalClock)
+                {
+                    double t = arrivalClock.Elapsed.TotalSeconds;
+                    if (lastArrival > 0) maxGap = Math.Max(maxGap, t - lastArrival);
+                    lastArrival = t; arrived++;
+                    if (drop && !stopping) dropped++;
+                }
                 if (drop) continue;
                 var fb = local[back];
                 uiBusy = true; back ^= 1;

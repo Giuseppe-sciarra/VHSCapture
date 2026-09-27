@@ -144,7 +144,7 @@ namespace VHSCapture
         readonly Label lblVal, lblState;
         readonly SafeTrackBar fader;
         readonly RoundedButton btnMute;
-        public event Action<Source> VolumeChanged, VolumeCommitted, MuteChanged;
+        public event Action<Source> VolumeChanged, VolumeCommitted, MuteChanged, OpenProperties;
 
         public MixerRow(Source s)
         {
@@ -169,6 +169,8 @@ namespace VHSCapture
             btnMute.Click += (o, e) => { Src.Muted = !Src.Muted; SyncMute(); MuteChanged?.Invoke(Src); };
 
             Controls.AddRange(new Control[] { name, lblVal, dev, lblState, Meter, fader, btnMute });
+            // doppio clic sul nome, sul dispositivo o sul misuratore → proprietà della sorgente
+            foreach (Control c in new Control[] { this, name, dev, lblState, Meter }) c.DoubleClick += (o, e) => OpenProperties?.Invoke(Src);
             Resize += (o, e) => DoLayout();
             DoLayout(); UpdateVal();
         }

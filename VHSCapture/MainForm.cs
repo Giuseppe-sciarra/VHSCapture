@@ -142,7 +142,7 @@ namespace VHSCapture
             btnPause.Visible = false;
             tips.SetToolTip(btnPause, "Pausa / riprendi (F10): salti un pezzo senza fare due file");
             btnProfile = Ui.Btn("📼   Profilo", "ghost", (o, e) => ShowProfileMenu());
-            tips.SetToolTip(btnProfile, "Imposta in un clic sorgente e registrazione per VHS, Hi8, MiniDV, NTSC…");
+            tips.SetToolTip(btnProfile, "PAL o NTSC: imposta in un clic sorgente e registrazione (VHS, S-VHS, Hi8, Video8, MiniDV)");
 
             lblName = new Label { Text = "Nome file", AutoSize = true, Tag = "muted", Margin = new Padding(20, 10, 6, 0) };
             txtName = new TextBox { Width = 240, Margin = new Padding(0, 6, 0, 0), PlaceholderText = "es. Rossi_matrimonio_1994", Font = new Font("Segoe UI", 10f) };
@@ -173,6 +173,7 @@ namespace VHSCapture
             canvas.InputSizeOf = s2 => engine.GetInputSize(s2.Id);
             canvas.FrameShown += OnFrameShown;
             canvas.FrameSource = engine;
+            Source.ActualSize = src0 => engine.GetInputSize(src0.Id);
             canvas.RemoveRequested += s2 => RemoveSource(s2);
             canvas.LockChanged += s2 => { settings.Save(); srcList.Invalidate(); canvas.Select(null); };
             var canvasCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(8), Radius = 10 };
@@ -539,6 +540,7 @@ namespace VHSCapture
                 row.VolumeChanged += q => engine.ApplyVolume(q);
                 row.VolumeCommitted += q => { settings.Save(); if (!engine.LiveControl) ScheduleRestart(); };
                 row.MuteChanged += q => { engine.ApplyVolume(q); settings.Save(); if (!engine.LiveControl) ScheduleRestart(); };
+                row.OpenProperties += q => EditSource(q);
                 if (!sx.Visible) row.Enabled = false;
                 mixer.Controls.Add(row);
                 mixerRows[sx.Id] = row;
@@ -717,19 +719,32 @@ namespace VHSCapture
         // ===================== profili (come i profili di OBS) =====================
         record Prof(string Name, string Size, string InFps, string CanvasFps, string Deint, int CropB, bool Wide, string Format, string Note);
 
+        // Due soli profili: tutto l'analogico (VHS, S-VHS, Hi8, Video8, MiniDV dall'uscita analogica) è 720 righe.
+        // Il 16:9 della MiniDV widescreen si fa dalle Proprietà della sorgente con "Forza 16:9".
         static readonly Prof[] Profiles =
         {
-            new Prof("VHS / S-VHS PAL", "720x576", "25", "50", "yadif2x", 8, false, "auto", null),
-            new Prof("Hi8 / Video8 / Digital8 PAL", "720x576", "25", "50", "yadif2x", 8, false, "auto", null),
-            new Prof("MiniDV PAL 4:3", "720x576", "25", "50", "yadif2x", 0, false, "auto", null),
-            new Prof("MiniDV PAL 16:9", "720x576", "25", "50", "yadif2x", 0, true, "auto", null),
-            null,
-            new Prof("VHS / Hi8 NTSC", "720x480", "29.97", "59.94", "yadif2x", 6, false, "auto", "NTSC"),
-            new Prof("MiniDV NTSC 4:3", "720x480", "29.97", "59.94", "yadif2x", 0, false, "auto", "NTSC"),
-            new Prof("MiniDV NTSC 16:9", "720x480", "29.97", "59.94", "yadif2x", 0, true, "auto", "NTSC"),
-            null,
-            new Prof("Camera HDMI 1080p60", "1920x1080", "60", "60", "off", 0, true, "mjpeg", null),
+            new Prof("PAL", "720x576", "25", "50", "yadif2x", 8, false, "auto", null),
+            new Prof("NTSC", "720x480", "29.97", "59.94", "yadif2x", 6, false, "auto", "NTSC"),
         };
+
+        string pendingFitId;
+
+        /// <summary>Dopo un profilo "automatico": appena ffmpeg dice la risoluzione vera, adatto la sorgente al canvas con le proporzioni giuste.</summary>
+        void FitPendingSource()
+        {
+            if (pendingFitId == null) return;
+            var src = settings.Sources.FirstOrDefault(x => x.Id == pendingFitId);
+            if (src == null) { pendingFitId = null; return; }
+            if (engine.GetInputSize(src.Id) == null) return;
+            pendingFitId = null;
+            src.FitTo(settings.CanvasW, settings.CanvasH);
+            settings.Save();
+            engine.ApplyTransform(src);
+            if (!engine.LiveControl) RestartIfRunning();
+            canvas.Invalidate();
+            var (w, h) = src.NaturalSize();
+            AppendLog($"Proporzioni adattate alla sorgente reale ({w}×{h}): {src.W}×{src.H} sul canvas");
+        }
 
         void ShowProfileMenu()
         {
@@ -757,11 +772,18 @@ namespace VHSCapture
             src.CropL = src.CropT = src.CropR = 0; src.CropB = p.CropB;
             settings.CanvasW = 1920; settings.CanvasH = 1080; settings.Fps = p.CanvasFps;
             if (p.Wide) src.FillTo(settings.CanvasW, settings.CanvasH); else src.FitTo(settings.CanvasW, settings.CanvasH);
+            if (p.Size == "auto") pendingFitId = src.Id;   // risoluzione vera nota solo dopo l'avvio: adatto appena arriva
             settings.Profile = p.Name;
             settings.Save();
             canvas.CanvasW = settings.CanvasW; canvas.CanvasH = settings.CanvasH;
             RefreshSourceList(); UpdateRecButton(); canvas.Invalidate();
             AppendLog($"Profilo \"{p.Name}\": ingresso {p.Size} @ {p.InFps}, {(p.Deint == "off" ? "senza deinterlaccio" : "Yadif 2x")}, canvas 1920×1080 @ {p.CanvasFps}, {(p.Wide ? "16:9 a tutto schermo" : "4:3 con bande laterali")}");
+            if (p.Size != "auto")
+            {
+                var modes = FFmpeg.ListModes(src.VideoDevice);
+                if (modes.Count > 0 && !modes.Any(m => m.Size == p.Size))
+                    AppendLog($"⚠ \"{src.VideoDevice}\" non ha la risoluzione {p.Size}: questo profilo è per un grabber di cassette.");
+            }
             if (p.Note == "NTSC")
                 MessageBox.Show(this, "Profilo NTSC impostato.\n\nRicorda: il grabber va messo su NTSC_M (Proprietà sorgente → Driver video… → Standard video) e il lettore deve riprodurre davvero l'NTSC, altrimenti l'immagine esce in bianco e nero o scorre.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Information);
             StartPreview();
@@ -984,6 +1006,7 @@ namespace VHSCapture
                     string fmt = src.VideoFormat == "auto" ? "" : " in " + src.VideoFormat.ToUpperInvariant();
                     AppendLog($"\"{src.VideoDevice}\" non supporta {src.InputSize} @ {src.InputFps}{fmt}: passo a formato, risoluzione e fps automatici");
                     src.InputSize = "auto"; src.InputFps = "auto"; src.VideoFormat = "auto"; changed = true;
+                    pendingFitId = src.Id;   // proporzioni ricalcolate sulla risoluzione vera appena arriva
                 }
             }
             if (!changed) return false;
@@ -1135,6 +1158,7 @@ namespace VHSCapture
 
         void UpdateStatus()
         {
+            FitPendingSource();
             foreach (var r in mixerRows.Values) r.RefreshState(engine.IsRunning);
             string enc = settings.Encoder + " " + (settings.RateControl == "CRF" ? $"CRF {settings.Crf}" : $"{settings.RateControl} {settings.VideoBitrate} kbps");
             var parts = new List<string> { $"{settings.CanvasW}×{settings.CanvasH} @{settings.Fps}" };

@@ -105,17 +105,28 @@ namespace VHSCapture
         }
 
         /// <summary>Dimensioni "naturali" (per Adatta/Ripristina). VHS 720x576 anamorfico → 4:3.</summary>
+        /// <summary>Risoluzione REALE che ffmpeg sta ricevendo dalla sorgente (impostata dall'app), se nota.</summary>
+        [JsonIgnore] public static Func<Source, (int w, int h)?> ActualSize;
+
         public (int w, int h) NaturalSize()
         {
             if (Type == SourceType.Capture)
             {
+                int w = 0, h = 0;
                 var p = (InputSize ?? "").Split('x');
-                if (p.Length == 2 && int.TryParse(p[0], out int w) && int.TryParse(p[1], out int h))
+                if (!(p.Length == 2 && int.TryParse(p[0], out w) && int.TryParse(p[1], out h)))
                 {
-                    if ((w == 720 || w == 704) && (h == 576 || h == 480)) return (h * 4 / 3, h); // PAL/NTSC SD = 4:3
-                    return (w, h);
+                    // "automatico": uso la risoluzione vera che arriva dal dispositivo, non un 4:3 inventato
+                    var real = ActualSize?.Invoke(this);
+                    if (real.HasValue) { w = real.Value.w; h = real.Value.h; }
+                    else return (768, 576);
                 }
-                return (768, 576);
+                w -= CropL + CropR; h -= CropT + CropB;
+                if (w <= 0 || h <= 0) return (768, 576);
+                // SD analogico (PAL/NTSC, 720/704 punti) = 4:3, anche se il ritaglio toglie qualche riga
+                if ((w + CropL + CropR == 720 || w + CropL + CropR == 704) && (h + CropT + CropB == 576 || h + CropT + CropB == 480))
+                    return (h * 4 / 3, h);
+                return (w, h);
             }
             if (Type == SourceType.Image && File.Exists(ImagePath))
             {
@@ -210,6 +221,8 @@ namespace VHSCapture
             s ??= new AppSettings();
             if (s.Sources == null) s.Sources = new List<Source>();
 
+            if (!string.IsNullOrEmpty(s.Profile) && s.Profile != "PAL" && s.Profile != "NTSC")
+                s.Profile = s.Profile.Contains("NTSC") ? "NTSC" : (s.Profile.Contains("PAL") ? "PAL" : "");
             foreach (var src in s.Sources)
             {
                 if (src.Deinterlace.HasValue) src.DeinterlaceMode = src.Deinterlace.Value ? "yadif" : "off";

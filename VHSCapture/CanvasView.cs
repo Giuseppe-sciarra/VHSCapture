@@ -520,7 +520,11 @@ namespace VHSCapture
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
-            if (Selected != null && e.Button == MouseButtons.Left) OpenProperties?.Invoke(Selected);
+            if (e.Button != MouseButtons.Left) return;
+            // anche le sorgenti bloccate: il doppio clic apre solo le proprietà, non le sblocca né le sposta
+            var cp = ToCanvas(e.Location);
+            var hit = Sources.Where(s => s.Visible).Reverse().FirstOrDefault(s => RectOf(s).Contains(cp)) ?? Selected;
+            if (hit != null) OpenProperties?.Invoke(hit);
         }
 
         protected override bool IsInputKey(Keys keyData) => keyData switch

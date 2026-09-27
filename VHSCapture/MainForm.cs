@@ -1000,9 +1000,11 @@ namespace VHSCapture
                     diagAcc.Add((afps, agap, pfps, paintMaxGap * 1000, adrop, engine.SourceFps, lastStats?.Fps ?? 0));
                     if (diagAcc.Count >= 5)
                     {
+                        var (rAvg, rMax) = canvas.TakeRenderStats();
                         AppendLog($"[diagnostica 5 s] sorgente {diagAcc.Average(d => d.src):0.0} fps · uscita {diagAcc.Average(d => d.outf):0.0} fps · " +
                                   $"arrivo anteprima {diagAcc.Average(d => d.af):0.0} fps (pausa max {diagAcc.Max(d => d.ag):0} ms) · " +
-                                  $"a schermo {diagAcc.Average(d => d.pf):0.0} fps (pausa max {diagAcc.Max(d => d.pg):0} ms) · saltati {diagAcc.Sum(d => d.dr)} · CPU ffmpeg {lastCpu:0}%");
+                                  $"a schermo {diagAcc.Average(d => d.pf):0.0} fps (pausa max {diagAcc.Max(d => d.pg):0} ms) · saltati {diagAcc.Sum(d => d.dr)} · " +
+                                  $"disegno frame {rAvg:0.0} ms (max {rMax:0}) · CPU ffmpeg {lastCpu:0}%");
                         diagAcc.Clear();
                     }
                     painted = 0; paintMaxGap = 0; paintWindowStart = now;

@@ -1002,7 +1002,8 @@ namespace VHSCapture
             l.StartsWith("  Metadata:") || l.StartsWith("    ") || l.StartsWith("  Side data") || l.Contains("Press [q] to stop") ||
             l.StartsWith("Stream mapping:") || l.StartsWith("  Stream #") && l.Contains("->") || l.StartsWith("  Duration:") ||
             l.Contains("-progress period set") || l.StartsWith("[Parsed_astats") || l.StartsWith("frame=") ||
-            (l.Contains("[out#") && l.Contains("muxing overhead"));
+            (l.Contains("[out#") && l.Contains("muxing overhead")) ||
+            (l.StartsWith("[null @") && l.Contains("non monotonically increasing dts"));   // uscita fittizia dell'analisi: innocuo
 
         // ---------- costruzione grafo ----------
 

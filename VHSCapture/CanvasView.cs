@@ -117,6 +117,19 @@ namespace VHSCapture
 
         public new void Update() { snap = BuildSnapshot(); renderSignal.Set(); }
 
+        // diagnostica: quanto ci mette il thread di rendering a comporre e mostrare un frame
+        double renderMsSum, renderMsMax; int renderCount;
+        readonly object renderStatLock = new object();
+        public (double avgMs, double maxMs) TakeRenderStats()
+        {
+            lock (renderStatLock)
+            {
+                var r = (renderCount > 0 ? renderMsSum / renderCount : 0, renderMsMax);
+                renderMsSum = 0; renderMsMax = 0; renderCount = 0;
+                return r;
+            }
+        }
+
         class Snapshot
         {
             public int W, H; public Rectangle Dr; public bool Dark;
@@ -149,6 +162,7 @@ namespace VHSCapture
         [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
         [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr hdc);
         [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int w, int h);
+        [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr bits, IntPtr hSection, uint offset);
         [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
         [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
         [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr hdc);
@@ -156,8 +170,12 @@ namespace VHSCapture
 
         void RenderLoop()
         {
+            // buffer in MEMORIA DI SISTEMA (DIB section), non una bitmap "compatibile" con lo schermo:
+            // su quella GDI+ deve rileggere i pixel dalla scheda video a ogni trasparenza ed è lentissimo.
             IntPtr memDC = IntPtr.Zero, memBmp = IntPtr.Zero, oldBmp = IntPtr.Zero;
             int bw = 0, bh = 0;
+            Snapshot lastFull = null;
+            var sw = new System.Diagnostics.Stopwatch();
             try
             {
                 while (!renderStop)
@@ -169,6 +187,7 @@ namespace VHSCapture
                     if (h == IntPtr.Zero || sn == null || w <= 0 || ht <= 0) continue;
                     bool shownNew = newFrame; newFrame = false;
                     var fb = frame;
+                    sw.Restart();
 
                     IntPtr wdc = GetDC(h);
                     if (wdc == IntPtr.Zero) continue;
@@ -178,17 +197,26 @@ namespace VHSCapture
                         {
                             if (memDC != IntPtr.Zero) { SelectObject(memDC, oldBmp); DeleteObject(memBmp); DeleteDC(memDC); }
                             memDC = CreateCompatibleDC(wdc);
-                            memBmp = CreateCompatibleBitmap(wdc, w, ht);
+                            var bmi = new BITMAPINFOHEADER { biSize = 40, biWidth = w, biHeight = -ht, biPlanes = 1, biBitCount = 32, biCompression = 0 };
+                            memBmp = CreateDIBSection(wdc, ref bmi, 0, out _, IntPtr.Zero, 0);
                             oldBmp = SelectObject(memDC, memBmp);
-                            bw = w; bh = ht;
+                            bw = w; bh = ht; lastFull = null;
                         }
-                        // composizione nel buffer: sfondo, video, sovrapposizioni → poi un'unica copia sulla finestra (niente sfarfallio)
-                        using (var g = Graphics.FromHdc(memDC)) DrawScene(g, sn, fb);
+                        using (var g = Graphics.FromHdc(memDC))
+                        {
+                            // sfondo completo solo quando cambia qualcosa (dimensioni, selezione, messaggi…);
+                            // per i frame normali basta ridisegnare il video e le sovrapposizioni sopra
+                            bool full = !ReferenceEquals(sn, lastFull) || fb == null;
+                            DrawScene(g, sn, fb, full);
+                            lastFull = sn;
+                        }
                         BitBlt(wdc, 0, 0, w, ht, memDC, 0, 0, 0x00CC0020);
                     }
                     catch { }
                     finally { ReleaseDC(h, wdc); }
 
+                    sw.Stop();
+                    lock (renderStatLock) { double ms = sw.Elapsed.TotalMilliseconds; renderMsSum += ms; renderCount++; if (ms > renderMsMax) renderMsMax = ms; }
                     if (shownNew) { try { FrameShown?.Invoke(); } catch { } }
                 }
             }
@@ -255,9 +283,9 @@ namespace VHSCapture
         }
 
         // ---------- paint ----------
-        static void DrawScene(Graphics g, Snapshot sn, FrameBuf fb)
+        static void DrawScene(Graphics g, Snapshot sn, FrameBuf fb, bool full)
         {
-            g.Clear(sn.Dark ? Color.FromArgb(22, 22, 24) : Color.FromArgb(52, 52, 56));
+            if (full) g.Clear(sn.Dark ? Color.FromArgb(22, 22, 24) : Color.FromArgb(52, 52, 56));
             var dr = sn.Dr;
             if (dr.Width <= 0) return;
 

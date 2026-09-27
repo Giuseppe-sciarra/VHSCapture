@@ -59,7 +59,12 @@ namespace VHSCapture
                     g.BackColor = Panel; g.ForeColor = Fore; break;
                 case PictureBox _:
                     c.BackColor = Color.Black; break;
+                case ListView lv:
+                    lv.BackColor = Input; lv.ForeColor = Fore; lv.BorderStyle = BorderStyle.FixedSingle; break;
+                case TrackBar tb:
+                    tb.BackColor = (tb.Parent?.Tag as string == "panel") ? Panel : Back; break;
                 case VuMeter _:
+                case CanvasView _:
                     break;
                 default:
                     c.BackColor = (c.Tag as string == "panel") ? Panel : Back; c.ForeColor = Fore; break;

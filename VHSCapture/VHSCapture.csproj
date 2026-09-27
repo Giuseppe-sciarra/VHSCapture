@@ -16,4 +16,8 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="NetMQ" Version="4.0.1.13" />
+  </ItemGroup>
+
 </Project>

@@ -8,37 +8,78 @@ namespace VHSCapture
     /// <summary>Misuratore orizzontale stereo come nel mixer di OBS: due barre L/R, scala -60..0 dB, RMS pieno, picco tenue, peak-hold.</summary>
     public class HMeter : Control
     {
+        // valori mostrati (animati) e valori bersaglio (ultimi dati arrivati)
         readonly double[] rms = { -90, -90 }, peak = { -90, -90 }, hold = { -90, -90 };
+        readonly double[] tRms = { -90, -90 }, tPeak = { -90, -90 };
         readonly DateTime[] holdAt = { DateTime.MinValue, DateTime.MinValue };
-        DateTime lastSet = DateTime.MinValue, lastSignal = DateTime.MinValue;
+        DateTime lastData = DateTime.MinValue, lastSignal = DateTime.MinValue;
         public bool Muted { get; set; }
-        /// <summary>true se negli ultimi 2 secondi è arrivato qualcosa sopra -55 dB.</summary>
-        public bool HasSignal => (DateTime.Now - lastSignal).TotalSeconds < 2;
+        /// <summary>true se negli ultimi 1,5 secondi è arrivato qualcosa sopra -55 dB.</summary>
+        public bool HasSignal => (DateTime.Now - lastSignal).TotalSeconds < 1.5;
+
+        // un solo timer per tutti i misuratori: animazione a ~30 fps indipendente dall'arrivo dei dati (come OBS)
+        static readonly System.Collections.Generic.List<WeakReference<HMeter>> all = new System.Collections.Generic.List<WeakReference<HMeter>>();
+        static System.Windows.Forms.Timer anim;
+        static DateTime lastTick = DateTime.Now;
 
         public HMeter()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             Height = 38;
+            lock (all) all.Add(new WeakReference<HMeter>(this));
+            if (anim == null)
+            {
+                anim = new System.Windows.Forms.Timer { Interval = 33 };
+                anim.Tick += (o, e) => TickAll();
+                anim.Start();
+            }
+        }
+
+        static void TickAll()
+        {
+            var now = DateTime.Now;
+            double dt = Math.Min(0.2, (now - lastTick).TotalSeconds); lastTick = now;
+            lock (all)
+            {
+                for (int i = all.Count - 1; i >= 0; i--)
+                {
+                    if (!all[i].TryGetTarget(out var m) || m.IsDisposed) { all.RemoveAt(i); continue; }
+                    if (m.Visible) m.Animate(dt, now);
+                }
+            }
+        }
+
+        void Animate(double dt, DateTime now)
+        {
+            // se non arrivano dati da un po' (pipeline ferma) il bersaglio torna a silenzio
+            if ((now - lastData).TotalMilliseconds > 400) for (int c = 0; c < 2; c++) { tRms[c] = -90; tPeak[c] = -90; }
+            const double decay = 23.5;   // dB/s, come il decadimento "veloce" dei misuratori di OBS
+            bool changed = false;
+            for (int c = 0; c < 2; c++)
+            {
+                double nr = tRms[c] >= rms[c] ? tRms[c] : Math.Max(tRms[c], rms[c] - decay * dt);
+                double np = tPeak[c] >= peak[c] ? tPeak[c] : Math.Max(tPeak[c], peak[c] - decay * dt);
+                if (Math.Abs(nr - rms[c]) > 0.05 || Math.Abs(np - peak[c]) > 0.05) changed = true;
+                rms[c] = nr; peak[c] = np;
+                if ((now - holdAt[c]).TotalSeconds > 1.5 && hold[c] > -90) { hold[c] = Math.Max(-90, hold[c] - decay * dt); changed = true; }
+            }
+            if (changed) Invalidate();
         }
 
         public void SetLevels(double rmsL, double peakL, double rmsR, double peakR)
         {
             if (rmsR <= -89 && peakR <= -89) { rmsR = rmsL; peakR = peakL; }   // sorgente mono → stessa barra su L e R
-            double dt = Math.Min(0.25, (DateTime.Now - lastSet).TotalSeconds); lastSet = DateTime.Now;
-            double decay = 25 * dt;
-            Upd(0, rmsL, peakL, decay); Upd(1, rmsR, peakR, decay);
+            lastData = DateTime.Now;
+            tRms[0] = rmsL; tRms[1] = rmsR; tPeak[0] = peakL; tPeak[1] = peakR;
+            for (int c = 0; c < 2; c++)
+            {
+                double p = tPeak[c];
+                if (p >= hold[c]) { hold[c] = p; holdAt[c] = DateTime.Now; }
+            }
             if (Math.Max(peakL, peakR) > -55) lastSignal = DateTime.Now;
-            Invalidate();
         }
 
-        void Upd(int c, double r, double p, double decay)
-        {
-            rms[c] = Math.Max(r, rms[c] - decay);
-            peak[c] = Math.Max(p, peak[c] - decay);
-            if (p >= hold[c] || (DateTime.Now - holdAt[c]).TotalSeconds > 1.5) { hold[c] = p; holdAt[c] = DateTime.Now; }
-        }
-
-        public void Reset() { for (int i = 0; i < 2; i++) rms[i] = peak[i] = hold[i] = -90; Invalidate(); }
+        public void Reset() { for (int i = 0; i < 2; i++) rms[i] = peak[i] = hold[i] = tRms[i] = tPeak[i] = -90; Invalidate(); }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -70,7 +111,7 @@ namespace VHSCapture
             // scala: tacche ogni 5 dB, numeri ogni 10 (come OBS, senza sovrapposizioni)
             int ty = y0 + 2 * (barH + gap);
             using var tick = new Pen(Theme.Muted);
-            using var f = new Font("Segoe UI", 7f);
+            var f = ScaleFont;
             for (int db = -60; db <= 0; db += 5)
             {
                 int tx = (int)(w * frac(db));
@@ -82,6 +123,8 @@ namespace VHSCapture
                 TextRenderer.DrawText(g, t, f, new Point(lx, ty + 5), Theme.Muted, TextFormatFlags.NoPadding);
             }
         }
+
+        static readonly Font ScaleFont = new Font("Segoe UI", 7f);
 
         static void Bar(Graphics g, int x0, int y, int w, int h, double fr, int xY, int xR, Brush gr, Brush ye, Brush re)
         {

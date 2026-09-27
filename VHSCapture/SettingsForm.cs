@@ -25,6 +25,8 @@ namespace VHSCapture
         NumericUpDown nAudioBr; CheckBox chkMono; ComboBox cbMonDev;
         // Avanzate
         CheckBox chkLive, chkPrio;
+        // Fine cassetta
+        CheckBox chkAutoStop, chkTrim, chkAskName; NumericUpDown nAutoSec;
 
         readonly Dictionary<string, Panel> pages = new Dictionary<string, Panel>();
         ListBox nav; Panel host;
@@ -209,6 +211,14 @@ namespace VHSCapture
             nSplit = Num(0, 600, 5);
             Row(file, "Dividi file ogni (minuti)", nSplit, "0 = no. Utile per chiavette FAT32 (4 GB)");
 
+            var fine = Section(p, "Fine cassetta");
+            chkAutoStop = Check(fine, "Ferma da sola quando la cassetta finisce", "Quando il grabber manda schermo blu o nero uniforme (videoregistratore senza segnale). Si attiva solo dopo 10 s di immagine, così se premi Registra prima del Play non si ferma.");
+            nAutoSec = Num(5, 600, 5);
+            Row(fine, "Dopo quanti secondi", nAutoSec, "20–30 vanno bene");
+            chkTrim = Check(fine, "Taglia la parte blu finale dal file", "Senza ricodifica, pochi secondi anche per file lunghi.");
+            chkAskName = Check(fine, "Chiedi il nome della cassetta alla fine", "Il file viene rinominato \"Nome cassetta.mp4\". Se annulli resta il nome automatico.");
+            chkAutoStop.CheckedChanged += (o, e) => { nAutoSec.Enabled = chkTrim.Enabled = chkAutoStop.Checked; };
+
             var enc = Section(p, "Encoder video");
             cbEncoder = Combo();
             Row(enc, "Encoder", cbEncoder, "solo quelli che funzionano su questo PC");
@@ -299,6 +309,11 @@ namespace VHSCapture
             cbMonDev.SelectedIndex = Math.Clamp(s.MonitorDevice + 1, 0, cbMonDev.Items.Count - 1);
 
             chkPrio.Checked = s.HighPriority;
+            chkAutoStop.Checked = s.AutoStopOnBlank;
+            nAutoSec.Value = Math.Clamp(s.AutoStopSeconds, 5, 600);
+            chkTrim.Checked = s.TrimBlankTail;
+            chkAskName.Checked = s.AskNameAtEnd;
+            nAutoSec.Enabled = chkTrim.Enabled = chkAutoStop.Checked;
             chkLive.Checked = s.LiveControl;
             UpdateEnabled();
         }
@@ -337,6 +352,10 @@ namespace VHSCapture
             s.MonitorDevice = cbMonDev.SelectedIndex - 1;
 
             s.HighPriority = chkPrio.Checked;
+            s.AutoStopOnBlank = chkAutoStop.Checked;
+            s.AutoStopSeconds = (int)nAutoSec.Value;
+            s.TrimBlankTail = chkTrim.Checked;
+            s.AskNameAtEnd = chkAskName.Checked;
             s.LiveControl = chkLive.Checked;
             s.Save();
             return true;

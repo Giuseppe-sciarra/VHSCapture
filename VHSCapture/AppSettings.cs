@@ -167,6 +167,12 @@ namespace VHSCapture
         public int MonitorDevice { get; set; } = -1;           // uscita audio per l'ascolto (-1 = predefinita di Windows)
         public int KeyframeSec { get; set; } = 2;              // intervallo keyframe (OBS: 2 s)
 
+        // Fine cassetta
+        public bool AutoStopOnBlank { get; set; } = true;      // ferma quando il grabber manda schermo blu/nero uniforme
+        public int AutoStopSeconds { get; set; } = 30;
+        public bool TrimBlankTail { get; set; } = true;        // taglia la coda blu/nera dal file
+        public bool AskNameAtEnd { get; set; } = true;         // a fine registrazione chiede il nome della cassetta e rinomina
+
         // Controllo live (zmq)
         public bool LiveControl { get; set; } = true;
 

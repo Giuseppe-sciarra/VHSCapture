@@ -184,6 +184,25 @@ namespace VHSCapture
             catch { return (false, -91, -91); }
         }
 
+        /// <summary>Taglia il file a 'seconds' secondi senza ricodificare (per togliere la coda blu). Rimpiazza il file originale.</summary>
+        public static bool TrimFile(string file, double seconds, Action<string> log)
+        {
+            try
+            {
+                string tmp = Path.Combine(Path.GetDirectoryName(file), Path.GetFileNameWithoutExtension(file) + ".trim" + Path.GetExtension(file));
+                string args = $"-hide_banner -loglevel error -y -i \"{file}\" -t {seconds.ToString("0.00", CultureInfo.InvariantCulture)} -map 0 -c copy -movflags +faststart \"{tmp}\"";
+                log?.Invoke("ffmpeg " + args);
+                using var p = Process.Start(Psi(args));
+                var se = p.StandardError.ReadToEndAsync(); p.StandardOutput.ReadToEnd(); p.WaitForExit();
+                if (!string.IsNullOrWhiteSpace(se.Result)) log?.Invoke(se.Result.Trim());
+                if (p.ExitCode != 0 || !File.Exists(tmp) || new FileInfo(tmp).Length < 4096) { try { File.Delete(tmp); } catch { } return false; }
+                File.Delete(file);
+                File.Move(tmp, file);
+                return true;
+            }
+            catch (Exception ex) { log?.Invoke("Taglio non riuscito: " + ex.Message); return false; }
+        }
+
         public static bool RemuxToMp4(string mkv, string mp4, Action<string> log)
         {
             try
@@ -491,6 +510,8 @@ namespace VHSCapture
         public event Action<string, double, double, double, double> AudioLevels;
         public event Action<byte[], int> MonitorData;
         public event Action<EngineStats> Stats;
+        /// <summary>Stato del segnale della sorgente analizzata (2 volte al secondo): vuoto = schermo blu o nero uniforme.</summary>
+        public event Action<string, bool, string> SignalState;   // id, vuoto, "blu"/"nero"/""
         public event Action<string> Log;
         public event Action<int> Exited;
 
@@ -517,6 +538,7 @@ namespace VHSCapture
 
         /// <summary>Se true i livelli audio vanno a NUL (paracadute: l'anteprima e la registrazione non dipendono dal VU).</summary>
         public bool MetersDisabled { get; set; }
+        public bool AnalysisDisabled { get; set; }
 
         public void Start(AppSettings s, int previewW, bool monitor)
         {
@@ -544,6 +566,8 @@ namespace VHSCapture
                 Progress = "vhscap_pr_" + tag,
                 Monitor = mon ? "vhscap_mo_" + tag : null,
                 Meters = MetersDisabled ? new Dictionary<string, string>() : audioIds.ToDictionary(id => id, id => "vhscap_me_" + id + "_" + tag),
+                Analysis = AnalysisDisabled ? new Dictionary<string, string>() :
+                    s.Sources.Where(x => x.Visible && x.Type == SourceType.Capture && IsUsable(x)).Take(1).ToDictionary(x => x.Id, x => "vhscap_an_" + x.Id + "_" + tag),
             };
 
             // server delle pipe PRIMA di avviare ffmpeg
@@ -574,6 +598,11 @@ namespace VHSCapture
             Run("ts", () => TsLoop(tsPipe));
             Run("progress", () => TextLoop(prPipe, OnProgressLine));
             foreach (var kv in mePipes) { var id = kv.Key; foreach (var p in kv.Value) { var pp = p; Run("meter", () => TextLoop(pp, l => OnMeterLine(id, l))); } }
+            foreach (var kv in names.Analysis)
+            {
+                var id = kv.Key;
+                for (int i = 0; i < meterInstances; i++) { var pp = NewPipe(kv.Value, 64 << 10, meterInstances); Run("analysis", () => TextLoop(pp, l => OnAnalysisLine(id, l))); }
+            }
             if (moPipe != null) Run("monitor", () => MonitorLoop(moPipe));
 
             if (live)
@@ -817,6 +846,41 @@ namespace VHSCapture
             }
         }
 
+        class SigState { public double yl, yh, ya, ul, uh, ua, vl, vh; public bool any; }
+        readonly ConcurrentDictionary<string, SigState> sig = new ConcurrentDictionary<string, SigState>();
+
+        void OnAnalysisLine(string id, string line)
+        {
+            var g = sig.GetOrAdd(id, _ => new SigState());
+            if (line.StartsWith("frame:"))
+            {
+                if (g.any)
+                {
+                    // uniforme = immagine piatta (il rumore del nastro sparisce nel rimpicciolimento a 64x36)
+                    bool uniform = g.yh - g.yl <= 12 && g.uh - g.ul <= 10 && g.vh - g.vl <= 10;
+                    string kind = !uniform ? "" : g.ua >= 160 ? "blu" : g.ya <= 40 ? "nero" : "";
+                    SignalState?.Invoke(id, kind != "", kind);
+                }
+                g.any = false;
+                return;
+            }
+            const string k = "lavfi.signalstats.";
+            if (!line.StartsWith(k)) return;
+            int eq = line.IndexOf('='); if (eq < 0) return;
+            if (!double.TryParse(line.Substring(eq + 1), NumberStyles.Float, CultureInfo.InvariantCulture, out double v)) return;
+            switch (line.Substring(k.Length, eq - k.Length))
+            {
+                case "YLOW": g.yl = v; g.any = true; break;
+                case "YHIGH": g.yh = v; break;
+                case "YAVG": g.ya = v; break;
+                case "ULOW": g.ul = v; break;
+                case "UHIGH": g.uh = v; break;
+                case "UAVG": g.ua = v; break;
+                case "VLOW": g.vl = v; break;
+                case "VHIGH": g.vh = v; break;
+            }
+        }
+
         readonly EngineStats st = new EngineStats();
         void OnProgressLine(string line)
         {
@@ -881,6 +945,7 @@ namespace VHSCapture
         {
             public string Preview, Ts, Progress, Monitor;
             public Dictionary<string, string> Meters = new Dictionary<string, string>();
+            public Dictionary<string, string> Analysis = new Dictionary<string, string>();   // rilevamento fine cassetta
             public static string Win(string n) => @"\\.\pipe\" + n;
             /// <summary>
             /// Percorso della pipe dentro l'opzione di un filtro. I backslash vanno escapati DUE volte
@@ -955,6 +1020,7 @@ namespace VHSCapture
             if (zmq) { graph.Append("[0:v]zmq[base];"); cur = "[base]"; }
 
             int k = 0;
+            var analysisLabels = new List<string>();
             foreach (var kv in idx)
             {
                 var src = kv.Key; int i = kv.Value;
@@ -964,6 +1030,16 @@ namespace VHSCapture
                     var d = DeintFilter(src.DeinterlaceMode);
                     if (d != null) chain.Add(d);
                     chain.Add($"crop@s{src.Id}=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT}:exact=1");
+                    if (pn.Analysis.TryGetValue(src.Id, out var anPipe))
+                    {
+                        // ramo di analisi per la fine cassetta: 2 fps, 64x36, statistiche del segnale → pipe
+                        graph.Append($"[{i}:v]{string.Join(",", chain)},split=2[cs{k}][an{k}];");
+                        graph.Append($"[an{k}]fps=2,scale=64:36:flags=area,signalstats,metadata=mode=print:direct=1:file={PipeNames.InFilter(anPipe)}[ano{k}];");
+                        analysisLabels.Add($"[ano{k}]");
+                        chain.Clear();
+                        chain.Add("null");
+                        i = -1;   // l'ingresso della catena ora è [cs{k}]
+                    }
                     chain.Add($"eq@s{src.Id}=brightness={F(src.Brightness)}:contrast={F(src.Contrast)}:saturation={F(src.Saturation)}:gamma={F(src.Gamma)}");
                     chain.Add($"hue@s{src.Id}=h={F(src.Hue, "0.#")}");
                 }
@@ -973,7 +1049,8 @@ namespace VHSCapture
                     chain.Add($"hue@s{src.Id}=h={F(src.Hue, "0.#")}:s={F(src.Saturation)}:b={F(src.Brightness * 10)}");
                 }
                 chain.Add($"scale@s{src.Id}=w={Math.Max(2, src.W)}:h={Math.Max(2, src.H)}:flags={ScaleFlags(src.ScaleFilter)}:eval=frame");
-                graph.Append($"[{i}:v]{string.Join(",", chain)}[v{k}];");
+                string inLabel = i >= 0 ? $"[{i}:v]" : $"[cs{k}]";
+                graph.Append($"{inLabel}{string.Join(",", chain)}[v{k}];");
                 graph.Append($"{cur}[v{k}]overlay@s{src.Id}=x={src.X}:y={src.Y}:eof_action=pass:format=yuv420[t{k}];");
                 cur = $"[t{k}]";
                 k++;
@@ -996,7 +1073,7 @@ namespace VHSCapture
                 string meterPipe = pn.Meters.TryGetValue(src.Id, out var mp) ? PipeNames.InFilter(mp) : "NUL";
                 graph.Append($"[{idx[src]}:a]{off}aresample=48000:async=1,volume@a{src.Id}=volume={F(src.VolumeGain, "0.#####")},asplit=2[am{a}][ax{a}];");
                 graph.Append($"[am{a}]asetnsamples=n=1600:p=0,astats=metadata=1:reset=1:measure_perchannel=RMS_level+Peak_level:measure_overall=none," +
-                             $"ametadata=mode=print:file={meterPipe}[amo{a}];");
+                             $"ametadata=mode=print:direct=1:file={meterPipe}[amo{a}];");
                 graph.Append($"[ax{a}]volume@m{src.Id}=volume={(src.Muted ? "0" : "1")}[amx{a}];");
                 meterLabels.Add($"[amo{a}]"); mixLabels.Add($"[amx{a}]");
                 a++;
@@ -1025,6 +1102,7 @@ namespace VHSCapture
 
             sb.Append($"-map \"[pvs]\" -f rawvideo \"{PipeNames.Win(pn.Preview)}\" ");
             foreach (var ml in meterLabels) sb.Append($"-map \"{ml}\" -f null NUL ");
+            foreach (var al in analysisLabels) sb.Append($"-map \"{al}\" -f null NUL ");
             if (mon) sb.Append($"-map \"[amons]\" -f s16le -ar 48000 -ac 2 \"{PipeNames.Win(pn.Monitor)}\"");
             return sb.ToString();
         }

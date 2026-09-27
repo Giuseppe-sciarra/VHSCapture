@@ -27,6 +27,7 @@ namespace VHSCapture
         public event Action<Source> OpenProperties;
         public event Action<Source> RemoveRequested;
         public event Action<Source> LockChanged;
+        static readonly Font LabelFont = new Font("Segoe UI", 8.5f), RecFont = new Font("Segoe UI Semibold", 11f), MsgFont = new Font("Segoe UI", 12f);
 
         enum Mode { None, Move, Resize, Crop }
         int startCropL, startCropT, startCropR, startCropB;
@@ -65,8 +66,10 @@ namespace VHSCapture
             IntPtr hdc = g.GetHdc();
             try
             {
-                // HALFTONE = buona qualità in riduzione; a scala ~1:1 costa pochissimo
-                SetStretchBltMode(hdc, 4);
+                // quasi 1:1 (l'anteprima è già grande come il riquadro): COLORONCOLOR, velocissimo.
+                // Solo se si rimpicciolisce molto uso HALFTONE (più bello ma molto più lento).
+                double ratio = (double)dr.Width / fb.W;
+                SetStretchBltMode(hdc, ratio < 0.8 ? 4 : 3);
                 SetBrushOrgEx(hdc, 0, 0, IntPtr.Zero);
                 StretchDIBits(hdc, dr.X, dr.Y, dr.Width, dr.Height, 0, 0, fb.W, fb.H, fb.Data, ref bmi, 0, 0x00CC0020);
             }
@@ -118,7 +121,7 @@ namespace VHSCapture
             }
             else
             {
-                using var f = new Font("Segoe UI", 12f);
+                var f = MsgFont;
                 using var b = new SolidBrush(Color.Gray);
                 var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
                 g.DrawString(string.IsNullOrEmpty(Message) ? "Nessuna anteprima" : Message, f, b, dr, sf);
@@ -128,7 +131,7 @@ namespace VHSCapture
                 // bordo rosso + badge: si vede subito che stai registrando, e il video continua a scorrere sotto
                 using (var pen = new Pen(Theme.Rec, 3)) g.DrawRectangle(pen, dr.X - 2, dr.Y - 2, dr.Width + 3, dr.Height + 3);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                using var f = new Font("Segoe UI Semibold", 11f);
+                var f = RecFont;
                 var sz = g.MeasureString(RecText, f);
                 var br = new Rectangle(dr.X + 12, dr.Y + 12, (int)sz.Width + 20, (int)sz.Height + 8);
                 using (var path = Ui.Rounded(br, br.Height / 2))
@@ -159,7 +162,7 @@ namespace VHSCapture
                     using var hb = new SolidBrush(Theme.Rec);
                     foreach (var h in Handles(sr)) g.FillRectangle(hb, h);
                 }
-                using var f = new Font("Segoe UI", 8.5f);
+                var f = LabelFont;
                 string lbl = (Selected.Locked ? "(bloccata)  " : "") + $"{Selected.Name}   {Selected.W}×{Selected.H}   pos {Selected.X},{Selected.Y}";
                 if (Selected.CropL + Selected.CropT + Selected.CropR + Selected.CropB > 0) lbl += $"   ritaglio {Selected.CropL},{Selected.CropT},{Selected.CropR},{Selected.CropB}";
                 var sz = g.MeasureString(lbl, f);

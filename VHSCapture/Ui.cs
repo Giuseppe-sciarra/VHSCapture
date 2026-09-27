@@ -97,6 +97,8 @@ namespace VHSCapture
             {
                 case "accent": return (Theme.Accent, Color.White, Theme.Accent);
                 case "rec": return (Theme.Rec, Color.White, Theme.Rec);
+                // "Ferma registrazione": colore diverso dal rosso di avvio, chiaro su scuro / scuro su chiaro, testo rosso
+                case "stop": return (dark ? Color.FromArgb(235, 235, 238) : Color.FromArgb(40, 40, 44), dark ? Color.FromArgb(190, 30, 30) : Color.FromArgb(255, 110, 100), Theme.Rec);
                 case "danger": return (Theme.Panel, Theme.Rec, Theme.Rec);
                 case "ghost": return (Theme.Panel, Theme.Fore, Theme.Border);
                 default: return (dark ? Color.FromArgb(58, 58, 62) : Color.FromArgb(232, 232, 236), Theme.Fore, Color.Transparent);

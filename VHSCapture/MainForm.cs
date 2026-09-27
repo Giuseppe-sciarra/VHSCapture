@@ -17,7 +17,7 @@ namespace VHSCapture
         SplitContainer splitLog, splitMain, splitRight;
         Card top, cardSources, cardMixer, cardLog, status;
         CanvasView canvas;
-        RoundedButton btnPreview, btnRec, btnStop, btnSettings, btnFolder, btnTheme, btnLog;
+        RoundedButton btnRec, btnSettings, btnFolder, btnTheme, btnLog;
         RoundedButton btnAdd, btnRemove, btnProps, btnUp, btnDown;
         TextBox txtName, txtLog;
         Label lblStatus; Pill lblRec;
@@ -36,6 +36,8 @@ namespace VHSCapture
         int frames; DateTime lastFrameAt = DateTime.MinValue;
         readonly System.Text.StringBuilder runLog = new System.Text.StringBuilder();
         bool autoRetried;
+        // fine cassetta
+        DateTime? blankSince; string blankKind = ""; double blankStartRecSec = -1; int contentSamples; bool autoStopped;
 
         public MainForm()
         {
@@ -50,10 +52,10 @@ namespace VHSCapture
             KeyPreview = true;
             KeyDown += (o, e) =>
             {
+                if (e.KeyCode == Keys.F5) { e.Handled = true; if (!engine.IsRecording) StartPreview(); return; }
                 if (e.KeyCode != Keys.F9) return;
                 e.Handled = true;
-                if (engine.IsRecording) { if (!finalizing) StopRecording(true); }
-                else StartRecording();
+                ToggleRecording();
             };
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -65,6 +67,7 @@ namespace VHSCapture
             engine.FrameReady += OnFrame;
             engine.AudioLevels += (id, rl, pl, rr, pr) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (mixerRows.TryGetValue(id, out var row)) row.Meter.SetLevels(rl, pl, rr, pr); })); } catch { } };
             engine.Stats += st => lastStats = st;
+            engine.SignalState += (id, blank, kind) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => OnSignal(blank, kind))); } catch { } };
             engine.MonitorData += (d, n) => monitor.Add(d, n);
             engine.Log += l => { lock (runLog) { if (runLog.Length < 20000) runLog.AppendLine(l); } AppendLog(l); };
             engine.Exited += OnEngineExited;
@@ -75,9 +78,13 @@ namespace VHSCapture
             restartTimer = new System.Windows.Forms.Timer { Interval = 450 };
             restartTimer.Tick += (o, e) => { restartTimer.Stop(); if (!engine.IsRecording) StartPreview(); };
 
+            Shown += (o, e) =>
+            {
+                ApplySplitters();          // qui la finestra ha già la dimensione finale (anche se massimizzata)
+                splittersReady = true;
+            };
             Load += (o, e) =>
             {
-                ApplySplitters();
                 ApplyCompact();
                 if (!FFmpeg.Exists)
                 {
@@ -102,9 +109,12 @@ namespace VHSCapture
                 if (WindowState == FormWindowState.Normal) { settings.WindowW = ClientSize.Width; settings.WindowH = ClientSize.Height; }
                 settings.ShowLog = !splitLog.Panel2Collapsed;
                 settings.RightPanelHidden = splitMain.Panel2Collapsed;
-                if (!splitMain.Panel2Collapsed) settings.RightPanelW = splitMain.Width - splitMain.SplitterDistance;
-                settings.MixerH = splitRight.Height - splitRight.SplitterDistance;
-                if (!splitLog.Panel2Collapsed) settings.LogH = splitLog.Height - splitLog.SplitterDistance;
+                if (splittersReady)
+                {
+                    if (!splitMain.Panel2Collapsed) settings.RightPanelW = splitMain.Width - splitMain.SplitterDistance - splitMain.SplitterWidth;
+                    settings.MixerH = splitRight.Height - splitRight.SplitterDistance - splitRight.SplitterWidth;
+                    if (!splitLog.Panel2Collapsed) settings.LogH = splitLog.Height - splitLog.SplitterDistance - splitLog.SplitterWidth;
+                }
                 settings.Save();
             };
         }
@@ -118,11 +128,10 @@ namespace VHSCapture
             // ---- barra superiore ----
             top = new Card { Dock = DockStyle.Top, Height = 62, Padding = new Padding(12, 12, 12, 12), Margin = new Padding(0), Radius = 10 };
             var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Tag = "panel" };
-            btnPreview = Ui.Btn("▶   Anteprima", "normal", (o, e) => StartPreview());
-            btnRec = Ui.Btn("⏺   Registra", "rec", (o, e) => StartRecording(), 130);
-            new ToolTip().SetToolTip(btnRec, "Registra (F9)");
-            btnStop = Ui.Btn("⏹   Stop", "normal", (o, e) => StopRecording(true)); btnStop.Enabled = false;
-            new ToolTip().SetToolTip(btnStop, "Ferma registrazione (F9)");
+            // come OBS: un solo pulsante. Rosso = avvia, chiaro = ferma. L'anteprima parte da sola (F5 per riavviarla).
+            btnRec = Ui.Btn("⏺   Avvia registrazione", "rec", (o, e) => ToggleRecording(), 230);
+            tips.SetToolTip(btnRec, "Avvia / ferma registrazione (F9)");
+
             lblName = new Label { Text = "Nome file", AutoSize = true, Tag = "muted", Margin = new Padding(20, 10, 6, 0) };
             txtName = new TextBox { Width = 240, Margin = new Padding(0, 6, 0, 0), PlaceholderText = "es. Rossi_matrimonio_1994", Font = new Font("Segoe UI", 10f) };
             btnSettings = Ui.Btn("⚙   Impostazioni", "ghost", (o, e) => OpenSettings()); btnSettings.Margin = new Padding(20, 0, 8, 0);
@@ -130,7 +139,7 @@ namespace VHSCapture
             btnTheme = Ui.IconBtn("◐", "Tema chiaro/scuro", (o, e) => { settings.DarkTheme = !settings.DarkTheme; settings.Save(); Theme.Apply(this, settings.DarkTheme); RefreshSourceList(); });
             btnLog = Ui.Btn("Log", "ghost", (o, e) => ToggleLog());
             btnPanels = Ui.IconBtn("◧", "Mostra/nascondi pannello Sorgenti e Mixer", (o, e) => ToggleRightPanel());
-            flow.Controls.AddRange(new Control[] { btnPreview, btnRec, btnStop, lblName, txtName, btnSettings, btnFolder, btnTheme, btnPanels, btnLog });
+            flow.Controls.AddRange(new Control[] { btnRec, lblName, txtName, btnSettings, btnFolder, btnTheme, btnPanels, btnLog });
             Resize += (o, e) => ApplyCompact();
             top.Controls.Add(flow);
 
@@ -183,7 +192,7 @@ namespace VHSCapture
             mixer.Resize += (o, e) => LayoutMixer();
             var monBar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, WrapContents = false, Padding = new Padding(0, 6, 0, 0), Tag = "panel" };
             btnMonitor = Ui.Btn(settings.AudioMonitor ? "🎧  Ascolto attivo" : "🎧  Ascolta", settings.AudioMonitor ? "accent" : "ghost", (o, e) => ToggleMonitor());
-            new ToolTip().SetToolTip(btnMonitor, "Monitoraggio audio: senti l'audio del grabber dalle casse (come OBS)");
+            tips.SetToolTip(btnMonitor, "Monitoraggio audio: senti l'audio del grabber dalle casse (come OBS)");
             monBar.Controls.Add(btnMonitor);
             cardMixer.Controls.Add(mixer); cardMixer.Controls.Add(monBar);
 
@@ -193,17 +202,20 @@ namespace VHSCapture
             cardLog.Controls.Add(txtLog);
 
             // ---- split: destra (sorgenti | mixer) ----
-            splitRight = new SplitContainer { Size = new Size(400, 800), Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = gap, Panel1MinSize = 80, Panel2MinSize = 80 };
+            splitRight = new SplitContainer { Size = new Size(400, 800), Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = gap, Panel1MinSize = 80, Panel2MinSize = 80, FixedPanel = FixedPanel.Panel2 };
             splitRight.Panel1.Controls.Add(cardSources);
             splitRight.Panel2.Controls.Add(cardMixer);
 
             // ---- split: canvas | destra ----
-            splitMain = new SplitContainer { Size = new Size(1400, 800), Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = gap, Panel1MinSize = 240, Panel2MinSize = 200, Panel2Collapsed = settings.RightPanelHidden };
+            splitMain = new SplitContainer { Size = new Size(1400, 800), Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = gap, Panel1MinSize = 240, Panel2MinSize = 200, Panel2Collapsed = settings.RightPanelHidden, FixedPanel = FixedPanel.Panel2 };
             splitMain.Panel1.Controls.Add(canvasCard);
             splitMain.Panel2.Controls.Add(splitRight);
 
             // ---- split: sopra | log ----
-            splitLog = new SplitContainer { Size = new Size(1400, 900), Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = gap, Panel1MinSize = 160, Panel2MinSize = 60, Panel2Collapsed = !settings.ShowLog };
+            splitLog = new SplitContainer { Size = new Size(1400, 900), Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = gap, Panel1MinSize = 160, Panel2MinSize = 60, Panel2Collapsed = !settings.ShowLog, FixedPanel = FixedPanel.Panel2 };
+            splitMain.SplitterMoved += (o, e) => SaveSplitters();
+            splitRight.SplitterMoved += (o, e) => SaveSplitters();
+            splitLog.SplitterMoved += (o, e) => SaveSplitters();
             splitLog.Panel1.Controls.Add(splitMain);
             splitLog.Panel2.Controls.Add(cardLog);
 
@@ -220,22 +232,35 @@ namespace VHSCapture
             Controls.Add(topWrap);
         }
 
+        bool splittersReady;
+
+        /// <summary>Salva le misure dei pannelli appena rilasci lo splitter (non solo alla chiusura).</summary>
+        void SaveSplitters()
+        {
+            if (!splittersReady) return;
+            if (!splitMain.Panel2Collapsed) settings.RightPanelW = splitMain.Width - splitMain.SplitterDistance - splitMain.SplitterWidth;
+            settings.MixerH = splitRight.Height - splitRight.SplitterDistance - splitRight.SplitterWidth;
+            if (!splitLog.Panel2Collapsed) settings.LogH = splitLog.Height - splitLog.SplitterDistance - splitLog.SplitterWidth;
+            settings.Save();
+        }
+
         void ApplySplitters()
         {
+            bool was = splittersReady; splittersReady = false;   // le mie impostazioni non devono scatenare il salvataggio
             try
             {
                 if (!splitMain.Panel2Collapsed) splitMain.SplitterDistance = Math.Max(splitMain.Panel1MinSize, splitMain.Width - Math.Max(200, settings.RightPanelW) - splitMain.SplitterWidth);
                 splitRight.SplitterDistance = Math.Max(splitRight.Panel1MinSize, splitRight.Height - Math.Max(80, settings.MixerH) - splitRight.SplitterWidth);
-                if (!splitLog.Panel2Collapsed) splitLog.SplitterDistance = Math.Max(splitLog.Panel1MinSize, splitLog.Height - Math.Max(80, settings.LogH) - splitLog.SplitterWidth);
+                if (!splitLog.Panel2Collapsed) splitLog.SplitterDistance = Math.Max(splitLog.Panel1MinSize, splitLog.Height - Math.Max(60, settings.LogH) - splitLog.SplitterWidth);
             }
             catch { }
+            splittersReady = was;
         }
 
         void ToggleLog()
         {
             splitLog.Panel2Collapsed = !splitLog.Panel2Collapsed;
-            if (!splitLog.Panel2Collapsed)
-                try { splitLog.SplitterDistance = Math.Max(splitLog.Panel1MinSize, splitLog.Height - Math.Max(80, settings.LogH) - splitLog.SplitterWidth); } catch { }
+            if (!splitLog.Panel2Collapsed) ApplySplitters();
         }
 
         // ---------------- sorgenti ----------------
@@ -282,11 +307,11 @@ namespace VHSCapture
 
         string Prompt(string title, string label, string value)
         {
-            using var f = new Form { Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(380, 130), MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false, Font = Font };
-            var l = new Label { Text = label, Left = 14, Top = 16, AutoSize = true };
-            var t = new TextBox { Left = 14, Top = 40, Width = 350, Text = value };
-            var ok = Ui.Btn("OK", "accent", null, 100); ok.Left = 158; ok.Top = 80; ok.DialogResult = DialogResult.OK;
-            var ca = Ui.Btn("Annulla", "normal", null, 100); ca.Left = 264; ca.Top = 80; ca.DialogResult = DialogResult.Cancel;
+            using var f = new Form { Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(480, 150), MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = true, TopMost = true, Font = Font };
+            var l = new Label { Text = label, Left = 14, Top = 14, Width = 452, Height = 36 };
+            var t = new TextBox { Left = 14, Top = 56, Width = 452, Text = value, Font = new Font("Segoe UI", 11f), BorderStyle = BorderStyle.FixedSingle };
+            var ok = Ui.Btn("OK", "accent", null, 100); ok.Left = 258; ok.Top = 100; ok.DialogResult = DialogResult.OK;
+            var ca = Ui.Btn("Annulla", "normal", null, 100); ca.Left = 366; ca.Top = 100; ca.DialogResult = DialogResult.Cancel;
             f.Controls.AddRange(new Control[] { l, t, ok, ca });
             f.AcceptButton = ok; f.CancelButton = ca;
             Theme.Apply(f, settings.DarkTheme);
@@ -295,7 +320,7 @@ namespace VHSCapture
 
         void ToggleRightPanel()
         {
-            if (!splitMain.Panel2Collapsed) settings.RightPanelW = splitMain.Width - splitMain.SplitterDistance;
+            if (!splitMain.Panel2Collapsed && splittersReady) settings.RightPanelW = splitMain.Width - splitMain.SplitterDistance - splitMain.SplitterWidth;
             splitMain.Panel2Collapsed = !splitMain.Panel2Collapsed;
             if (!splitMain.Panel2Collapsed) ApplySplitters();
             settings.RightPanelHidden = splitMain.Panel2Collapsed;
@@ -303,23 +328,22 @@ namespace VHSCapture
         }
 
         bool? compactState;
+        readonly ToolTip tips = new ToolTip { InitialDelay = 600 };
         /// <summary>Finestra stretta: pulsanti solo icona, così la barra ci sta anche su schermi piccoli o a metà schermo.</summary>
         void ApplyCompact()
         {
-            if (btnPreview == null) return;
+            if (btnRec == null) return;
             bool compact = ClientSize.Width < 1180;
             if (compactState == compact) return;
             compactState = compact;
-            btnPreview.Text = compact ? "▶" : "▶   Anteprima";
-            btnRec.Text = compact ? "⏺  REC" : "⏺   Registra";
-            btnRec.MinimumSize = new Size(compact ? 80 : 130, 36);
-            btnStop.Text = compact ? "⏹" : "⏹   Stop";
+            UpdateRecButton();
             btnSettings.Text = compact ? "⚙" : "⚙   Impostazioni";
             btnFolder.Text = compact ? "📁" : "📁   Apri cartella";
             lblName.Visible = !compact;
             txtName.Width = compact ? 150 : 240;
             btnSettings.Margin = new Padding(compact ? 8 : 20, 0, 8, 0);
-            foreach (var b in new[] { btnPreview, btnStop, btnSettings, btnFolder }) new ToolTip().SetToolTip(b, b == btnPreview ? "Anteprima" : b == btnStop ? "Stop (F9)" : b == btnSettings ? "Impostazioni" : "Apri cartella");
+            tips.SetToolTip(btnSettings, compact ? "Impostazioni" : null);
+            tips.SetToolTip(btnFolder, compact ? "Apri cartella" : null);
             top.PerformLayout();
         }
 
@@ -576,6 +600,7 @@ namespace VHSCapture
             try { engine.StartRecording(settings, recFile); }
             catch (Exception ex) { AppendLog("Errore avvio registrazione: " + ex.Message); return; }
             recStart = DateTime.Now;
+            blankSince = null; blankStartRecSec = -1; contentSamples = 0; autoStopped = false;
             AppendLog("Registrazione avviata: " + Path.GetFileName(recFile));
             SetButtons();
         }
@@ -614,6 +639,30 @@ namespace VHSCapture
             else if (final.Contains("%03d")) AppendLog("Salvato in più parti: " + string.Join(", ", RecordedFiles(final).Select(Path.GetFileName)));
             else AppendLog("Salvato: " + final);
 
+            // coda blu/nera: se lo stop è automatico la taglio (senza ricodifica)
+            string mainFile = RecordedFiles(final).LastOrDefault();
+            if (autoStopped && settings.TrimBlankTail && blankStartRecSec > 0 && mainFile != null && !final.Contains("%03d"))
+            {
+                lblRec.Text = "Taglio la coda blu…";
+                // il file parte dal keyframe precedente al clic: margine = intervallo keyframe + 1 s
+                double cut = blankStartRecSec + Math.Max(1, settings.KeyframeSec) + 1;
+                bool ok = await Task.Run(() => FFmpeg.TrimFile(mainFile, cut, AppendLog));
+                AppendLog(ok ? $"Coda blu tagliata: file lungo {TimeSpan.FromSeconds(cut):hh\\:mm\\:ss}" : "Coda blu non tagliata (il file è comunque salvo)");
+            }
+
+            // nome della cassetta: rinomina il file (niente più rinomina a mano in Esplora file)
+            if (settings.AskNameAtEnd && RecordedFiles(final).Any())
+            {
+                string suggested = txtName.Text.Trim();
+                string n = Prompt("Nome della cassetta", "Come si chiama questa cassetta? (Invio per confermare, Annulla per lasciare il nome automatico)", suggested);
+                if (!string.IsNullOrWhiteSpace(n))
+                {
+                    var renamed = RenameRecording(final, n.Trim());
+                    if (renamed != null) { final = renamed; written = renamed; AppendLog("Rinominato: " + Path.GetFileName(renamed.Replace("%03d", "000"))); }
+                }
+                txtName.Text = "";
+            }
+
             // controllo automatico dell'audio nel file: così non si resta col dubbio
             var toCheck = RecordedFiles(final).FirstOrDefault() ?? RecordedFiles(written).FirstOrDefault();
             if (toCheck != null && settings.Sources.Any(x => x.Visible && x.HasAudio))
@@ -644,12 +693,41 @@ namespace VHSCapture
             StartPreview();
         }
 
+        void ToggleRecording()
+        {
+            if (finalizing) return;
+            if (engine.IsRecording) StopRecording(true);
+            else StartRecording();
+        }
+
+        /// <summary>Pulsante unico: rosso "Avvia registrazione" / chiaro "Ferma registrazione" (colori diversi, come chiesto).</summary>
+        void UpdateRecButton()
+        {
+            if (btnRec == null) return;
+            bool compact = compactState == true, rec = engine.IsRecording;
+            if (finalizing)
+            {
+                btnRec.Text = compact ? "…" : "Chiusura file…";
+                btnRec.Variant = "stop"; btnRec.Enabled = false;
+            }
+            else if (rec)
+            {
+                btnRec.Text = compact ? "⏹  STOP" : "⏹   Ferma registrazione";
+                btnRec.Variant = "stop"; btnRec.Enabled = true;
+            }
+            else
+            {
+                btnRec.Text = compact ? "⏺  REC" : "⏺   Avvia registrazione";
+                btnRec.Variant = "rec"; btnRec.Enabled = true;
+            }
+            btnRec.MinimumSize = new Size(compact ? 96 : 230, 36);
+            btnRec.Invalidate();
+        }
+
         void SetButtons()
         {
             bool rec = engine.IsRecording;
-            btnPreview.Enabled = !rec && !finalizing;
-            btnRec.Enabled = !rec && !finalizing;
-            btnStop.Enabled = rec && !finalizing;
+            UpdateRecButton();
             btnSettings.Enabled = !rec && !finalizing;
             txtName.Enabled = !rec;
             UpdateSourceButtons();
@@ -693,6 +771,13 @@ namespace VHSCapture
                     // l'encoder ora è sempre acceso: se non si apre, passo a x264 e riparto
                     string lg0; lock (runLog) lg0 = runLog.ToString();
                     // paracadute VU: se la pipe dei livelli non si apre, riparto senza misuratori (anteprima e registrazione prima di tutto)
+                    if (lg0.Contains("Could not open") && lg0.Contains("vhscap_an_") && !engine.AnalysisDisabled)
+                    {
+                        AppendLog("Rilevamento fine cassetta non disponibile su questo PC: riparto senza");
+                        engine.AnalysisDisabled = true;
+                        StartPreview();
+                        return;
+                    }
                     if (lg0.Contains("Could not open") && lg0.Contains("vhscap_me_") && !engine.MetersDisabled)
                     {
                         AppendLog("Misuratori audio non disponibili su questo PC: riparto senza VU");
@@ -711,8 +796,8 @@ namespace VHSCapture
                         return;
                     }
                     if (frames == 0 && code != 0 && !autoRetried && TryAutoFallback()) return;
-                    if (frames == 0 && code != 0) { canvas.Message = "ffmpeg non è partito — vedi il Log qui sotto"; if (splitLog.Panel2Collapsed) ToggleLog(); }
-                    else canvas.Message = "Anteprima ferma";
+                    if (frames == 0 && code != 0) { canvas.Message = "ffmpeg non è partito — vedi il Log qui sotto (F5 per riprovare)"; if (splitLog.Panel2Collapsed) ToggleLog(); }
+                    else canvas.Message = "Anteprima ferma — premi F5 per riavviarla";
                     canvas.SetFrame(null);
                     ResetMeters();
                     SetButtons();
@@ -751,6 +836,35 @@ namespace VHSCapture
                 settings.Encoder = list[0];
                 settings.Save();
             }
+        }
+
+        /// <summary>Rinomina la registrazione in "Nome cassetta.mp4" (o Nome_000.mp4… se divisa). Mai sovrascrivere: aggiunge (2), (3)…</summary>
+        string RenameRecording(string pattern, string name)
+        {
+            foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+            var files = RecordedFiles(pattern).ToList();
+            if (files.Count == 0) return null;
+            string dir = Path.GetDirectoryName(files[0]), ext = Path.GetExtension(files[0]);
+            string baseName = name;
+            for (int n = 2; ; n++)
+            {
+                bool clash = files.Count == 1 ? File.Exists(Path.Combine(dir, baseName + ext))
+                                              : Enumerable.Range(0, files.Count).Any(i => File.Exists(Path.Combine(dir, $"{baseName}_{i:000}{ext}")));
+                if (!clash) break;
+                baseName = $"{name} ({n})";
+            }
+            try
+            {
+                if (files.Count == 1)
+                {
+                    string dest = Path.Combine(dir, baseName + ext);
+                    File.Move(files[0], dest);
+                    return dest;
+                }
+                for (int i = 0; i < files.Count; i++) File.Move(files[i], Path.Combine(dir, $"{baseName}_{i:000}{ext}"));
+                return Path.Combine(dir, baseName + "_%03d" + ext);
+            }
+            catch (Exception ex) { AppendLog("Rinomina non riuscita: " + ex.Message); return null; }
         }
 
         int PreviewWidth()
@@ -807,6 +921,33 @@ namespace VHSCapture
 
         DateTime lastDiskCheck = DateTime.MinValue, lastCpuSample = DateTime.MinValue; long lastFree = -1;
 
+        /// <summary>
+        /// Fine cassetta: se durante la registrazione arriva schermo blu/nero uniforme per N secondi, si ferma da sola.
+        /// Si arma solo dopo almeno 10 s di immagine vera, così se premi Registra prima del Play non si ferma subito.
+        /// </summary>
+        void OnSignal(bool blank, string kind)
+        {
+            if (!blank)
+            {
+                blankSince = null; blankKind = "";
+                if (engine.IsRecording) contentSamples++;
+                return;
+            }
+            if (blankSince == null)
+            {
+                blankSince = DateTime.Now; blankKind = kind;
+                blankStartRecSec = engine.IsRecording ? (DateTime.Now - recStart).TotalSeconds : -1;
+            }
+            if (!engine.IsRecording || finalizing || !settings.AutoStopOnBlank) return;
+            bool armed = contentSamples >= 20;   // 20 campioni a 2/s = 10 s di immagine vera
+            if (armed && (DateTime.Now - blankSince.Value).TotalSeconds >= Math.Max(5, settings.AutoStopSeconds))
+            {
+                AppendLog($"Fine cassetta rilevata (schermo {blankKind} da {settings.AutoStopSeconds} s): fermo la registrazione");
+                autoStopped = true;
+                StopRecording(true);
+            }
+        }
+
         void AppendLog(string line)
         {
             if (!IsHandleCreated || IsDisposed) return;
@@ -856,6 +997,11 @@ namespace VHSCapture
                 lblRec.Fill = Theme.Rec; lblRec.ForeColor = Color.White;
                 lblRec.Text = $"{(blink ? "●" : "○")} REC  {el:hh\\:mm\\:ss}   {Fmt(size)}   {Path.GetFileName(finalFile).Replace("_%03d", "")}";
                 canvas.RecText = $"{(blink ? "●" : "○")}  REC  {el:hh\\:mm\\:ss}";
+                if (blankSince != null && settings.AutoStopOnBlank)
+                {
+                    int left = Math.Max(0, settings.AutoStopSeconds - (int)(DateTime.Now - blankSince.Value).TotalSeconds);
+                    canvas.RecText += contentSamples >= 20 ? $"    schermo {blankKind}: stop tra {left} s" : $"    schermo {blankKind} (in attesa del Play)";
+                }
                 canvas.Invalidate();
                 if (settings.MaxMinutes > 0 && el.TotalMinutes >= settings.MaxMinutes)
                 {

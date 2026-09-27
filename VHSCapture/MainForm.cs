@@ -154,17 +154,17 @@ namespace VHSCapture
             cardLog.Controls.Add(txtLog);
 
             // ---- split: destra (sorgenti | mixer) ----
-            splitRight = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = gap, Panel1MinSize = 120, Panel2MinSize = 100 };
+            splitRight = new SplitContainer { Size = new Size(400, 800), Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = gap, Panel1MinSize = 120, Panel2MinSize = 100 };
             splitRight.Panel1.Controls.Add(cardSources);
             splitRight.Panel2.Controls.Add(cardMixer);
 
             // ---- split: canvas | destra ----
-            splitMain = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = gap, Panel1MinSize = 400, Panel2MinSize = 260 };
+            splitMain = new SplitContainer { Size = new Size(1400, 800), Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = gap, Panel1MinSize = 400, Panel2MinSize = 260 };
             splitMain.Panel1.Controls.Add(canvasCard);
             splitMain.Panel2.Controls.Add(splitRight);
 
             // ---- split: sopra | log ----
-            splitLog = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = gap, Panel1MinSize = 300, Panel2MinSize = 80, Panel2Collapsed = !settings.ShowLog };
+            splitLog = new SplitContainer { Size = new Size(1400, 900), Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterWidth = gap, Panel1MinSize = 300, Panel2MinSize = 80, Panel2Collapsed = !settings.ShowLog };
             splitLog.Panel1.Controls.Add(splitMain);
             splitLog.Panel2.Controls.Add(cardLog);
 

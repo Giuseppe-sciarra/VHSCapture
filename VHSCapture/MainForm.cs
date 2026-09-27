@@ -1153,6 +1153,14 @@ namespace VHSCapture
                     if (inf != null) { var m = System.Text.RegularExpressions.Regex.Match(inf, @"([\d.]+) fps"); if (m.Success) double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out exp); }
                     string warn = exp > 0 && sf < exp * 0.85 ? $" ⚠ (dovrebbe mandarne {exp:0}: la sorgente rallenta)" : "";
                     parts.Add($"sorgente {sf:0.0} fps{warn}");
+                    // sorgente (dopo il deinterlaccio) e registrazione devono essere una multipla dell'altra,
+                    // se no ffmpeg ripete/butta fotogrammi a caso e il movimento scatta (es. 60 → 50)
+                    if (double.TryParse(settings.Fps, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double cf) && cf > 0 && sf > 5)
+                    {
+                        static bool Whole(double x) { double n = Math.Round(x); return n >= 1 && Math.Abs(x - n) < 0.06 * n; }
+                        if (!Whole(cf / sf) && !Whole(sf / cf))
+                            parts.Add($"⚠ sorgente {sf:0} fps e registrazione {cf:0.##} fps non combaciano: il movimento può scattare (usa lo standard PAL/NTSC)");
+                    }
                 }
                 if (st != null && (st.Drop > 0 || st.Dup > 0)) parts.Add($"persi {st.Drop} · duplicati {st.Dup}");
                 parts.Add($"CPU ffmpeg {lastCpu:0}%");

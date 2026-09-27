@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace VHSCapture
@@ -27,7 +28,9 @@ namespace VHSCapture
         PictureBox pv; Label pvMsg; System.Windows.Forms.Timer pvTimer, structTimer;
         TextBox txtName;
         ComboBox cbVideo, cbAudio, cbSize, cbFps;
-        NumericUpDown nRtBuf; CheckBox chkDeint;
+        NumericUpDown nRtBuf; ComboBox cbDeint, cbFormat, cbScale; NumericUpDown nCropL, nCropT, nCropR, nCropB, nAudioOff;
+        Label lblInfo, lblModes;
+        readonly Func<string, string> getInputInfo;
         TextBox txtImage;
         Panel colorSwatch;
         NumericUpDown nX, nY, nW, nH;
@@ -37,8 +40,9 @@ namespace VHSCapture
 
         public SourceForm(Source src, AppSettings settings, bool lockStructural,
                           Action<Source> live, Action<Source> structural, Func<string, Bitmap> preview,
-                          Action<Action> deviceFree, Action<string> logger)
+                          Action<Action> deviceFree, Action<string> logger, Func<string, string> inputInfo = null)
         {
+            getInputInfo = inputInfo;
             snapshot = src.Clone(); work = src.Clone(); cfg = settings;
             onLive = live; onStructural = structural; getPreview = preview;
             withDeviceFree = deviceFree; log = logger; structuralLocked = lockStructural;
@@ -47,7 +51,7 @@ namespace VHSCapture
             FormBorderStyle = FormBorderStyle.Sizable; MaximizeBox = true; MinimizeBox = false; ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
             Font = new Font("Segoe UI", 9.5f);
-            ClientSize = new Size(760, 860); MinimumSize = new Size(640, 520);
+            ClientSize = new Size(760, 860); MinimumSize = new Size(520, 420);
             Build();
             LoadValues();
             loading = false;
@@ -119,10 +123,18 @@ namespace VHSCapture
                 cbFps.Items.AddRange(new object[] { "auto", "5", "10", "15", "20", "23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60", "75", "90", "100", "120", "144" });
                 Row(tGen, "Risoluzione ingresso", cbSize, Muted("720x576 per PAL, auto se non parte"));
                 Row(tGen, "Frame rate ingresso", cbFps, null);
+                cbFormat = Combo();
+                cbFormat.Items.AddRange(new object[] { "Automatico", "MJPEG (per 1080p60 da grabber HDMI)", "YUY2 (non compresso)", "NV12" });
+                Row(tGen, "Formato video", cbFormat, null);
+                lblModes = Muted("", 560);
+                Full(tGen, lblModes);
+                cbDeint = Combo();
+                cbDeint.Items.AddRange(new object[] { "Disattivato", "Yadif", "Yadif 2x (50p da VHS PAL, consigliato)", "Bwdif", "Bwdif 2x" });
+                Row(tGen, "Deinterlacciamento", cbDeint, null);
                 nRtBuf = Num(64, 4096, 64);
                 Row(tGen, "Buffer cattura (MB)", nRtBuf, null);
-                chkDeint = new CheckBox { Text = "Deinterlaccia (yadif) — consigliato per VHS", AutoSize = true };
-                Full(tGen, chkDeint);
+                lblInfo = new Label { AutoSize = true, Margin = new Padding(0, 8, 0, 4), Font = new Font("Segoe UI Semibold", 9.5f), Text = "Ingresso effettivo: —" };
+                Full(tGen, lblInfo);
 
                 var bDrvVideo = Ui.Btn("Driver video…", "ghost");
                 var bCross = Ui.Btn("Ingresso Composito / S-Video…", "ghost");
@@ -137,9 +149,10 @@ namespace VHSCapture
                 cbAudio.SelectedIndexChanged += (o, e) => StructChanged();
                 cbSize.TextChanged += (o, e) => StructChanged();
                 cbFps.TextChanged += (o, e) => StructChanged();
-                chkDeint.CheckedChanged += (o, e) => StructChanged();
+                cbDeint.SelectedIndexChanged += (o, e) => StructChanged();
+                cbFormat.SelectedIndexChanged += (o, e) => StructChanged();
                 nRtBuf.ValueChanged += (o, e) => StructChanged();
-                if (structuralLocked) foreach (Control c in new Control[] { cbVideo, cbAudio, cbSize, cbFps, nRtBuf, chkDeint, btnRefresh, bCross }) c.Enabled = false;
+                if (structuralLocked) foreach (Control c in new Control[] { cbVideo, cbAudio, cbSize, cbFps, nRtBuf, cbDeint, cbFormat, btnRefresh, bCross }) c.Enabled = false;
             }
             else if (work.Type == SourceType.Image)
             {
@@ -187,6 +200,23 @@ namespace VHSCapture
             b169.Click += (o, e) => { PullTransform(); work.W = work.H * 16 / 9; work.Center(cfg.CanvasW, cfg.CanvasH); PushTransform(); };
             Full(tTr, ButtonRow(bFit, bFill, bCenter));
             Full(tTr, ButtonRow(bNat, b43, b169));
+            cbScale = Combo();
+            cbScale.Items.AddRange(new object[] { "Bilineare (veloce)", "Bicubico", "Lanczos (più nitido)", "Area (per rimpicciolire)" });
+            Row(tTr, "Filtro di scala", cbScale, null);
+            cbScale.SelectedIndexChanged += (o, e) => StructChanged();
+            if (structuralLocked) cbScale.Enabled = false;
+            if (work.Type == SourceType.Capture)
+            {
+                nCropL = Num(0, 4000, 1); nCropT = Num(0, 4000, 1); nCropR = Num(0, 4000, 1); nCropB = Num(0, 4000, 1);
+                foreach (var n in new[] { nCropL, nCropT, nCropR, nCropB }) n.Width = 80;
+                Row(tTr, "Ritaglio sx / su", Pair("S", nCropL, "Su", nCropT), null);
+                Row(tTr, "Ritaglio dx / giù", Pair("D", nCropR, "Giù", nCropB), null);
+                var bVhs = Ui.Btn("Taglia rumore VHS in basso (8 px)", "ghost");
+                bVhs.Click += (o, e) => { nCropB.Value = 8; };
+                Full(tTr, ButtonRow(bVhs));
+                Full(tTr, Muted("Suggerimento: sull'anteprima tieni premuto Alt e trascina una maniglia per ritagliare (come OBS).", 560));
+                foreach (var n in new[] { nCropL, nCropT, nCropR, nCropB }) n.ValueChanged += (o, e) => { if (loading) return; PullCrop(); onLive?.Invoke(work); };
+            }
             foreach (var n in new[] { nX, nY, nW, nH }) n.ValueChanged += (o, e) => { if (loading) return; PullTransform(); onLive?.Invoke(work); };
             stack.Add(gTr);
 
@@ -211,6 +241,10 @@ namespace VHSCapture
                 (tVol, lVol) = Slider(tAud, "Volume (dB)", -60, 12, 0);
                 chkMute = new CheckBox { Text = "Muto", AutoSize = true };
                 Full(tAud, chkMute);
+                nAudioOff = Num(-2000, 2000, 10);
+                Row(tAud, "Ritardo audio (ms)", nAudioOff, Muted("positivo = audio più tardi"));
+                nAudioOff.ValueChanged += (o, e) => StructChanged();
+                if (structuralLocked) nAudioOff.Enabled = false;
                 tVol.ValueChanged += (o, e) => { lVol.Text = tVol.Value + " dB"; if (loading) return; PullAudio(); onLive?.Invoke(work); };
                 chkMute.CheckedChanged += (o, e) => { if (loading) return; PullAudio(); onLive?.Invoke(work); };
                 stack.Add(gAud);
@@ -304,6 +338,11 @@ namespace VHSCapture
         // ================= anteprima =================
         void UpdatePreview()
         {
+            if (lblInfo != null)
+            {
+                string info = getInputInfo?.Invoke(work.Id);
+                lblInfo.Text = "Ingresso effettivo: " + (info ?? "—");
+            }
             Bitmap b = null;
             try { b = getPreview?.Invoke(work.Id); } catch { }
             if (b == null)
@@ -331,13 +370,18 @@ namespace VHSCapture
                 RefreshSizes();
                 cbFps.Text = work.InputFps;
                 nRtBuf.Value = Math.Clamp(work.RtBufMB, 64, 4096);
-                chkDeint.Checked = work.Deinterlace;
+                cbDeint.SelectedIndex = work.DeinterlaceMode switch { "yadif" => 1, "yadif2x" => 2, "bwdif" => 3, "bwdif2x" => 4, _ => 0 };
+                cbFormat.SelectedIndex = work.VideoFormat switch { "mjpeg" => 1, "yuyv422" => 2, "nv12" => 3, _ => 0 };
+                nCropL.Value = Math.Clamp(work.CropL, 0, 4000); nCropT.Value = Math.Clamp(work.CropT, 0, 4000);
+                nCropR.Value = Math.Clamp(work.CropR, 0, 4000); nCropB.Value = Math.Clamp(work.CropB, 0, 4000);
+                nAudioOff.Value = Math.Clamp(work.AudioOffsetMs, -2000, 2000);
                 tVol.Value = Math.Clamp((int)Math.Round(work.VolumeDb), -60, 12); lVol.Text = tVol.Value + " dB";
                 chkMute.Checked = work.Muted;
             }
             else if (work.Type == SourceType.Image) txtImage.Text = work.ImagePath;
             else { try { colorSwatch.BackColor = ColorTranslator.FromHtml(work.Color); } catch { } }
 
+            cbScale.SelectedIndex = work.ScaleFilter switch { "bilinear" => 0, "lanczos" => 2, "area" => 3, _ => 1 };
             PushTransform();
             tBri.Value = Math.Clamp((int)Math.Round(work.Brightness * 100), -100, 100);
             tCon.Value = Math.Clamp((int)Math.Round(work.Contrast * 100), 0, 300);
@@ -371,10 +415,17 @@ namespace VHSCapture
             work.Brightness = tBri.Value / 100.0; work.Contrast = tCon.Value / 100.0; work.Saturation = tSat.Value / 100.0;
             work.Gamma = tGam.Value / 100.0; work.Hue = tHue.Value;
         }
+        void PullCrop()
+        {
+            if (nCropL == null) return;
+            work.CropL = (int)nCropL.Value; work.CropT = (int)nCropT.Value; work.CropR = (int)nCropR.Value; work.CropB = (int)nCropB.Value;
+        }
+
         void PullAudio() { if (tVol != null) { work.VolumeDb = tVol.Value; work.Muted = chkMute.Checked; } }
 
         void PullStructural()
         {
+            work.ScaleFilter = cbScale.SelectedIndex switch { 0 => "bilinear", 2 => "lanczos", 3 => "area", _ => "bicubic" };
             if (work.Type == SourceType.Capture)
             {
                 work.VideoDevice = cbVideo.Text.StartsWith("(") ? "" : cbVideo.Text;
@@ -382,7 +433,9 @@ namespace VHSCapture
                 work.InputSize = string.IsNullOrWhiteSpace(cbSize.Text) ? "auto" : cbSize.Text.Trim();
                 work.InputFps = string.IsNullOrWhiteSpace(cbFps.Text) ? "auto" : cbFps.Text.Trim();
                 work.RtBufMB = (int)nRtBuf.Value;
-                work.Deinterlace = chkDeint.Checked;
+                work.DeinterlaceMode = cbDeint.SelectedIndex switch { 1 => "yadif", 2 => "yadif2x", 3 => "bwdif", 4 => "bwdif2x", _ => "off" };
+                work.VideoFormat = cbFormat.SelectedIndex switch { 1 => "mjpeg", 2 => "yuyv422", 3 => "nv12", _ => "auto" };
+                work.AudioOffsetMs = (int)nAudioOff.Value;
             }
             else if (work.Type == SourceType.Image) { if (File.Exists(txtImage.Text)) work.ImagePath = txtImage.Text; }
             else work.Color = ColorTranslator.ToHtml(Color.FromArgb(colorSwatch.BackColor.R, colorSwatch.BackColor.G, colorSwatch.BackColor.B));
@@ -401,7 +454,7 @@ namespace VHSCapture
             { MessageBox.Show(this, "Seleziona un dispositivo video.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning); return false; }
             if (work.Type == SourceType.Image && !File.Exists(txtImage.Text))
             { MessageBox.Show(this, "File immagine non trovato.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning); return false; }
-            PullStructural(); PullTransform(); PullColor(); PullAudio();
+            PullStructural(); PullTransform(); PullColor(); PullAudio(); PullCrop();
             structTimer.Stop();
             Result = work;
             return true;
@@ -441,7 +494,15 @@ namespace VHSCapture
             string cur = cbSize.Text;
             cbSize.Items.Clear(); cbSize.Items.Add("auto");
             var devSizes = new List<string>();
-            if (cbVideo.SelectedItem != null && !cbVideo.Text.StartsWith("(")) devSizes = FFmpeg.ListVideoSizes(cbVideo.Text);
+            var modes = new List<FFmpeg.DeviceMode>();
+            if (cbVideo.SelectedItem != null && !cbVideo.Text.StartsWith("(")) modes = FFmpeg.ListModes(cbVideo.Text);
+            foreach (var m in modes) if (!devSizes.Contains(m.Size)) devSizes.Add(m.Size);
+            if (lblModes != null)
+            {
+                var best = modes.OrderByDescending(m => m.MaxFps).ThenByDescending(m => m.Size.Length).Take(8)
+                                .Select(m => $"{(m.Format == "mjpeg" ? "MJPEG" : m.Format.ToUpperInvariant())} {m.Size}@{m.MaxFps:0.##}");
+                lblModes.Text = modes.Count > 0 ? "Il dispositivo supporta: " + string.Join(" · ", best) : "Modalità del dispositivo non lette (in uso o non dichiarate).";
+            }
             var found = new List<string>(devSizes);
             bool deviceKnown = devSizes.Count > 0;
             foreach (var d in new[] { "720x576", "720x480", "704x576", "704x480", "768x576", "640x480", "352x288", "352x240", "1280x720", "1920x1080", "2560x1440", "3840x2160" }) if (!found.Contains(d)) found.Add(d);

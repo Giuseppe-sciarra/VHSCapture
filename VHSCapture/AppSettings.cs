@@ -15,14 +15,30 @@ namespace VHSCapture
         public string Name { get; set; } = "Sorgente";
         public SourceType Type { get; set; } = SourceType.Capture;
         public bool Visible { get; set; } = true;
+        /// <summary>Bloccata (come il lucchetto di OBS): non si sposta/ridimensiona dall'anteprima e non si seleziona cliccandoci sopra.</summary>
+        public bool Locked { get; set; } = false;
 
         // Capture (dshow)
         public string VideoDevice { get; set; } = "";
         public string AudioDevice { get; set; } = "";
         public string InputSize { get; set; } = "720x576";
         public string InputFps { get; set; } = "25";
-        public bool Deinterlace { get; set; } = true;
+        /// <summary>auto, mjpeg, yuyv422, nv12 (come "Formato video" di OBS). Per 1080p60 dai grabber HDMI serve quasi sempre MJPEG.</summary>
+        public string VideoFormat { get; set; } = "auto";
+        /// <summary>off, yadif, yadif2x, bwdif, bwdif2x (come il deinterlacciamento di OBS). 2x = 50p da VHS PAL.</summary>
+        public string DeinterlaceMode { get; set; } = "off";
+        public bool? Deinterlace { get; set; } = null;          // solo migrazione dalle versioni precedenti
         public int RtBufMB { get; set; } = 512;
+        /// <summary>bilinear, bicubic, lanczos, area (come "Filtro di ridimensionamento" di OBS).</summary>
+        public string ScaleFilter { get; set; } = "bicubic";
+        /// <summary>Ritardo audio in ms (come "Ritardo di sincronizzazione" di OBS). Positivo = audio più tardi.</summary>
+        public int AudioOffsetMs { get; set; } = 0;
+
+        // Ritaglio in pixel della sorgente (come Alt+trascina / filtro Ritaglia di OBS)
+        public int CropL { get; set; } = 0;
+        public int CropT { get; set; } = 0;
+        public int CropR { get; set; } = 0;
+        public int CropB { get; set; } = 0;
 
         // Image
         public string ImagePath { get; set; } = "";
@@ -49,19 +65,22 @@ namespace VHSCapture
 
         [JsonIgnore] public bool HasAudio => Type == SourceType.Capture && !string.IsNullOrWhiteSpace(AudioDevice);
         [JsonIgnore] public double VolumeLinear => Muted ? 0 : Math.Pow(10, VolumeDb / 20.0);
+        [JsonIgnore] public double VolumeGain => Math.Pow(10, VolumeDb / 20.0);
 
         public Source Clone() => (Source)MemberwiseClone();
 
         /// <summary>Le proprietà che richiedono un riavvio del grafo ffmpeg.</summary>
         public bool StructurallyEquals(Source o) =>
             Type == o.Type && Visible == o.Visible && VideoDevice == o.VideoDevice && AudioDevice == o.AudioDevice &&
-            InputSize == o.InputSize && InputFps == o.InputFps && Deinterlace == o.Deinterlace && RtBufMB == o.RtBufMB &&
+            InputSize == o.InputSize && InputFps == o.InputFps && DeinterlaceMode == o.DeinterlaceMode && RtBufMB == o.RtBufMB &&
+            VideoFormat == o.VideoFormat && ScaleFilter == o.ScaleFilter && AudioOffsetMs == o.AudioOffsetMs &&
             ImagePath == o.ImagePath && Color == o.Color;
 
         public void CopyStructuralFrom(Source o)
         {
             Type = o.Type; Visible = o.Visible; VideoDevice = o.VideoDevice; AudioDevice = o.AudioDevice;
-            InputSize = o.InputSize; InputFps = o.InputFps; Deinterlace = o.Deinterlace; RtBufMB = o.RtBufMB;
+            InputSize = o.InputSize; InputFps = o.InputFps; DeinterlaceMode = o.DeinterlaceMode; RtBufMB = o.RtBufMB;
+            VideoFormat = o.VideoFormat; ScaleFilter = o.ScaleFilter; AudioOffsetMs = o.AudioOffsetMs;
             ImagePath = o.ImagePath; Color = o.Color;
         }
 
@@ -72,6 +91,17 @@ namespace VHSCapture
             X = o.X; Y = o.Y; W = o.W; H = o.H;
             Brightness = o.Brightness; Contrast = o.Contrast; Saturation = o.Saturation; Gamma = o.Gamma; Hue = o.Hue;
             VolumeDb = o.VolumeDb; Muted = o.Muted; Name = o.Name;
+            CropL = o.CropL; CropT = o.CropT; CropR = o.CropR; CropB = o.CropB;
+            Locked = o.Locked;
+        }
+
+        [JsonIgnore] public bool IsSD
+        {
+            get
+            {
+                var p = (InputSize ?? "").Split('x');
+                return p.Length == 2 && int.TryParse(p[1], out int h) && h <= 576;
+            }
         }
 
         /// <summary>Dimensioni "naturali" (per Adatta/Ripristina). VHS 720x576 anamorfico → 4:3.</summary>
@@ -130,6 +160,12 @@ namespace VHSCapture
         public bool SafeRecording { get; set; } = false;       // opzionale: MKV + remux MP4 a fine
         public int MaxMinutes { get; set; } = 0;
 
+        public bool FragmentedMp4 { get; set; } = false;       // come "MP4 ibrido/frammentato" di OBS: leggibile anche dopo un crash
+        public int SplitMinutes { get; set; } = 0;             // come "Divisione automatica dei file" di OBS (0 = off)
+        public bool HighPriority { get; set; } = true;         // come "Priorità del processo" di OBS
+        public bool AudioMonitor { get; set; } = false;        // come "Monitoraggio audio" di OBS: senti l'audio dalle casse
+        public int KeyframeSec { get; set; } = 2;              // intervallo keyframe (OBS: 2 s)
+
         // Controllo live (zmq)
         public bool LiveControl { get; set; } = true;
 
@@ -140,6 +176,7 @@ namespace VHSCapture
         public int WindowH { get; set; } = 800;
         public bool WindowMax { get; set; } = false;
         public int RightPanelW { get; set; } = 340;
+        public bool RightPanelHidden { get; set; } = false;
         public int MixerH { get; set; } = 260;
         public int LogH { get; set; } = 140;
 
@@ -164,6 +201,15 @@ namespace VHSCapture
             s ??= new AppSettings();
             if (s.Sources == null) s.Sources = new List<Source>();
 
+            foreach (var src in s.Sources)
+            {
+                if (src.Deinterlace.HasValue) src.DeinterlaceMode = src.Deinterlace.Value ? "yadif" : "off";
+                if (string.IsNullOrEmpty(src.DeinterlaceMode)) src.DeinterlaceMode = "off";
+                src.Deinterlace = null;
+                if (string.IsNullOrEmpty(src.VideoFormat)) src.VideoFormat = "auto";
+                if (string.IsNullOrEmpty(src.ScaleFilter)) src.ScaleFilter = "bicubic";
+            }
+
             // migrazione dalla v1 (singolo dispositivo)
             if (s.Sources.Count == 0 && !string.IsNullOrEmpty(s.VideoDevice))
             {
@@ -173,6 +219,7 @@ namespace VHSCapture
                     VideoDevice = s.VideoDevice, AudioDevice = s.AudioDevice ?? "",
                     InputSize = string.IsNullOrEmpty(s.InputSize) ? "720x576" : s.InputSize,
                     InputFps = string.IsNullOrEmpty(s.InputFps) ? "25" : s.InputFps,
+                    DeinterlaceMode = "yadif",
                 };
                 src.FitTo(s.CanvasW, s.CanvasH);
                 s.Sources.Add(src);

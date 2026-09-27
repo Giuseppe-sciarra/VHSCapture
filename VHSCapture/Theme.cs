@@ -29,6 +29,15 @@ namespace VHSCapture
             f.Invalidate(true);
         }
 
+        /// <summary>Menu contestuali coerenti col tema.</summary>
+        public static void StyleMenu(ToolStrip m)
+        {
+            m.RenderMode = ToolStripRenderMode.System;
+            m.BackColor = Panel; m.ForeColor = Fore;
+            m.Font = new Font("Segoe UI", 9.5f);
+            foreach (ToolStripItem it in m.Items) { it.BackColor = Panel; it.ForeColor = Fore; it.Padding = new Padding(4, 3, 4, 3); }
+        }
+
         static bool InCard(Control c) { for (var p = c.Parent; p != null; p = p.Parent) { if (p is Card) return true; if (p is Form) return false; } return false; }
 
         static void ApplyRec(Control c)
@@ -75,6 +84,8 @@ namespace VHSCapture
                     tb.BackColor = (tb.Parent?.Tag as string == "panel" || InCard(tb)) ? Panel : Back; break;
                 case VuMeter _:
                 case CanvasView _:
+                case SourceList _:
+                case HMeter _:
                     break;
                 default:
                     c.BackColor = (c.Tag as string == "panel" || InCard(c)) ? Panel : Back; c.ForeColor = Fore; break;
@@ -83,52 +94,82 @@ namespace VHSCapture
         }
     }
 
-    /// <summary>Barra VU verticale in dB (-60..0) con peak hold.</summary>
+    /// <summary>VU meter stereo (L/R) come il mixer di OBS: RMS pieno, picco sottile, peak-hold, decadimento morbido, scala -60..0 dB.</summary>
     public class VuMeter : Control
     {
-        double level = -90, peak = -90;
-        DateTime peakAt = DateTime.MinValue;
+        readonly double[] rms = { -90, -90 }, peak = { -90, -90 }, hold = { -90, -90 };
+        readonly DateTime[] holdAt = { DateTime.MinValue, DateTime.MinValue };
+        DateTime lastSet = DateTime.MinValue;
 
         public VuMeter()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-            Width = 26;
+            Width = 44;
         }
 
-        public void SetLevel(double db)
+        public void SetLevels(double rmsL, double peakL, double rmsR, double peakR)
         {
-            level = db;
-            if (db > peak || (DateTime.Now - peakAt).TotalMilliseconds > 1200) { peak = db; peakAt = DateTime.Now; }
+            if (rmsR <= -89 && peakR <= -89) { rmsR = rmsL; peakR = peakL; }   // sorgente mono
+            double dt = Math.Min(0.2, (DateTime.Now - lastSet).TotalSeconds); lastSet = DateTime.Now;
+            double decay = 30 * dt;   // 30 dB/s come OBS
+            Upd(0, rmsL, peakL, decay); Upd(1, rmsR, peakR, decay);
             Invalidate();
         }
 
-        public void Reset() { level = peak = -90; Invalidate(); }
+        void Upd(int c, double r, double p, double decay)
+        {
+            rms[c] = Math.Max(r, rms[c] - decay);
+            peak[c] = Math.Max(p, peak[c] - decay);
+            if (p >= hold[c] || (DateTime.Now - holdAt[c]).TotalSeconds > 1.5) { hold[c] = p; holdAt[c] = DateTime.Now; }
+        }
+
+        public void SetLevel(double db) => SetLevels(db, db, db, db);
+
+        public void Reset() { for (int i = 0; i < 2; i++) { rms[i] = peak[i] = hold[i] = -90; } Invalidate(); }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.Clear(Theme.Panel);
-            var r = new Rectangle(4, 4, Width - 8, Height - 8);
-            using (var pen = new Pen(Theme.Border)) g.DrawRectangle(pen, r);
-
+            int top = 4, bottom = Height - 18, h = bottom - top;
+            if (h < 20) return;
+            int bw = Math.Max(6, (Width - 14) / 2);
             double frac(double db) => Math.Clamp((db + 60.0) / 60.0, 0, 1);
-            int h = (int)(r.Height * frac(level));
-            if (h > 0)
+
+            using var bg = new SolidBrush(Theme.Dark ? Color.FromArgb(30, 30, 32) : Color.FromArgb(225, 225, 230));
+            using var green = new SolidBrush(Color.FromArgb(60, 190, 90));
+            using var yellow = new SolidBrush(Color.FromArgb(240, 200, 40));
+            using var red = new SolidBrush(Color.FromArgb(230, 60, 60));
+            using var gDim = new SolidBrush(Color.FromArgb(90, 60, 190, 90));
+            using var yDim = new SolidBrush(Color.FromArgb(90, 240, 200, 40));
+            using var rDim = new SolidBrush(Color.FromArgb(90, 230, 60, 60));
+            using var holdPen = new Pen(Theme.Fore, 2);
+            int yY = bottom - (int)(h * frac(-20)), yR = bottom - (int)(h * frac(-9));
+
+            for (int c = 0; c < 2; c++)
             {
-                // verde fino a -18, giallo fino a -6, rosso sopra
-                int yTop = r.Bottom - h;
-                int yYellow = r.Bottom - (int)(r.Height * frac(-18));
-                int yRed = r.Bottom - (int)(r.Height * frac(-6));
-                using var green = new SolidBrush(Color.FromArgb(60, 190, 90));
-                using var yellow = new SolidBrush(Color.FromArgb(240, 200, 40));
-                using var red = new SolidBrush(Color.FromArgb(230, 60, 60));
-                int x = r.X + 1, w = r.Width - 1;
-                g.FillRectangle(green, x, Math.Max(yTop, yYellow), w, r.Bottom - Math.Max(yTop, yYellow));
-                if (yTop < yYellow) g.FillRectangle(yellow, x, Math.Max(yTop, yRed), w, yYellow - Math.Max(yTop, yRed));
-                if (yTop < yRed) g.FillRectangle(red, x, yTop, w, yRed - yTop);
+                int x = 4 + c * (bw + 4);
+                g.FillRectangle(bg, x, top, bw, h);
+                // picco (tenue) e RMS (pieno), colorati a zone come OBS: verde < -20, giallo < -9, rosso sopra
+                Bar(g, x, bw, bottom, h, frac(peak[c]), yY, yR, gDim, yDim, rDim);
+                Bar(g, x, bw, bottom, h, frac(rms[c]), yY, yR, green, yellow, red);
+                int hy = bottom - (int)(h * frac(hold[c]));
+                if (hold[c] > -60) g.DrawLine(holdPen, x, hy, x + bw, hy);
             }
-            int py = r.Bottom - (int)(r.Height * frac(peak));
-            using (var pp = new Pen(Theme.Fore, 2)) g.DrawLine(pp, r.X + 1, py, r.Right - 1, py);
+            // scala
+            using var f = new Font("Segoe UI", 6.5f);
+            using var mb = new SolidBrush(Theme.Muted);
+            g.DrawString("L", f, mb, 4 + bw / 2 - 3, bottom + 2);
+            g.DrawString("R", f, mb, 8 + bw + bw / 2 - 3, bottom + 2);
+        }
+
+        static void Bar(Graphics g, int x, int w, int bottom, int h, double fr, int yY, int yR, Brush gr, Brush ye, Brush re)
+        {
+            int yTop = bottom - (int)(h * fr);
+            if (yTop >= bottom) return;
+            g.FillRectangle(gr, x, Math.Max(yTop, yY), w, bottom - Math.Max(yTop, yY));
+            if (yTop < yY) g.FillRectangle(ye, x, Math.Max(yTop, yR), w, yY - Math.Max(yTop, yR));
+            if (yTop < yR) g.FillRectangle(re, x, yTop, w, yR - yTop);
         }
     }
 }

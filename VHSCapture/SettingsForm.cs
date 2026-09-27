@@ -12,7 +12,8 @@ namespace VHSCapture
 
         ComboBox cbCanvas, cbFps, cbEncoder, cbRc, cbPreset;
         NumericUpDown nBitrate, nCrf, nAudioBr, nMaxMin;
-        CheckBox chkMono, chkSafe, chkLive;
+        CheckBox chkMono, chkSafe, chkLive, chkFrag, chkPrio;
+        NumericUpDown nSplit, nKey;
         TextBox txtFolder, txtPrefix;
         Label lblBitrate, lblCrf, lblPreset;
 
@@ -22,7 +23,7 @@ namespace VHSCapture
             Text = "Impostazioni di uscita";
             FormBorderStyle = FormBorderStyle.Sizable; MaximizeBox = true; MinimizeBox = false; ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
-            ClientSize = new Size(680, 700); MinimumSize = new Size(560, 420);
+            ClientSize = new Size(680, 700); MinimumSize = new Size(480, 360);
             Font = new Font("Segoe UI", 9.5f);
             Build();
             LoadValues();
@@ -51,7 +52,7 @@ namespace VHSCapture
             Row(tCv, "Risoluzione canvas", cbCanvas, Muted("= risoluzione del file MP4 (o scrivi LxA)"));
             cbFps = Combo(); cbFps.DropDownStyle = ComboBoxStyle.DropDown;
             cbFps.Items.AddRange(new object[] { "23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60", "75", "90", "100", "120", "144" });
-            Row(tCv, "Frame rate uscita", cbFps, Muted("PAL 25/50, NTSC 29.97/59.94, o scrivi a mano"));
+            Row(tCv, "Frame rate uscita", cbFps, Muted("VHS PAL + Yadif 2x → 50. Grabber HDMI 60 → 60"));
             root.Controls.Add(gCv);
 
             // ---- Video ----
@@ -98,6 +99,10 @@ namespace VHSCapture
             Row(tOut, "Stop automatico (minuti)", nMaxMin, Muted("0 = illimitato. Es. 245 per una E-240"));
             chkSafe = new CheckBox { Text = "Modalità sicura (opzionale): registra in MKV e converte in MP4 alla fine. Di default OFF = MP4 diretto", AutoSize = true, MaximumSize = new Size(560, 0) };
             tOut.Controls.Add(chkSafe, 1, tOut.RowCount); tOut.SetColumnSpan(chkSafe, 2); tOut.RowCount++;
+            chkFrag = new CheckBox { Text = "MP4 resistente ai crash (frammentato, come l'MP4 ibrido di OBS): se salta la corrente il file resta leggibile", AutoSize = true, MaximumSize = new Size(560, 0) };
+            tOut.Controls.Add(chkFrag, 1, tOut.RowCount); tOut.SetColumnSpan(chkFrag, 2); tOut.RowCount++;
+            nSplit = Num(0, 600, 5);
+            Row(tOut, "Dividi file ogni (minuti)", nSplit, Muted("0 = no. Utile per chiavette FAT32 (max 4 GB)"));
             root.Controls.Add(gOut);
 
             // ---- Avanzate ----
@@ -105,6 +110,10 @@ namespace VHSCapture
             var tAdv = Grid(gAdv);
             chkLive = new CheckBox { Text = "Controllo live delle sorgenti (zmq): sposta/ridimensiona/colore senza riavviare l'anteprima", AutoSize = true, MaximumSize = new Size(560, 0) };
             tAdv.Controls.Add(chkLive, 1, tAdv.RowCount); tAdv.SetColumnSpan(chkLive, 2); tAdv.RowCount++;
+            chkPrio = new CheckBox { Text = "Priorità alta a ffmpeg (come la priorità del processo di OBS)", AutoSize = true, MaximumSize = new Size(560, 0) };
+            tAdv.Controls.Add(chkPrio, 1, tAdv.RowCount); tAdv.SetColumnSpan(chkPrio, 2); tAdv.RowCount++;
+            nKey = Num(1, 10, 1);
+            Row(tAdv, "Keyframe ogni (secondi)", nKey, Muted("OBS usa 2"));
             var lz = Muted(FFmpeg.HasZmq ? "ffmpeg con supporto zmq: OK" : "ffmpeg SENZA zmq: le modifiche riavviano l'anteprima");
             tAdv.Controls.Add(lz, 1, tAdv.RowCount); tAdv.SetColumnSpan(lz, 2); tAdv.RowCount++;
             root.Controls.Add(gAdv);
@@ -173,6 +182,10 @@ namespace VHSCapture
             nMaxMin.Value = Math.Clamp(s.MaxMinutes, 0, 600);
             chkSafe.Checked = s.SafeRecording;
             chkLive.Checked = s.LiveControl;
+            chkFrag.Checked = s.FragmentedMp4;
+            chkPrio.Checked = s.HighPriority;
+            nSplit.Value = Math.Clamp(s.SplitMinutes, 0, 600);
+            nKey.Value = Math.Clamp(s.KeyframeSec, 1, 10);
             UpdateEnabled();
         }
 
@@ -198,6 +211,10 @@ namespace VHSCapture
             s.MaxMinutes = (int)nMaxMin.Value;
             s.SafeRecording = chkSafe.Checked;
             s.LiveControl = chkLive.Checked;
+            s.FragmentedMp4 = chkFrag.Checked;
+            s.HighPriority = chkPrio.Checked;
+            s.SplitMinutes = (int)nSplit.Value;
+            s.KeyframeSec = (int)nKey.Value;
             s.Save();
             return true;
         }

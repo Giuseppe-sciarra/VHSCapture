@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <PackageReference Include="NetMQ" Version="4.0.1.13" />
+    <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
   </ItemGroup>
 
 </Project>

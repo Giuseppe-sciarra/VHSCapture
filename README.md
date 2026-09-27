@@ -1,18 +1,21 @@
 # VHSCapture
 
-OBS ridotto all'osso per il riversaggio VHS/cassette da grabber USB (DirectShow).
-Canvas a risoluzione/fps di uscita, sorgenti posizionabili e configurabili, ⏺ → MP4 sulla cartella di rete.
+Registratore stile OBS ridotto all'osso per riversaggio VHS/cassette/camere da grabber USB (DirectShow).
+Canvas, sorgenti posizionabili, anteprima fluida, ⏺ → MP4 sulla cartella di rete.
 
-- **Canvas**: risoluzione e fps di uscita (es. 1920x1080 @ 25/50/60) = risoluzione del file
-- **Sorgenti** (＋): dispositivo di cattura video (grabber USB), immagine (logo/sfondo), colore pieno
-  - trascina/ridimensiona sull'anteprima (maniglie, snap ai bordi/centro, frecce per spostare, Shift = libero)
-  - proprietà (doppio click / ⚙): dispositivo, risoluzione/fps d'ingresso, deinterlaccio, posizione/dimensione,
-    Adatta / Riempi / Centra / 4:3 / 16:9, luminosità, contrasto, saturazione, gamma, tonalità, volume/muto
-  - le modifiche si applicano al volo senza riavviare l'anteprima (filtro `zmq` di ffmpeg); aggiungere/togliere
-    sorgenti o cambiare dispositivo riavvia il grafo
-- **Mixer audio** per sorgente + VU meter
-- **Uscita** (⚙): encoder x264 / NVENC / QuickSync / AMF, CBR-VBR-CRF, bitrate, AAC, cartella, prefisso,
-  stop automatico a N minuti, modalità sicura MKV→MP4 (opzionale, off)
-- Tema chiaro/scuro, impostazioni in `%APPDATA%\VHSCapture\settings.json`
+## Dall'OBS
+- **Canvas** a risoluzione/fps di uscita (fino a 4K, 23.976–144 fps)
+- **Sorgenti** (＋): grabber USB, immagine, colore. Trascina/ridimensiona, snap, frecce, **Alt+trascina = ritaglio**
+- **Proprietà sorgente** con anteprima live: dispositivo, risoluzione/fps, **formato video (MJPEG/YUY2/NV12)**,
+  modalità dichiarate dal dispositivo, **ingresso effettivo** letto da ffmpeg, **deinterlacciamento Yadif/Yadif 2x/Bwdif/Bwdif 2x**,
+  **filtro di scala**, ritaglio, luminosità/contrasto/saturazione/gamma/tonalità, volume, **ritardo audio**
+- Pagine di configurazione del **driver** (standard video, ingresso composito/S-Video)
+- **Mixer** con VU **stereo L/R** (RMS + picco + peak hold) e **monitoraggio audio** (🎧 Ascolta)
+- **Statistiche**: fps reali, frame persi/duplicati, CPU di ffmpeg, spazio libero e ore di registrazione residue
+- Encoder **NVENC / AMF / QuickSync / x264** (solo quelli che funzionano su quel PC), CBR/VBR/CRF, keyframe ogni 2 s
+- **MP4 frammentato** anti-crash (opzionale), **divisione automatica** dei file, priorità alta, **F9** registra/stop
 
-Build automatica via GitHub Actions: ogni push su `main` crea la release con lo zip (exe + ffmpeg full di gyan.dev, che include zmq).
+## Motore
+Un solo processo ffmpeg compone il canvas, scrive il file e manda anteprima (BGRA) e audio di ascolto
+su named pipe con buffer grande; l'app disegna con StretchDIBits (GDI). Modifiche di posizione/ritaglio/colore/volume
+al volo via filtro `zmq`. Build automatica via GitHub Actions (ffmpeg full di gyan.dev).

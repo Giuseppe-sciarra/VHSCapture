@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace VHSCapture
@@ -14,7 +15,9 @@ namespace VHSCapture
         public int CanvasH { get; set; } = 1080;
         public List<Source> Sources { get; set; } = new List<Source>();   // ordine: dal basso (0) verso l'alto
         public Source Selected { get; private set; }
-        public Bitmap Frame { get; private set; }
+        public FrameBuf Frame { get; private set; }
+        /// <summary>Dimensione reale in pixel dell'ingresso (per Alt+trascina = ritaglio).</summary>
+        public Func<Source, (int w, int h)?> InputSizeOf { get; set; }
         public string Message { get; set; } = "";
         /// <summary>Testo del badge REC (null = non in registrazione).</summary>
         public string RecText { get; set; }
@@ -23,8 +26,10 @@ namespace VHSCapture
         public event Action<Source, bool> TransformChanged;   // bool = definitivo (mouse up)
         public event Action<Source> OpenProperties;
         public event Action<Source> RemoveRequested;
+        public event Action<Source> LockChanged;
 
-        enum Mode { None, Move, Resize }
+        enum Mode { None, Move, Resize, Crop }
+        int startCropL, startCropT, startCropR, startCropB;
         Mode mode = Mode.None;
         int handle = -1;              // 0..7: TL,T,TR,R,BR,B,BL,L
         Point dragStartCanvas; Rectangle dragStartRect;
@@ -38,10 +43,34 @@ namespace VHSCapture
         }
 
         /// <summary>Il frame appartiene al motore (doppio buffer riusato): qui NON va fatto Dispose.</summary>
-        public void SetFrame(Bitmap bmp)
+        public void SetFrame(FrameBuf fb)
         {
-            Frame = bmp;
+            Frame = fb;
             Invalidate();
+        }
+
+        // ---- disegno veloce del frame con GDI (StretchDIBits): molto più rapido di GDI+ DrawImage ----
+        [StructLayout(LayoutKind.Sequential)]
+        struct BITMAPINFOHEADER
+        {
+            public int biSize, biWidth, biHeight; public short biPlanes, biBitCount; public int biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter, biClrUsed, biClrImportant;
+        }
+        [DllImport("gdi32.dll")] static extern int StretchDIBits(IntPtr hdc, int xDest, int yDest, int wDest, int hDest, int xSrc, int ySrc, int wSrc, int hSrc, byte[] bits, ref BITMAPINFOHEADER bmi, uint usage, uint rop);
+        [DllImport("gdi32.dll")] static extern int SetStretchBltMode(IntPtr hdc, int mode);
+        [DllImport("gdi32.dll")] static extern bool SetBrushOrgEx(IntPtr hdc, int x, int y, IntPtr old);
+
+        static void DrawFrame(Graphics g, FrameBuf fb, Rectangle dr)
+        {
+            var bmi = new BITMAPINFOHEADER { biSize = 40, biWidth = fb.W, biHeight = -fb.H, biPlanes = 1, biBitCount = 32, biCompression = 0 };
+            IntPtr hdc = g.GetHdc();
+            try
+            {
+                // HALFTONE = buona qualità in riduzione; a scala ~1:1 costa pochissimo
+                SetStretchBltMode(hdc, 4);
+                SetBrushOrgEx(hdc, 0, 0, IntPtr.Zero);
+                StretchDIBits(hdc, dr.X, dr.Y, dr.Width, dr.Height, 0, 0, fb.W, fb.H, fb.Data, ref bmi, 0, 0x00CC0020);
+            }
+            finally { g.ReleaseHdc(hdc); }
         }
 
         public void Select(Source s)
@@ -85,12 +114,7 @@ namespace VHSCapture
             g.FillRectangle(Brushes.Black, dr);
             if (Frame != null)
             {
-                g.CompositingMode = CompositingMode.SourceCopy;
-                g.CompositingQuality = CompositingQuality.HighSpeed;
-                g.PixelOffsetMode = PixelOffsetMode.HighSpeed;
-                g.InterpolationMode = InterpolationMode.Bilinear;
-                try { g.DrawImage(Frame, dr); } catch { }
-                g.CompositingMode = CompositingMode.SourceOver;
+                try { DrawFrame(g, Frame, dr); } catch { }
             }
             else
             {
@@ -123,12 +147,21 @@ namespace VHSCapture
             if (Selected != null && Selected.Visible)
             {
                 var sr = ToScreen(RectOf(Selected));
-                using var pen = new Pen(Theme.Rec, 2);
-                g.DrawRectangle(pen, sr);
-                using var hb = new SolidBrush(Theme.Rec);
-                foreach (var h in Handles(sr)) g.FillRectangle(hb, h);
+                if (Selected.Locked)
+                {
+                    using var lp = new Pen(Theme.Accent, 2) { DashStyle = DashStyle.Dash };
+                    g.DrawRectangle(lp, sr);
+                }
+                else
+                {
+                    using var pen = new Pen(Theme.Rec, 2);
+                    g.DrawRectangle(pen, sr);
+                    using var hb = new SolidBrush(Theme.Rec);
+                    foreach (var h in Handles(sr)) g.FillRectangle(hb, h);
+                }
                 using var f = new Font("Segoe UI", 8.5f);
-                string lbl = $"{Selected.Name}   {Selected.W}×{Selected.H}   pos {Selected.X},{Selected.Y}";
+                string lbl = (Selected.Locked ? "🔒 " : "") + $"{Selected.Name}   {Selected.W}×{Selected.H}   pos {Selected.X},{Selected.Y}";
+                if (Selected.CropL + Selected.CropT + Selected.CropR + Selected.CropB > 0) lbl += $"   ritaglio {Selected.CropL},{Selected.CropT},{Selected.CropR},{Selected.CropB}";
                 var sz = g.MeasureString(lbl, f);
                 var lr = new RectangleF(sr.X, sr.Y - sz.Height - 2, sz.Width + 6, sz.Height);
                 if (lr.Y < dr.Y) lr.Y = sr.Y + 2;
@@ -145,18 +178,21 @@ namespace VHSCapture
             if (e.Button != MouseButtons.Left && e.Button != MouseButtons.Right) return;
             var cp = ToCanvas(e.Location);
 
-            if (Selected != null && Selected.Visible && e.Button == MouseButtons.Left)
+            if (Selected != null && Selected.Visible && !Selected.Locked && e.Button == MouseButtons.Left)
             {
                 var hs = Handles(ToScreen(RectOf(Selected)));
                 for (int i = 0; i < hs.Length; i++)
                     if (hs[i].Contains(e.Location))
                     {
-                        mode = Mode.Resize; handle = i; dragStartCanvas = cp; dragStartRect = RectOf(Selected);
+                        bool alt = (ModifierKeys & Keys.Alt) != 0 && Selected.Type == SourceType.Capture;
+                        mode = alt ? Mode.Crop : Mode.Resize; handle = i; dragStartCanvas = cp; dragStartRect = RectOf(Selected);
+                        startCropL = Selected.CropL; startCropT = Selected.CropT; startCropR = Selected.CropR; startCropB = Selected.CropB;
                         return;
                     }
             }
             // hit test dall'alto verso il basso
-            var hit = Sources.Where(s => s.Visible).Reverse().FirstOrDefault(s => RectOf(s).Contains(cp));
+            // le sorgenti bloccate non si prendono cliccando (come OBS): lo sfondo resta fermo
+            var hit = Sources.Where(s => s.Visible && !s.Locked).Reverse().FirstOrDefault(s => RectOf(s).Contains(cp));
             Select(hit);
             if (hit != null && e.Button == MouseButtons.Left)
             {
@@ -170,10 +206,10 @@ namespace VHSCapture
             if (mode == Mode.None)
             {
                 Cursor = Cursors.Default;
-                if (Selected != null && Selected.Visible)
+                if (Selected != null && Selected.Visible && !Selected.Locked)
                 {
                     var hs = Handles(ToScreen(RectOf(Selected)));
-                    for (int i = 0; i < hs.Length; i++) if (hs[i].Contains(e.Location)) { Cursor = HandleCursor(i); return; }
+                    for (int i = 0; i < hs.Length; i++) if (hs[i].Contains(e.Location)) { Cursor = (ModifierKeys & Keys.Alt) != 0 ? Cursors.Cross : HandleCursor(i); return; }
                     if (ToScreen(RectOf(Selected)).Contains(e.Location)) Cursor = Cursors.SizeAll;
                 }
                 return;
@@ -182,6 +218,14 @@ namespace VHSCapture
             var cp = ToCanvas(e.Location);
             int dx = cp.X - dragStartCanvas.X, dy = cp.Y - dragStartCanvas.Y;
             var r = dragStartRect;
+
+            if (mode == Mode.Crop)
+            {
+                DoCrop(dx, dy);
+                TransformChanged?.Invoke(Selected, false);
+                Invalidate();
+                return;
+            }
 
             if (mode == Mode.Move)
             {
@@ -226,6 +270,32 @@ namespace VHSCapture
             Invalidate();
         }
 
+        /// <summary>
+        /// Alt+trascina una maniglia: ritaglia la sorgente invece di stirarla (come OBS). Il contenuto visibile resta dov'è,
+        /// cambia solo quanto se ne vede. Il delta in pixel del canvas viene convertito in pixel della sorgente.
+        /// </summary>
+        void DoCrop(int dx, int dy)
+        {
+            var r = dragStartRect;
+            var size = InputSizeOf?.Invoke(Selected);
+            int srcW, srcH;
+            if (size.HasValue) { srcW = size.Value.w; srcH = size.Value.h; }
+            else { var p = (Selected.InputSize ?? "").Split('x'); if (p.Length != 2 || !int.TryParse(p[0], out srcW) || !int.TryParse(p[1], out srcH)) { srcW = 720; srcH = 576; } }
+            int visW0 = Math.Max(16, srcW - startCropL - startCropR), visH0 = Math.Max(16, srcH - startCropT - startCropB);
+            double fx = (double)visW0 / Math.Max(1, r.Width), fy = (double)visH0 / Math.Max(1, r.Height);
+
+            int l = startCropL, t = startCropT, rr = startCropR, b = startCropB;
+            int x = r.X, y = r.Y, w = r.Width, h = r.Height;
+            bool left = handle == 0 || handle == 6 || handle == 7, right = handle == 2 || handle == 3 || handle == 4;
+            bool topH = handle == 0 || handle == 1 || handle == 2, bottomH = handle == 4 || handle == 5 || handle == 6;
+            if (left) { int c = (int)Math.Round(dx * fx); c = Math.Clamp(c, -startCropL, visW0 - 16); l = startCropL + c; int dd = (int)Math.Round(c / fx); x = r.X + dd; w = r.Width - dd; }
+            if (right) { int c = (int)Math.Round(-dx * fx); c = Math.Clamp(c, -startCropR, visW0 - 16); rr = startCropR + c; w = r.Width - (int)Math.Round(c / fx); }
+            if (topH) { int c = (int)Math.Round(dy * fy); c = Math.Clamp(c, -startCropT, visH0 - 16); t = startCropT + c; int dd = (int)Math.Round(c / fy); y = r.Y + dd; h = r.Height - dd; }
+            if (bottomH) { int c = (int)Math.Round(-dy * fy); c = Math.Clamp(c, -startCropB, visH0 - 16); b = startCropB + c; h = r.Height - (int)Math.Round(c / fy); }
+            Selected.CropL = l; Selected.CropT = t; Selected.CropR = rr; Selected.CropB = b;
+            Selected.X = x; Selected.Y = y; Selected.W = Math.Max(16, w); Selected.H = Math.Max(16, h);
+        }
+
         protected override void OnMouseUp(MouseEventArgs e)
         {
             if (mode != Mode.None && Selected != null) TransformChanged?.Invoke(Selected, true);
@@ -246,6 +316,7 @@ namespace VHSCapture
         protected override void OnKeyDown(KeyEventArgs e)
         {
             if (Selected == null) return;
+            if (Selected.Locked && e.KeyCode != Keys.Delete) return;
             int step = e.Shift ? 10 : 1;
             bool moved = true;
             switch (e.KeyCode)
@@ -273,13 +344,23 @@ namespace VHSCapture
             if (Selected == null) return;
             var m = new ContextMenuStrip();
             m.Items.Add("Proprietà…", null, (o, e) => OpenProperties?.Invoke(Selected));
+            m.Items.Add(Selected.Locked ? "Sblocca" : "Blocca", null, (o, e) => { Selected.Locked = !Selected.Locked; LockChanged?.Invoke(Selected); Invalidate(); });
             m.Items.Add(new ToolStripSeparator());
+            if (Selected.Locked) { m.Items.Add("Rimuovi", null, (o, e) => RemoveRequested?.Invoke(Selected)); Theme.StyleMenu(m); m.Show(this, at); return; }
             m.Items.Add("Adatta allo schermo (mantieni proporzioni)", null, (o, e) => { Selected.FitTo(CanvasW, CanvasH); TransformChanged?.Invoke(Selected, true); Invalidate(); });
             m.Items.Add("Riempi lo schermo (stira)", null, (o, e) => { Selected.FillTo(CanvasW, CanvasH); TransformChanged?.Invoke(Selected, true); Invalidate(); });
             m.Items.Add("Centra", null, (o, e) => { Selected.Center(CanvasW, CanvasH); TransformChanged?.Invoke(Selected, true); Invalidate(); });
             m.Items.Add("Dimensione originale", null, (o, e) => { var (w, h) = Selected.NaturalSize(); Selected.W = w; Selected.H = h; Selected.Center(CanvasW, CanvasH); TransformChanged?.Invoke(Selected, true); Invalidate(); });
             m.Items.Add(new ToolStripSeparator());
+            m.Items.Add("Azzera ritaglio", null, (o, e) =>
+            {
+                var sz = InputSizeOf?.Invoke(Selected);
+                Selected.CropL = Selected.CropT = Selected.CropR = Selected.CropB = 0;
+                TransformChanged?.Invoke(Selected, true); Invalidate();
+            });
+            m.Items.Add(new ToolStripSeparator());
             m.Items.Add("Rimuovi", null, (o, e) => RemoveRequested?.Invoke(Selected));
+            Theme.StyleMenu(m);
             m.Show(this, at);
         }
     }

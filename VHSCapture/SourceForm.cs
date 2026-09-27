@@ -25,7 +25,7 @@ namespace VHSCapture
         readonly Action<string> log;
         readonly bool structuralLocked;
 
-        PictureBox pv; Label pvMsg; System.Windows.Forms.Timer pvTimer, structTimer;
+        PictureBox pv; Label pvMsg; DateTime lastPreviewOk = DateTime.MinValue; System.Windows.Forms.Timer pvTimer, structTimer;
         TextBox txtName;
         ComboBox cbVideo, cbAudio, cbSize, cbFps;
         NumericUpDown nRtBuf; ComboBox cbDeint, cbFormat, cbScale; NumericUpDown nCropL, nCropT, nCropR, nCropB, nAudioOff;
@@ -97,7 +97,7 @@ namespace VHSCapture
             // anteprima in alto (fissa, non scorre)
             var pvCard = new Card { Dock = DockStyle.Top, Height = 280, Padding = new Padding(10), Radius = 10 };
             pv = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.Black };
-            pvMsg = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray, BackColor = Color.Black, Text = "In attesa dell'anteprima…" };
+            pvMsg = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray, BackColor = Color.Black, Text = "In attesa dell'anteprima…", Tag = "keep" };
             pv.Controls.Add(pvMsg);
             pvCard.Controls.Add(pv);
             var pvWrap = new Panel { Dock = DockStyle.Top, Height = 292, Padding = new Padding(12, 12, 12, 0) };
@@ -347,10 +347,14 @@ namespace VHSCapture
             try { b = getPreview?.Invoke(work.Id); } catch { }
             if (b == null)
             {
+                // un attimo senza frame (riavvio dopo una modifica) è normale: tengo l'ultima immagine
+                if ((DateTime.Now - lastPreviewOk).TotalSeconds < 2 && pv.Image != null) return;
+                var o = pv.Image; pv.Image = null; o?.Dispose();
                 pvMsg.Visible = true;
                 pvMsg.Text = structTimer.Enabled ? "Applico le modifiche…" : "Nessuna anteprima (sorgente fuori dal canvas, nascosta o dispositivo non partito — vedi Log)";
                 return;
             }
+            lastPreviewOk = DateTime.Now;
             pvMsg.Visible = false;
             var old = pv.Image; pv.Image = b; old?.Dispose();
         }

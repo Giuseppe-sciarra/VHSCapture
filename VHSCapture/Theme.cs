@@ -72,6 +72,8 @@ namespace VHSCapture
                     cb.BackColor = Input; cb.ForeColor = Fore; cb.FlatStyle = FlatStyle.Flat; break;
                 case CheckBox ch:
                     ch.BackColor = Color.Transparent; ch.ForeColor = Fore; break;
+                case Label l when l.Tag as string == "keep":
+                    break;
                 case Label l:
                     l.BackColor = Color.Transparent; l.ForeColor = (l.Tag as string == "muted") ? Muted : Fore; break;
                 case GroupBox g:

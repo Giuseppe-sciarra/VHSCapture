@@ -771,7 +771,14 @@ namespace VHSCapture
                     // l'encoder ora è sempre acceso: se non si apre, passo a x264 e riparto
                     string lg0; lock (runLog) lg0 = runLog.ToString();
                     // paracadute VU: se la pipe dei livelli non si apre, riparto senza misuratori (anteprima e registrazione prima di tutto)
-                    if (lg0.Contains("Could not open") && lg0.Contains("vhscap_an_") && !engine.AnalysisDisabled)
+                    if (lg0.Contains("Could not bind ZMQ") && !autoRetried)
+                    {
+                        AppendLog("Porta del controllo live occupata: riparto");
+                        autoRetried = true;
+                        restartTimer.Stop(); restartTimer.Start();
+                        return;
+                    }
+                    if (lg0.Contains("Could not open") && (lg0.Contains("vhscap_an_") || lg0.Contains("vhscap_fr_")) && !engine.AnalysisDisabled)
                     {
                         AppendLog("Rilevamento fine cassetta non disponibile su questo PC: riparto senza");
                         engine.AnalysisDisabled = true;
@@ -813,10 +820,11 @@ namespace VHSCapture
             bool changed = false;
             foreach (var src in settings.Sources.Where(x => x.Visible && x.Type == SourceType.Capture))
             {
-                if (src.InputSize != "auto" || src.InputFps != "auto")
+                if (src.InputSize != "auto" || src.InputFps != "auto" || src.VideoFormat != "auto")
                 {
-                    AppendLog($"\"{src.VideoDevice}\" non supporta {src.InputSize} @ {src.InputFps}: passo a risoluzione/fps automatici");
-                    src.InputSize = "auto"; src.InputFps = "auto"; changed = true;
+                    string fmt = src.VideoFormat == "auto" ? "" : " in " + src.VideoFormat.ToUpperInvariant();
+                    AppendLog($"\"{src.VideoDevice}\" non supporta {src.InputSize} @ {src.InputFps}{fmt}: passo a formato, risoluzione e fps automatici");
+                    src.InputSize = "auto"; src.InputFps = "auto"; src.VideoFormat = "auto"; changed = true;
                 }
             }
             if (!changed) return false;
@@ -973,7 +981,17 @@ namespace VHSCapture
             {
                 if ((DateTime.Now - lastCpuSample).TotalSeconds >= 1) { lastCpu = engine.CpuPercent(); lastCpuSample = DateTime.Now; }
                 var st = lastStats;
-                if (st != null) parts.Add($"{st.Fps:0.0} fps");
+                if (st != null) parts.Add($"uscita {st.Fps:0.0} fps");
+                double sf = engine.SourceFps;
+                if (sf > 0)
+                {
+                    var capSrc = settings.Sources.FirstOrDefault(x => x.Visible && x.Type == SourceType.Capture);
+                    double exp = 0;
+                    var inf = capSrc != null ? engine.GetInputInfo(capSrc.Id) : null;   // "1280×720 · 30 fps · nv12"
+                    if (inf != null) { var m = System.Text.RegularExpressions.Regex.Match(inf, @"([\d.]+) fps"); if (m.Success) double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out exp); }
+                    string warn = exp > 0 && sf < exp * 0.85 ? $" ⚠ (dovrebbe mandarne {exp:0}: la sorgente rallenta)" : "";
+                    parts.Add($"sorgente {sf:0.0} fps{warn}");
+                }
                 if (st != null && (st.Drop > 0 || st.Dup > 0)) parts.Add($"persi {st.Drop} · duplicati {st.Dup}");
                 parts.Add($"CPU ffmpeg {lastCpu:0}%");
                 if (engine.IsRecording) parts.Add(enc);

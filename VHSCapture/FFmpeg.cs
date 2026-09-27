@@ -552,6 +552,8 @@ namespace VHSCapture
             int n = Interlocked.Increment(ref pipeCounter);
             string tag = $"{Environment.ProcessId}_{n}";
             bool live = s.LiveControl && FFmpeg.HasZmq;
+            // porta libera scelta ora: col 5555 fisso, riavviando in fretta la vecchia pipeline la teneva ancora occupata
+            int zmqPort = live ? FreePort() : 0;
             activeIds = new HashSet<string>(s.Sources.Where(x => x.Visible && IsUsable(x)).Select(x => x.Id));
             var audioIds = s.Sources.Where(x => x.Visible && IsUsable(x) && x.HasAudio).Select(x => x.Id).ToList();
             activeAudioIds = new HashSet<string>(audioIds);
@@ -568,6 +570,8 @@ namespace VHSCapture
                 Meters = MetersDisabled ? new Dictionary<string, string>() : audioIds.ToDictionary(id => id, id => "vhscap_me_" + id + "_" + tag),
                 Analysis = AnalysisDisabled ? new Dictionary<string, string>() :
                     s.Sources.Where(x => x.Visible && x.Type == SourceType.Capture && IsUsable(x)).Take(1).ToDictionary(x => x.Id, x => "vhscap_an_" + x.Id + "_" + tag),
+                FrameRate = AnalysisDisabled ? new Dictionary<string, string>() :
+                    s.Sources.Where(x => x.Visible && x.Type == SourceType.Capture && IsUsable(x)).Take(1).ToDictionary(x => x.Id, x => "vhscap_fr_" + x.Id + "_" + tag),
             };
 
             // server delle pipe PRIMA di avviare ffmpeg
@@ -581,7 +585,7 @@ namespace VHSCapture
             var mePipes = names.Meters.ToDictionary(kv => kv.Key,
                 kv => Enumerable.Range(0, meterInstances).Select(_ => NewPipe(kv.Value, 256 << 10, meterInstances)).ToList());
 
-            string args = BuildArgs(s, PW, PH, live, names, out inputMap);
+            string args = BuildArgs(s, PW, PH, zmqPort, names, out inputMap);
             LastCommand = "ffmpeg " + args;
             Log?.Invoke(LastCommand);
 
@@ -598,6 +602,11 @@ namespace VHSCapture
             Run("ts", () => TsLoop(tsPipe));
             Run("progress", () => TextLoop(prPipe, OnProgressLine));
             foreach (var kv in mePipes) { var id = kv.Key; foreach (var p in kv.Value) { var pp = p; Run("meter", () => TextLoop(pp, l => OnMeterLine(id, l))); } }
+            foreach (var kv in names.FrameRate)
+            {
+                for (int i = 0; i < meterInstances; i++) { var pp = NewPipe(kv.Value, 64 << 10, meterInstances); Run("framerate", () => TextLoop(pp, OnFrameLine)); }
+            }
+            srcFrames.Clear(); SourceFps = 0;
             foreach (var kv in names.Analysis)
             {
                 var id = kv.Key;
@@ -607,10 +616,21 @@ namespace VHSCapture
 
             if (live)
             {
-                zmq = new ZmqControl(5555);
+                zmq = new ZmqControl(zmqPort);
                 zmq.Log += l => Log?.Invoke(l);
                 zmq.Start();
             }
+        }
+
+        static int FreePort()
+        {
+            try
+            {
+                var l = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+                l.Start(); int p = ((System.Net.IPEndPoint)l.LocalEndpoint).Port; l.Stop();
+                return p;
+            }
+            catch { return 5555 + new Random().Next(1, 400); }
         }
 
         NamedPipeServerStream NewPipe(string name, int inBuf, int instances = 1)
@@ -846,6 +866,27 @@ namespace VHSCapture
             }
         }
 
+        // fps reali della sorgente: conto i frame arrivati negli ultimi 2 secondi
+        readonly Queue<DateTime> srcFrames = new Queue<DateTime>();
+        /// <summary>Frame al secondo che la sorgente sta DAVVERO mandando (0 = sconosciuto).</summary>
+        public double SourceFps { get; private set; }
+
+        void OnFrameLine(string line)
+        {
+            if (!line.StartsWith("frame:")) return;
+            var now = DateTime.Now;
+            lock (srcFrames)
+            {
+                srcFrames.Enqueue(now);
+                while (srcFrames.Count > 0 && (now - srcFrames.Peek()).TotalSeconds > 2) srcFrames.Dequeue();
+                if (srcFrames.Count > 1)
+                {
+                    double span = (now - srcFrames.Peek()).TotalSeconds;
+                    if (span > 0.5) SourceFps = (srcFrames.Count - 1) / span;
+                }
+            }
+        }
+
         class SigState { public double yl, yh, ya, ul, uh, ua, vl, vh; public bool any; }
         readonly ConcurrentDictionary<string, SigState> sig = new ConcurrentDictionary<string, SigState>();
 
@@ -946,6 +987,7 @@ namespace VHSCapture
             public string Preview, Ts, Progress, Monitor;
             public Dictionary<string, string> Meters = new Dictionary<string, string>();
             public Dictionary<string, string> Analysis = new Dictionary<string, string>();   // rilevamento fine cassetta
+            public Dictionary<string, string> FrameRate = new Dictionary<string, string>();  // fps reali della sorgente
             public static string Win(string n) => @"\\.\pipe\" + n;
             /// <summary>
             /// Percorso della pipe dentro l'opzione di un filtro. I backslash vanno escapati DUE volte
@@ -971,7 +1013,7 @@ namespace VHSCapture
             "bilinear" => "bilinear", "lanczos" => "lanczos", "area" => "area", "fast_bilinear" => "fast_bilinear", _ => "bicubic",
         };
 
-        public static string BuildArgs(AppSettings s, int pw, int ph, bool zmq, PipeNames pn, out Dictionary<int, string> map)
+        public static string BuildArgs(AppSettings s, int pw, int ph, int zmqPort, PipeNames pn, out Dictionary<int, string> map)
         {
             map = new Dictionary<int, string>();
             var sb = new StringBuilder();
@@ -1017,7 +1059,8 @@ namespace VHSCapture
             }
 
             string cur = "[0:v]";
-            if (zmq) { graph.Append("[0:v]zmq[base];"); cur = "[base]"; }
+            // indirizzo con ':' escapati due volte (grafo + opzione) → tcp://127.0.0.1:porta (verificato su ffmpeg)
+            if (zmqPort > 0) { graph.Append($"[0:v]zmq=b=tcp\\\\://127.0.0.1\\\\:{zmqPort}[base];"); cur = "[base]"; }
 
             int k = 0;
             var analysisLabels = new List<string>();
@@ -1034,7 +1077,8 @@ namespace VHSCapture
                     {
                         // ramo di analisi per la fine cassetta: 2 fps, 64x36, statistiche del segnale → pipe
                         graph.Append($"[{i}:v]{string.Join(",", chain)},split=2[cs{k}][an{k}];");
-                        graph.Append($"[an{k}]fps=2,scale=64:36:flags=area,signalstats,metadata=mode=print:direct=1:file={PipeNames.InFilter(anPipe)}[ano{k}];");
+                        string frCount = pn.FrameRate.TryGetValue(src.Id, out var frPipe) ? $"metadata=mode=add:key=vhs.f:value=1,metadata=mode=print:direct=1:file={PipeNames.InFilter(frPipe)}," : "";   // senza una chiave il print non scrive nulla (verificato)
+                        graph.Append($"[an{k}]{frCount}fps=2,scale=64:36:flags=area,signalstats,metadata=mode=print:direct=1:file={PipeNames.InFilter(anPipe)}[ano{k}];");
                         analysisLabels.Add($"[ano{k}]");
                         chain.Clear();
                         chain.Add("null");

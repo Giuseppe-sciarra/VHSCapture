@@ -7,55 +7,106 @@ using System.Windows.Forms;
 
 namespace VHSCapture
 {
-    /// <summary>Proprietà di una sorgente: dispositivo/immagine/colore, trasformazione, correzione colore, audio. Le modifiche "live" vengono applicate subito.</summary>
+    /// <summary>
+    /// Proprietà di una sorgente, come in OBS: anteprima live in alto, sotto dispositivo/trasformazione/colore/audio.
+    /// Le modifiche vengono applicate subito alla scena (live); Annulla ripristina lo stato iniziale.
+    /// </summary>
     public class SourceForm : Form
     {
-        public Source Result { get; private set; }     // copia modificata; null se annullato
-        readonly Source snapshot;   // stato iniziale, per ripristino su Annulla
-        readonly Source work;
+        public Source Result { get; private set; }
+        readonly Source snapshot;          // stato iniziale (per Annulla)
+        readonly Source work;              // copia su cui lavora il dialogo
         readonly AppSettings cfg;
-        readonly Action<Source> onLive;               // callback per applicare al volo trasformazione/colore/volume
-        readonly Action<Action> withDeviceFree;       // esegue un'azione con l'anteprima ferma (dispositivo libero)
+        readonly Action<Source> onLive;          // posizione/colore/volume → applicati al volo
+        readonly Action<Source> onStructural;    // dispositivo/risoluzione/fps/deinterlaccio → riavvio anteprima
+        readonly Func<string, Bitmap> getPreview; // ritaglio della sorgente dall'anteprima corrente
+        readonly Action<Action> withDeviceFree;
         readonly Action<string> log;
         readonly bool structuralLocked;
 
+        PictureBox pv; Label pvMsg; System.Windows.Forms.Timer pvTimer, structTimer;
         TextBox txtName;
         ComboBox cbVideo, cbAudio, cbSize, cbFps;
         NumericUpDown nRtBuf; CheckBox chkDeint;
-        TextBox txtImage; Button btnImage;
-        Panel colorSwatch; Button btnColor;
+        TextBox txtImage;
+        Panel colorSwatch;
         NumericUpDown nX, nY, nW, nH;
         TrackBar tBri, tCon, tSat, tGam, tHue; Label lBri, lCon, lSat, lGam, lHue;
         TrackBar tVol; Label lVol; CheckBox chkMute;
         bool loading = true;
 
-        public SourceForm(Source src, AppSettings settings, Action<Source> live, bool lockStructural, Action<Action> deviceFree, Action<string> logger)
+        public SourceForm(Source src, AppSettings settings, bool lockStructural,
+                          Action<Source> live, Action<Source> structural, Func<string, Bitmap> preview,
+                          Action<Action> deviceFree, Action<string> logger)
         {
-            snapshot = src.Clone(); work = src.Clone(); cfg = settings; onLive = live; structuralLocked = lockStructural;
-            withDeviceFree = deviceFree; log = logger;
+            snapshot = src.Clone(); work = src.Clone(); cfg = settings;
+            onLive = live; onStructural = structural; getPreview = preview;
+            withDeviceFree = deviceFree; log = logger; structuralLocked = lockStructural;
+
             Text = "Proprietà — " + src.Name;
             FormBorderStyle = FormBorderStyle.Sizable; MaximizeBox = true; MinimizeBox = false; ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
             Font = new Font("Segoe UI", 9.5f);
-            ClientSize = new Size(700, 760); MinimumSize = new Size(600, 420);
+            ClientSize = new Size(760, 860); MinimumSize = new Size(640, 520);
             Build();
             LoadValues();
             loading = false;
             Theme.Apply(this, settings.DarkTheme);
+
+            pvTimer = new System.Windows.Forms.Timer { Interval = 120 };
+            pvTimer.Tick += (o, e) => UpdatePreview();
+            pvTimer.Start();
+            structTimer = new System.Windows.Forms.Timer { Interval = 600 };
+            structTimer.Tick += (o, e) => { structTimer.Stop(); PullStructural(); structuralSent = true; onStructural?.Invoke(work); };
+
+            // se al caricamento qualcosa è stato corretto (es. risoluzione non supportata → auto) applicalo subito
+            if (work.Type == SourceType.Capture && !structuralLocked && cbSize.Text != snapshot.InputSize) StructChanged();
         }
 
+        bool structuralSent;
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            pvTimer?.Stop(); structTimer?.Stop();
+            var old = pv.Image; pv.Image = null; old?.Dispose();
+            if (DialogResult != DialogResult.OK)
+            {
+                // ripristina tutto com'era
+                onLive?.Invoke(snapshot);
+                if (structuralSent) onStructural?.Invoke(snapshot);
+            }
+            base.OnFormClosed(e);
+        }
+
+        // ================= UI =================
         void Build()
         {
-            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(12), AutoScroll = true };
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            Controls.Add(root);
+            // pulsanti in basso
+            var pBtn = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, Height = 58, Padding = new Padding(12, 10, 12, 10) };
+            var btnOk = Ui.Btn("OK", "accent", null, 110);
+            var btnCancel = Ui.Btn("Annulla", "normal", null, 110);
+            btnOk.Click += (o, e) => { if (Commit()) { DialogResult = DialogResult.OK; Close(); } };
+            btnCancel.Click += (o, e) => { DialogResult = DialogResult.Cancel; Close(); };
+            pBtn.Controls.Add(btnOk); pBtn.Controls.Add(btnCancel);
+            AcceptButton = btnOk; CancelButton = btnCancel;
 
-            // ---- generale ----
-            var gGen = Group("Sorgente");
-            var tGen = Grid(gGen);
+            // anteprima in alto (fissa, non scorre)
+            var pvCard = new Card { Dock = DockStyle.Top, Height = 280, Padding = new Padding(10), Radius = 10 };
+            pv = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.Black };
+            pvMsg = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.Gray, BackColor = Color.Black, Text = "In attesa dell'anteprima…" };
+            pv.Controls.Add(pvMsg);
+            pvCard.Controls.Add(pv);
+            var pvWrap = new Panel { Dock = DockStyle.Top, Height = 292, Padding = new Padding(12, 12, 12, 0) };
+            pvWrap.Controls.Add(pvCard);
+
+            // contenuto scorrevole
+            var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(12, 10, 12, 4) };
+            var stack = new List<Card>();
+
+            // ---- sorgente ----
+            var gGen = Group("Sorgente"); var tGen = Grid(gGen);
             txtName = new TextBox();
             Row(tGen, "Nome", txtName, null);
-
             if (work.Type == SourceType.Capture)
             {
                 cbVideo = Combo(); cbAudio = Combo();
@@ -66,66 +117,62 @@ namespace VHSCapture
                 cbSize = Combo(); cbSize.DropDownStyle = ComboBoxStyle.DropDown;
                 cbFps = Combo(); cbFps.DropDownStyle = ComboBoxStyle.DropDown;
                 cbFps.Items.AddRange(new object[] { "auto", "5", "10", "15", "20", "23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60", "75", "90", "100", "120", "144" });
-                Row(tGen, "Risoluzione ingresso", cbSize, Muted("720x576 per PAL"));
+                Row(tGen, "Risoluzione ingresso", cbSize, Muted("720x576 per PAL, auto se non parte"));
                 Row(tGen, "Frame rate ingresso", cbFps, null);
                 nRtBuf = Num(64, 4096, 64);
                 Row(tGen, "Buffer cattura (MB)", nRtBuf, null);
                 chkDeint = new CheckBox { Text = "Deinterlaccia (yadif) — consigliato per VHS", AutoSize = true };
-                tGen.Controls.Add(chkDeint, 1, tGen.RowCount); tGen.SetColumnSpan(chkDeint, 2); tGen.RowCount++;
-                cbVideo.SelectedIndexChanged += (o, e) => RefreshSizes();
+                Full(tGen, chkDeint);
 
-                // pagine di configurazione del driver (come "Configura video" di OBS)
-                var pDrv = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0, 4, 0, 0) };
-                var bDrvVideo = Ui.Btn("Impostazioni driver video…", "ghost");
-                var bCross = Ui.Btn("Ingresso (Composito / S-Video)…", "ghost");
-                var bDrvAudio = Ui.Btn("Impostazioni driver audio…", "ghost");
+                var bDrvVideo = Ui.Btn("Driver video…", "ghost");
+                var bCross = Ui.Btn("Ingresso Composito / S-Video…", "ghost");
+                var bDrvAudio = Ui.Btn("Driver audio…", "ghost");
                 bDrvVideo.Click += (o, e) => OpenDriverPage("video");
                 bCross.Click += (o, e) => OpenDriverPage("crossbar");
                 bDrvAudio.Click += (o, e) => OpenDriverPage("audio");
-                pDrv.Controls.AddRange(new Control[] { bDrvVideo, bCross, bDrvAudio });
-                tGen.Controls.Add(pDrv, 1, tGen.RowCount); tGen.SetColumnSpan(pDrv, 2); tGen.RowCount++;
-                var lDrv = Muted("Le pagine sono del driver: standard video (PAL/NTSC), ingresso, luminosità hardware, ecc.");
-                tGen.Controls.Add(lDrv, 1, tGen.RowCount); tGen.SetColumnSpan(lDrv, 2); tGen.RowCount++;
+                Full(tGen, ButtonRow(bDrvVideo, bCross, bDrvAudio));
+                Full(tGen, Muted("Finestre del driver: standard video (PAL/NTSC), ingresso, regolazioni hardware.", 560));
 
+                cbVideo.SelectedIndexChanged += (o, e) => { RefreshSizes(); StructChanged(); };
+                cbAudio.SelectedIndexChanged += (o, e) => StructChanged();
+                cbSize.TextChanged += (o, e) => StructChanged();
+                cbFps.TextChanged += (o, e) => StructChanged();
+                chkDeint.CheckedChanged += (o, e) => StructChanged();
+                nRtBuf.ValueChanged += (o, e) => StructChanged();
                 if (structuralLocked) foreach (Control c in new Control[] { cbVideo, cbAudio, cbSize, cbFps, nRtBuf, chkDeint, btnRefresh, bCross }) c.Enabled = false;
             }
             else if (work.Type == SourceType.Image)
             {
                 txtImage = new TextBox();
-                btnImage = Ui.Btn("Sfoglia…", "ghost");
+                var btnImage = Ui.Btn("Sfoglia…", "ghost");
                 btnImage.Click += (o, e) =>
                 {
                     using var d = new OpenFileDialog { Filter = "Immagini|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp|Tutti|*.*" };
-                    if (d.ShowDialog(this) == DialogResult.OK) txtImage.Text = d.FileName;
+                    if (d.ShowDialog(this) == DialogResult.OK) { txtImage.Text = d.FileName; StructChanged(); }
                 };
                 Row(tGen, "File immagine", txtImage, btnImage);
                 if (structuralLocked) { txtImage.Enabled = false; btnImage.Enabled = false; }
             }
             else
             {
-                colorSwatch = new Panel { Width = 60, Height = 24, BorderStyle = BorderStyle.FixedSingle };
-                btnColor = Ui.Btn("Scegli colore…", "ghost");
+                colorSwatch = new Panel { Width = 60, Height = 26, BorderStyle = BorderStyle.FixedSingle };
+                var btnColor = Ui.Btn("Scegli colore…", "ghost");
                 btnColor.Click += (o, e) =>
                 {
                     using var d = new ColorDialog { Color = colorSwatch.BackColor, FullOpen = true };
-                    if (d.ShowDialog(this) == DialogResult.OK) colorSwatch.BackColor = d.Color;
+                    if (d.ShowDialog(this) == DialogResult.OK) { colorSwatch.BackColor = d.Color; StructChanged(); }
                 };
                 Row(tGen, "Colore", colorSwatch, btnColor);
                 if (structuralLocked) btnColor.Enabled = false;
             }
-            root.Controls.Add(gGen);
+            stack.Add(gGen);
 
             // ---- trasformazione ----
-            var gTr = Group("Posizione e dimensione (pixel sul canvas " + cfg.CanvasW + "×" + cfg.CanvasH + ")");
-            var tTr = Grid(gTr);
+            var gTr = Group($"Posizione e dimensione  (canvas {cfg.CanvasW}×{cfg.CanvasH})"); var tTr = Grid(gTr);
             nX = Num(-8000, 8000, 1); nY = Num(-8000, 8000, 1); nW = Num(16, 8000, 1); nH = Num(16, 8000, 1);
-            var pXY = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
-            pXY.Controls.AddRange(new Control[] { Lab("X"), nX, Lab("Y"), nY });
-            var pWH = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0) };
-            pWH.Controls.AddRange(new Control[] { Lab("L"), nW, Lab("A"), nH });
-            Row(tTr, "Posizione", pXY, null);
-            Row(tTr, "Dimensione", pWH, null);
-            var pBtns = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0) };
+            foreach (var n in new[] { nX, nY, nW, nH }) n.Width = 90;
+            Row(tTr, "Posizione", Pair("X", nX, "Y", nY), null);
+            Row(tTr, "Dimensione", Pair("L", nW, "A", nH), null);
             var bFit = Ui.Btn("Adatta allo schermo", "ghost");
             var bFill = Ui.Btn("Riempi (stira)", "ghost");
             var bCenter = Ui.Btn("Centra", "ghost");
@@ -138,14 +185,13 @@ namespace VHSCapture
             bNat.Click += (o, e) => { var (w, h) = work.NaturalSize(); work.W = w; work.H = h; work.Center(cfg.CanvasW, cfg.CanvasH); PushTransform(); };
             b43.Click += (o, e) => { PullTransform(); work.W = work.H * 4 / 3; work.Center(cfg.CanvasW, cfg.CanvasH); PushTransform(); };
             b169.Click += (o, e) => { PullTransform(); work.W = work.H * 16 / 9; work.Center(cfg.CanvasW, cfg.CanvasH); PushTransform(); };
-            pBtns.Controls.AddRange(new Control[] { bFit, bFill, bCenter, bNat, b43, b169 });
-            tTr.Controls.Add(pBtns, 1, tTr.RowCount); tTr.SetColumnSpan(pBtns, 2); tTr.RowCount++;
+            Full(tTr, ButtonRow(bFit, bFill, bCenter));
+            Full(tTr, ButtonRow(bNat, b43, b169));
             foreach (var n in new[] { nX, nY, nW, nH }) n.ValueChanged += (o, e) => { if (loading) return; PullTransform(); onLive?.Invoke(work); };
-            root.Controls.Add(gTr);
+            stack.Add(gTr);
 
-            // ---- correzione colore ----
-            var gCol = Group("Correzione colore");
-            var tCol = Grid(gCol);
+            // ---- colore ----
+            var gCol = Group("Correzione colore"); var tCol = Grid(gCol);
             (tBri, lBri) = Slider(tCol, "Luminosità", -100, 100, 0);
             (tCon, lCon) = Slider(tCol, "Contrasto", 0, 300, 100);
             (tSat, lSat) = Slider(tCol, "Saturazione", 0, 300, 100);
@@ -154,90 +200,100 @@ namespace VHSCapture
             if (work.Type != SourceType.Capture) { tCon.Enabled = false; tGam.Enabled = false; }
             var bReset = Ui.Btn("Ripristina colori", "ghost");
             bReset.Click += (o, e) => { tBri.Value = 0; tCon.Value = 100; tSat.Value = 100; tGam.Value = 100; tHue.Value = 0; };
-            tCol.Controls.Add(bReset, 1, tCol.RowCount); tCol.RowCount++;
+            Full(tCol, ButtonRow(bReset));
             foreach (var t in new[] { tBri, tCon, tSat, tGam, tHue }) t.ValueChanged += (o, e) => { UpdateColorLabels(); if (loading) return; PullColor(); onLive?.Invoke(work); };
-            root.Controls.Add(gCol);
+            stack.Add(gCol);
 
             // ---- audio ----
             if (work.Type == SourceType.Capture)
             {
-                var gAud = Group("Audio");
-                var tAud = Grid(gAud);
+                var gAud = Group("Audio"); var tAud = Grid(gAud);
                 (tVol, lVol) = Slider(tAud, "Volume (dB)", -60, 12, 0);
                 chkMute = new CheckBox { Text = "Muto", AutoSize = true };
-                tAud.Controls.Add(chkMute, 1, tAud.RowCount); tAud.RowCount++;
+                Full(tAud, chkMute);
                 tVol.ValueChanged += (o, e) => { lVol.Text = tVol.Value + " dB"; if (loading) return; PullAudio(); onLive?.Invoke(work); };
                 chkMute.CheckedChanged += (o, e) => { if (loading) return; PullAudio(); onLive?.Invoke(work); };
-                root.Controls.Add(gAud);
+                stack.Add(gAud);
             }
 
-            // ---- pulsanti ----
-            var pBtn = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, Height = 56, Padding = new Padding(10) };
-            var btnOk = Ui.Btn("OK", "accent", null, 110);
-            var btnCancel = Ui.Btn("Annulla", "normal", null, 110);
-            btnOk.Click += (o, e) => { if (Commit()) { DialogResult = DialogResult.OK; Close(); } };
-            btnCancel.Click += (o, e) => { DialogResult = DialogResult.Cancel; Close(); };
-            pBtn.Controls.Add(btnOk); pBtn.Controls.Add(btnCancel);
+            // Dock=Top impila al contrario: aggiungo in ordine inverso
+            for (int i = stack.Count - 1; i >= 0; i--) scroll.Controls.Add(stack[i]);
+
+            Controls.Add(scroll);
+            Controls.Add(pvWrap);
             Controls.Add(pBtn);
-            AcceptButton = btnOk; CancelButton = btnCancel;
-
-            FormClosed += (o, e) =>
-            {
-                // annullato: ripristina lo stato live originale
-                if (DialogResult != DialogResult.OK) onLive?.Invoke(snapshot);
-            };
         }
 
-        void OpenDriverPage(string kind)
-        {
-            bool audio = kind == "audio";
-            string dev = audio ? (cbAudio.Text.StartsWith("(") ? "" : cbAudio.Text) : (cbVideo.Text.StartsWith("(") ? "" : cbVideo.Text);
-            if (string.IsNullOrEmpty(dev)) { MessageBox.Show(this, "Seleziona prima il dispositivo.", "VHSCapture"); return; }
+        // ================= helpers UI =================
+        static Card Group(string t) => new Card { HeaderText = t, Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(14, 32, 14, 12), Margin = new Padding(0, 0, 0, 10) };
 
-            // 1) pagina nativa del driver (funziona anche con l'anteprima in corso)
-            if (kind != "crossbar" && DShowProps.ShowNative(Handle, dev, !audio, log)) return;
-
-            // 2) fallback: dialogo mostrato da ffmpeg, serve il dispositivo libero
-            if (structuralLocked) { MessageBox.Show(this, "Ferma la registrazione per aprire questa pagina.", "VHSCapture"); return; }
-            if (withDeviceFree != null) withDeviceFree(() => DShowProps.ShowViaFFmpeg(dev, kind, log));
-            else DShowProps.ShowViaFFmpeg(dev, kind, log);
-        }
-
-        // ---------- helpers ----------
-        static Card Group(string t) => new Card { HeaderText = t, Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(12, 30, 12, 10), Margin = new Padding(0, 0, 0, 10) };
         static TableLayoutPanel Grid(Card g)
         {
-            var t = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true, RowCount = 0 };
-            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+            var t = new TableLayoutPanel { ColumnCount = 3, RowCount = 0, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Location = new Point(g.Padding.Left, g.Padding.Top), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right, Tag = "panel" };
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            g.Controls.Add(t); return t;
+            g.Controls.Add(t);
+            t.Width = Math.Max(300, g.ClientSize.Width - g.Padding.Horizontal);
+            g.Resize += (o, e) => { t.Width = Math.Max(300, g.ClientSize.Width - g.Padding.Horizontal); };
+            t.SizeChanged += (o, e) => g.PerformLayout();
+            return t;
         }
+
+        // spazio sotto l'ultima riga e altezza card corretta: la card si adatta al TLP
         static void Row(TableLayoutPanel t, string label, Control c, Control extra)
         {
-            var l = new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 6, 6) };
+            var l = new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 8, 8, 8) };
             int r = t.RowCount; t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             t.Controls.Add(l, 0, r);
-            c.Margin = new Padding(0, 3, 6, 3);
-            if (c is ComboBox || c is NumericUpDown) c.Width = 240;
-            else if (c is TextBox) c.Dock = DockStyle.Fill;
+            c.Margin = new Padding(0, 4, 8, 4);
+            if (c is ComboBox) { c.Width = 260; c.Anchor = AnchorStyles.Left; }
+            else if (c is NumericUpDown) { c.Width = 120; c.Anchor = AnchorStyles.Left; }
+            else if (c is TextBox) c.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            else if (c is TrackBar) c.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             else c.Anchor = AnchorStyles.Left;
             t.Controls.Add(c, 1, r);
-            if (extra != null) { extra.Anchor = AnchorStyles.Left; extra.Margin = new Padding(0, 3, 0, 3); t.Controls.Add(extra, 2, r); }
+            if (extra != null) { extra.Anchor = AnchorStyles.Left; extra.Margin = new Padding(0, 4, 0, 4); t.Controls.Add(extra, 2, r); }
             t.RowCount = r + 1;
         }
+
+        static void Full(TableLayoutPanel t, Control c)
+        {
+            int r = t.RowCount; t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            c.Margin = new Padding(0, 4, 0, 4);
+            c.Anchor = AnchorStyles.Left;
+            t.Controls.Add(c, 1, r); t.SetColumnSpan(c, 2);
+            t.RowCount = r + 1;
+        }
+
+        static FlowLayoutPanel ButtonRow(params Control[] buttons)
+        {
+            var f = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0), Padding = new Padding(0), Tag = "panel" };
+            foreach (var b in buttons) { b.Margin = new Padding(0, 0, 8, 0); f.Controls.Add(b); }
+            return f;
+        }
+
+        static FlowLayoutPanel Pair(string l1, Control c1, string l2, Control c2)
+        {
+            var f = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0), Tag = "panel" };
+            f.Controls.Add(new Label { Text = l1, AutoSize = true, Margin = new Padding(0, 7, 6, 0) });
+            c1.Margin = new Padding(0, 3, 18, 3); f.Controls.Add(c1);
+            f.Controls.Add(new Label { Text = l2, AutoSize = true, Margin = new Padding(0, 7, 6, 0) });
+            c2.Margin = new Padding(0, 3, 0, 3); f.Controls.Add(c2);
+            return f;
+        }
+
         static (TrackBar, Label) Slider(TableLayoutPanel t, string label, int min, int max, int val)
         {
-            var tb = new TrackBar { Minimum = min, Maximum = max, Value = val, TickStyle = TickStyle.None, Width = 300, AutoSize = false, Height = 28 };
-            var lv = new Label { AutoSize = true, Width = 60 };
+            var tb = new SafeTrackBar { Minimum = min, Maximum = max, Value = val, TickStyle = TickStyle.None, AutoSize = false, Height = 30, Width = 320 };
+            var lv = new Label { AutoSize = false, Width = 64, TextAlign = ContentAlignment.MiddleRight };
             Row(t, label, tb, lv);
-            tb.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             return (tb, lv);
         }
-        static ComboBox Combo() => new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
-        static NumericUpDown Num(int min, int max, int step) => new NumericUpDown { Minimum = min, Maximum = max, Increment = step, Width = 80, Margin = new Padding(0, 0, 10, 0) };
-        static Label Lab(string t) => new Label { Text = t, AutoSize = true, Margin = new Padding(0, 6, 4, 0) };
-        static Label Muted(string t) => new Label { Text = t, AutoSize = true, Tag = "muted", Margin = new Padding(0, 6, 0, 0) };
+
+        static ComboBox Combo() => new SafeCombo { DropDownStyle = ComboBoxStyle.DropDownList };
+        static NumericUpDown Num(int min, int max, int step) => new SafeNumeric { Minimum = min, Maximum = max, Increment = step };
+        static Label Muted(string t, int maxW = 0) => new Label { Text = t, AutoSize = true, Tag = "muted", Margin = new Padding(0, 8, 0, 0), MaximumSize = new Size(maxW, 0) };
         static void Sel(ComboBox cb, string v)
         {
             for (int i = 0; i < cb.Items.Count; i++)
@@ -245,7 +301,22 @@ namespace VHSCapture
             cb.SelectedIndex = -1;
         }
 
-        // ---------- valori ----------
+        // ================= anteprima =================
+        void UpdatePreview()
+        {
+            Bitmap b = null;
+            try { b = getPreview?.Invoke(work.Id); } catch { }
+            if (b == null)
+            {
+                pvMsg.Visible = true;
+                pvMsg.Text = structTimer.Enabled ? "Applico le modifiche…" : "Nessuna anteprima (sorgente fuori dal canvas, nascosta o dispositivo non partito — vedi Log)";
+                return;
+            }
+            pvMsg.Visible = false;
+            var old = pv.Image; pv.Image = b; old?.Dispose();
+        }
+
+        // ================= valori =================
         void LoadValues()
         {
             txtName.Text = work.Name;
@@ -253,9 +324,12 @@ namespace VHSCapture
             {
                 RefreshDevices(false);
                 Sel(cbVideo, work.VideoDevice);
+                if (cbVideo.SelectedIndex < 0 && cbVideo.Items.Count > 0) cbVideo.SelectedIndex = 0;
                 Sel(cbAudio, string.IsNullOrEmpty(work.AudioDevice) ? "(nessuno)" : work.AudioDevice);
+                if (cbAudio.SelectedIndex < 0) cbAudio.SelectedIndex = 0;
+                cbSize.Text = work.InputSize;
                 RefreshSizes();
-                cbSize.Text = work.InputSize; cbFps.Text = work.InputFps;
+                cbFps.Text = work.InputFps;
                 nRtBuf.Value = Math.Clamp(work.RtBufMB, 64, 4096);
                 chkDeint.Checked = work.Deinterlace;
                 tVol.Value = Math.Clamp((int)Math.Round(work.VolumeDb), -60, 12); lVol.Text = tVol.Value + " dB";
@@ -275,10 +349,11 @@ namespace VHSCapture
 
         void UpdateColorLabels()
         {
-            lBri.Text = (tBri.Value / 100.0).ToString("0.00", CultureInfo.InvariantCulture);
-            lCon.Text = (tCon.Value / 100.0).ToString("0.00", CultureInfo.InvariantCulture);
-            lSat.Text = (tSat.Value / 100.0).ToString("0.00", CultureInfo.InvariantCulture);
-            lGam.Text = (tGam.Value / 100.0).ToString("0.00", CultureInfo.InvariantCulture);
+            var ci = CultureInfo.InvariantCulture;
+            lBri.Text = (tBri.Value / 100.0).ToString("0.00", ci);
+            lCon.Text = (tCon.Value / 100.0).ToString("0.00", ci);
+            lSat.Text = (tSat.Value / 100.0).ToString("0.00", ci);
+            lGam.Text = (tGam.Value / 100.0).ToString("0.00", ci);
             lHue.Text = tHue.Value + "°";
         }
 
@@ -296,36 +371,57 @@ namespace VHSCapture
             work.Brightness = tBri.Value / 100.0; work.Contrast = tCon.Value / 100.0; work.Saturation = tSat.Value / 100.0;
             work.Gamma = tGam.Value / 100.0; work.Hue = tHue.Value;
         }
-        void PullAudio() { work.VolumeDb = tVol.Value; work.Muted = chkMute.Checked; }
+        void PullAudio() { if (tVol != null) { work.VolumeDb = tVol.Value; work.Muted = chkMute.Checked; } }
 
-        bool Commit()
+        void PullStructural()
         {
-            work.Name = string.IsNullOrWhiteSpace(txtName.Text) ? work.Name : txtName.Text.Trim();
             if (work.Type == SourceType.Capture)
             {
-                if (cbVideo.SelectedItem == null || cbVideo.Text.StartsWith("("))
-                { MessageBox.Show(this, "Seleziona un dispositivo video.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning); return false; }
-                work.VideoDevice = cbVideo.Text;
+                work.VideoDevice = cbVideo.Text.StartsWith("(") ? "" : cbVideo.Text;
                 work.AudioDevice = cbAudio.Text.StartsWith("(") ? "" : cbAudio.Text;
                 work.InputSize = string.IsNullOrWhiteSpace(cbSize.Text) ? "auto" : cbSize.Text.Trim();
                 work.InputFps = string.IsNullOrWhiteSpace(cbFps.Text) ? "auto" : cbFps.Text.Trim();
                 work.RtBufMB = (int)nRtBuf.Value;
                 work.Deinterlace = chkDeint.Checked;
-                PullAudio();
             }
-            else if (work.Type == SourceType.Image)
-            {
-                if (!File.Exists(txtImage.Text)) { MessageBox.Show(this, "File immagine non trovato.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning); return false; }
-                work.ImagePath = txtImage.Text;
-            }
+            else if (work.Type == SourceType.Image) { if (File.Exists(txtImage.Text)) work.ImagePath = txtImage.Text; }
             else work.Color = ColorTranslator.ToHtml(Color.FromArgb(colorSwatch.BackColor.R, colorSwatch.BackColor.G, colorSwatch.BackColor.B));
-            PullTransform(); PullColor();
+        }
+
+        void StructChanged()
+        {
+            if (loading || structuralLocked) return;
+            structTimer.Stop(); structTimer.Start();   // debounce: riavvia l'anteprima quando smetti di toccare
+        }
+
+        bool Commit()
+        {
+            work.Name = string.IsNullOrWhiteSpace(txtName.Text) ? work.Name : txtName.Text.Trim();
+            if (work.Type == SourceType.Capture && (cbVideo.SelectedItem == null || cbVideo.Text.StartsWith("(")))
+            { MessageBox.Show(this, "Seleziona un dispositivo video.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning); return false; }
+            if (work.Type == SourceType.Image && !File.Exists(txtImage.Text))
+            { MessageBox.Show(this, "File immagine non trovato.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning); return false; }
+            PullStructural(); PullTransform(); PullColor(); PullAudio();
+            structTimer.Stop();
             Result = work;
             return true;
         }
 
+        // ================= driver =================
+        void OpenDriverPage(string kind)
+        {
+            bool audio = kind == "audio";
+            string dev = audio ? (cbAudio.Text.StartsWith("(") ? "" : cbAudio.Text) : (cbVideo.Text.StartsWith("(") ? "" : cbVideo.Text);
+            if (string.IsNullOrEmpty(dev)) { MessageBox.Show(this, "Seleziona prima il dispositivo.", "VHSCapture"); return; }
+            if (kind != "crossbar" && DShowProps.ShowNative(Handle, dev, !audio, log)) return;
+            if (structuralLocked) { MessageBox.Show(this, "Ferma la registrazione per aprire questa pagina.", "VHSCapture"); return; }
+            if (withDeviceFree != null) withDeviceFree(() => DShowProps.ShowViaFFmpeg(dev, kind, log));
+            else DShowProps.ShowViaFFmpeg(dev, kind, log);
+        }
+
         void RefreshDevices(bool keep)
         {
+            bool was = loading; loading = true;
             string v = cbVideo.Text, a = cbAudio.Text;
             var (video, audio) = FFmpeg.ListDevices();
             cbVideo.Items.Clear(); cbAudio.Items.Clear();
@@ -336,17 +432,24 @@ namespace VHSCapture
             if (keep) { Sel(cbVideo, v); Sel(cbAudio, a); }
             if (cbVideo.SelectedIndex < 0 && cbVideo.Items.Count > 0) cbVideo.SelectedIndex = 0;
             if (cbAudio.SelectedIndex < 0) cbAudio.SelectedIndex = 0;
+            loading = was;
         }
 
         void RefreshSizes()
         {
+            bool was = loading; loading = true;
             string cur = cbSize.Text;
             cbSize.Items.Clear(); cbSize.Items.Add("auto");
-            var found = new List<string>();
-            if (cbVideo.SelectedItem != null && !cbVideo.Text.StartsWith("(")) found = FFmpeg.ListVideoSizes(cbVideo.Text);
+            var devSizes = new List<string>();
+            if (cbVideo.SelectedItem != null && !cbVideo.Text.StartsWith("(")) devSizes = FFmpeg.ListVideoSizes(cbVideo.Text);
+            var found = new List<string>(devSizes);
+            bool deviceKnown = devSizes.Count > 0;
             foreach (var d in new[] { "720x576", "720x480", "704x576", "704x480", "768x576", "640x480", "352x288", "352x240", "1280x720", "1920x1080", "2560x1440", "3840x2160" }) if (!found.Contains(d)) found.Add(d);
             foreach (var d in found) cbSize.Items.Add(d);
-            cbSize.Text = string.IsNullOrEmpty(cur) ? "720x576" : cur;
+            // se il dispositivo dichiara le sue risoluzioni e quella corrente non c'è, metti auto (evita che ffmpeg non parta)
+            if (deviceKnown && cur != "auto" && !string.IsNullOrEmpty(cur) && !devSizes.Contains(cur)) cur = "auto";
+            cbSize.Text = string.IsNullOrEmpty(cur) ? "auto" : cur;
+            loading = was;
         }
     }
 }

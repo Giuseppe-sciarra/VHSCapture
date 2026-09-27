@@ -437,7 +437,8 @@ namespace VHSCapture
                 string amix;
                 if (labels.Count == 1) amix = labels[0];
                 else { graph.Append($"{string.Join("", labels)}amix=inputs={labels.Count}:duration=longest:normalize=0[amix];"); amix = "[amix]"; }
-                string meter = "astats=metadata=1:reset=4,ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=pipe\\:2";
+                // doppio escape: il parser del grafo toglie un backslash, il parser delle opzioni l'altro → file=pipe:2
+                string meter = "astats=metadata=1:reset=4,ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=pipe\\\\:2";
                 if (rec) graph.Append($"{amix}asplit=2[arec][apv];[apv]{meter}[apvs];");
                 else graph.Append($"{amix}{meter}[apvs];");
             }

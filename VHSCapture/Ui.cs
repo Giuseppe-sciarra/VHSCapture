@@ -37,7 +37,35 @@ namespace VHSCapture
             return b;
         }
 
+        /// <summary>Scorre il primo contenitore AutoScroll che contiene il controllo.</summary>
+        public static void ScrollParent(Control c, int delta)
+        {
+            for (var p = c.Parent; p != null; p = p.Parent)
+            {
+                if (p is ScrollableControl sc && sc.AutoScroll && sc.VerticalScroll.Visible)
+                {
+                    int y = -sc.AutoScrollPosition.Y - Math.Sign(delta) * 60;
+                    sc.AutoScrollPosition = new Point(0, Math.Max(0, y));
+                    return;
+                }
+            }
+        }
+
         public static Label Title(string t) => new Label { Text = t, AutoSize = true, Tag = "muted", Font = new Font("Segoe UI Semibold", 8.5f), Margin = new Padding(2, 0, 0, 6) };
+    }
+
+    /// <summary>Controlli che NON cambiano valore con la rotella: la rotella scorre la pagina.</summary>
+    public class SafeTrackBar : TrackBar
+    {
+        protected override void OnMouseWheel(MouseEventArgs e) { if (e is HandledMouseEventArgs h) h.Handled = true; Ui.ScrollParent(this, e.Delta); }
+    }
+    public class SafeCombo : ComboBox
+    {
+        protected override void OnMouseWheel(MouseEventArgs e) { if (e is HandledMouseEventArgs h) h.Handled = true; if (!DroppedDown) Ui.ScrollParent(this, e.Delta); }
+    }
+    public class SafeNumeric : NumericUpDown
+    {
+        protected override void OnMouseWheel(MouseEventArgs e) { if (e is HandledMouseEventArgs h) h.Handled = true; Ui.ScrollParent(this, e.Delta); }
     }
 
     /// <summary>Pulsante piatto con angoli arrotondati e stati hover/pressed. Variant: normal, accent, rec, ghost, danger.</summary>
@@ -112,6 +140,20 @@ namespace VHSCapture
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             Tag = "card";
             Padding = new Padding(12);
+        }
+
+        public override Size GetPreferredSize(Size proposed)
+        {
+            if (!AutoSize) return base.GetPreferredSize(proposed);
+            int bottom = Padding.Top, right = 0;
+            foreach (Control c in Controls)
+            {
+                if (!c.Visible) continue;
+                var ps = c.AutoSize ? c.GetPreferredSize(new Size(Math.Max(1, Width - Padding.Horizontal), 0)) : c.Size;
+                bottom = Math.Max(bottom, c.Top + Math.Max(c.Height, ps.Height) + c.Margin.Bottom);
+                right = Math.Max(right, c.Right);
+            }
+            return new Size(Math.Max(Width, right + Padding.Right), bottom + Padding.Bottom);
         }
 
         protected override void OnPaintBackground(PaintEventArgs e)

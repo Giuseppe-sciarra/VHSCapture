@@ -28,6 +28,8 @@ namespace VHSCapture
         string recFile, finalFile;
         bool finalizing, syncingList;
         int frames; DateTime lastFrameAt = DateTime.MinValue;
+        readonly System.Text.StringBuilder runLog = new System.Text.StringBuilder();
+        bool autoRetried;
 
         public MainForm()
         {
@@ -46,7 +48,7 @@ namespace VHSCapture
 
             engine.FrameReady += OnFrame;
             engine.AudioLevel += db => { if (IsHandleCreated) BeginInvoke(new Action(() => vu.SetLevel(db))); };
-            engine.Log += AppendLog;
+            engine.Log += l => { lock (runLog) { if (runLog.Length < 20000) runLog.AppendLine(l); } AppendLog(l); };
             engine.Exited += OnEngineExited;
 
             timer = new System.Windows.Forms.Timer { Interval = 500 };
@@ -101,7 +103,7 @@ namespace VHSCapture
             txtName = new TextBox { Width = 240, Margin = new Padding(0, 6, 0, 0), PlaceholderText = "es. Rossi_matrimonio_1994", Font = new Font("Segoe UI", 10f) };
             btnSettings = Ui.Btn("⚙   Uscita", "ghost", (o, e) => OpenSettings()); btnSettings.Margin = new Padding(20, 0, 8, 0);
             btnFolder = Ui.Btn("📁   Apri cartella", "ghost", (o, e) => { try { Process.Start(new ProcessStartInfo("explorer.exe", settings.ResolvedOutputFolder())); } catch { } });
-            btnTheme = Ui.IconBtn("◐", "Tema chiaro/scuro", (o, e) => { settings.DarkTheme = !settings.DarkTheme; settings.Save(); Theme.Apply(this, settings.DarkTheme); });
+            btnTheme = Ui.IconBtn("◐", "Tema chiaro/scuro", (o, e) => { settings.DarkTheme = !settings.DarkTheme; settings.Save(); Theme.Apply(this, settings.DarkTheme); RefreshSourceList(); });
             btnLog = Ui.Btn("Log", "ghost", (o, e) => ToggleLog());
             flow.Controls.AddRange(new Control[] { btnPreview, btnRec, btnStop, lblName, txtName, btnSettings, btnFolder, btnTheme, btnLog });
             top.Controls.Add(flow);
@@ -129,7 +131,7 @@ namespace VHSCapture
             cardSources = new Card { Dock = DockStyle.Fill, HeaderText = "SORGENTI", Padding = new Padding(12, 30, 12, 12), Radius = 10 };
             lvSources = new ListView { Dock = DockStyle.Fill, View = View.Details, CheckBoxes = true, FullRowSelect = true, HeaderStyle = ColumnHeaderStyle.None, MultiSelect = false, HideSelection = false, BorderStyle = BorderStyle.None, Font = new Font("Segoe UI", 10f) };
             lvSources.Columns.Add("Nome", 600);
-            lvSources.ItemChecked += (o, e) => { if (syncingList) return; var sx = e.Item.Tag as Source; if (sx != null && sx.Visible != e.Item.Checked) { if (engine.IsRecording) { syncingList = true; e.Item.Checked = sx.Visible; syncingList = false; return; } sx.Visible = e.Item.Checked; settings.Save(); RestartIfRunning(); canvas.Invalidate(); } };
+            lvSources.ItemChecked += (o, e) => { if (syncingList || !lvSources.Focused) { if (!syncingList && e.Item.Tag is Source q && q.Visible != e.Item.Checked) { syncingList = true; e.Item.Checked = q.Visible; syncingList = false; } return; } var sx = e.Item.Tag as Source; if (sx != null && sx.Visible != e.Item.Checked) { if (engine.IsRecording) { syncingList = true; e.Item.Checked = sx.Visible; syncingList = false; return; } sx.Visible = e.Item.Checked; settings.Save(); RestartIfRunning(); canvas.Invalidate(); } };
             lvSources.SelectedIndexChanged += (o, e) => { if (syncingList) return; var sx = lvSources.SelectedItems.Count > 0 ? lvSources.SelectedItems[0].Tag as Source : null; canvas.Select(sx); UpdateSourceButtons(); };
             lvSources.DoubleClick += (o, e) => { if (canvas.Selected != null) EditSource(canvas.Selected); };
             var srcBtns = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 44, WrapContents = false, Padding = new Padding(0, 8, 0, 0), Tag = "panel" };
@@ -247,39 +249,92 @@ namespace VHSCapture
         {
             if (engine.IsRecording) return;
             var s = new Source { Type = type };
-            s.Name = type switch { SourceType.Capture => "Grabber USB", SourceType.Image => "Immagine", _ => "Colore" };
-            if (type == SourceType.Capture) s.FitTo(settings.CanvasW, settings.CanvasH);
+            s.Name = UniqueName(type switch { SourceType.Capture => "Grabber USB", SourceType.Image => "Immagine", _ => "Colore" });
+            if (type == SourceType.Capture)
+            {
+                var (video, audio) = FFmpeg.ListDevices();
+                // proponi il primo dispositivo non ancora usato
+                s.VideoDevice = video.FirstOrDefault(v => !settings.Sources.Any(x => x.VideoDevice == v)) ?? video.FirstOrDefault() ?? "";
+                s.AudioDevice = "";
+                s.FitTo(settings.CanvasW, settings.CanvasH);
+            }
             else if (type == SourceType.Color) s.FillTo(settings.CanvasW, settings.CanvasH);
             else { s.W = 400; s.H = 300; s.Center(settings.CanvasW, settings.CanvasH); }
 
-            using var f = new SourceForm(s, settings, LiveApply, false, WithDeviceFree, AppendLog);
-            if (f.ShowDialog(this) != DialogResult.OK) return;
+            // come OBS: la sorgente entra subito in scena, così la configuri vedendo l'anteprima
+            bool canPreview = type != SourceType.Image;
+            if (canPreview)
+            {
+                settings.Sources.Add(s);
+                RefreshSourceList(); canvas.Select(s);
+                StartPreview();
+            }
+
+            using var f = new SourceForm(s, settings, false, LiveApply, StructuralApply, CropPreview, WithDeviceFree, AppendLog);
+            var r = f.ShowDialog(this);
+            if (r != DialogResult.OK)
+            {
+                if (canPreview) { settings.Sources.Remove(s); canvas.Select(null); RefreshSourceList(); RebuildMixer(); StartPreview(); }
+                return;
+            }
             var res = f.Result;
-            if (type == SourceType.Capture && res.X == s.X && res.W == s.W) res.FitTo(settings.CanvasW, settings.CanvasH); // ricalcola con la risoluzione scelta
-            settings.Sources.Add(res);
+            if (canPreview)
+            {
+                s.CopyAllFrom(res);
+            }
+            else
+            {
+                settings.Sources.Add(res); s = res;
+            }
             settings.Save();
-            RefreshSourceList();
-            RebuildMixer();
-            canvas.Select(res);
+            RefreshSourceList(); RebuildMixer();
+            canvas.Select(s);
             StartPreview();
+        }
+
+        string UniqueName(string baseName)
+        {
+            if (!settings.Sources.Any(x => x.Name == baseName)) return baseName;
+            for (int i = 2; ; i++) if (!settings.Sources.Any(x => x.Name == $"{baseName} {i}")) return $"{baseName} {i}";
         }
 
         void EditSource(Source s)
         {
-            var before = s.Clone();
-            using var f = new SourceForm(s, settings, LiveApply, engine.IsRecording, WithDeviceFree, AppendLog);
-            if (f.ShowDialog(this) != DialogResult.OK) { LiveApply(before); return; }
+            using var f = new SourceForm(s, settings, engine.IsRecording, LiveApply, StructuralApply, CropPreview, WithDeviceFree, AppendLog);
+            if (f.ShowDialog(this) != DialogResult.OK) { canvas.Invalidate(); RefreshMixerValues(); return; }
             var res = f.Result;
-            int i = settings.Sources.IndexOf(s);
-            bool structural = !res.StructurallyEquals(before);
-            settings.Sources[i] = res;
-            canvas.Sources = settings.Sources;
+            bool structural = !res.StructurallyEquals(s);
+            s.CopyAllFrom(res);
             settings.Save();
-            RefreshSourceList();
-            RebuildMixer();
-            canvas.Select(res);
+            RefreshSourceList(); RebuildMixer();
+            canvas.Select(s);
             if (structural) RestartIfRunning();
-            else { engine.ApplyTransform(res); engine.ApplyColor(res); engine.ApplyVolume(res); if (!engine.LiveControl) RestartIfRunning(); }
+            else { engine.ApplyTransform(s); engine.ApplyColor(s); engine.ApplyVolume(s); if (!engine.LiveControl) RestartIfRunning(); }
+        }
+
+        /// <summary>Dal dialogo: dispositivo/risoluzione/fps/deinterlaccio cambiati → aggiorna la sorgente in scena e riavvia l'anteprima.</summary>
+        void StructuralApply(Source s)
+        {
+            var target = settings.Sources.FirstOrDefault(x => x.Id == s.Id);
+            if (target == null || engine.IsRecording) return;
+            if (target.StructurallyEquals(s)) return;
+            target.CopyStructuralFrom(s);
+            RebuildMixer();
+            StartPreview();
+        }
+
+        /// <summary>Ritaglia dall'anteprima corrente la zona occupata dalla sorgente (per l'anteprima nel dialogo proprietà).</summary>
+        Bitmap CropPreview(string id)
+        {
+            var src = settings.Sources.FirstOrDefault(x => x.Id == id);
+            var frame = canvas.Frame;
+            if (src == null || !src.Visible || frame == null || !engine.IsRunning) return null;
+            if ((DateTime.Now - lastFrameAt).TotalSeconds > 2) return null;
+            double sx = (double)frame.Width / settings.CanvasW, sy = (double)frame.Height / settings.CanvasH;
+            var r = Rectangle.Intersect(new Rectangle((int)(src.X * sx), (int)(src.Y * sy), (int)Math.Ceiling(src.W * sx), (int)Math.Ceiling(src.H * sy)),
+                                        new Rectangle(0, 0, frame.Width, frame.Height));
+            if (r.Width < 4 || r.Height < 4) return null;
+            try { return frame.Clone(r, frame.PixelFormat); } catch { return null; }
         }
 
         void RemoveSource(Source s)
@@ -331,7 +386,7 @@ namespace VHSCapture
                 var row = new Panel { Left = 0, Top = y, Width = w, Height = 62, Tag = "panel", Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
                 var name = new Label { Text = sx.Name, Left = 0, Top = 2, AutoSize = true, Font = new Font("Segoe UI Semibold", 9.5f) };
                 var val = new Label { Text = sx.VolumeDb.ToString("0") + " dB", Left = row.Width - 64, Top = 2, Width = 64, TextAlign = ContentAlignment.TopRight, Tag = "muted", Anchor = AnchorStyles.Top | AnchorStyles.Right };
-                var tb = new TrackBar { Left = 0, Top = 22, Width = row.Width - 70, Height = 32, Minimum = -60, Maximum = 12, Value = Math.Clamp((int)Math.Round(sx.VolumeDb), -60, 12), TickStyle = TickStyle.None, AutoSize = false, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right, Tag = sx };
+                var tb = new SafeTrackBar { Left = 0, Top = 22, Width = row.Width - 70, Height = 32, Minimum = -60, Maximum = 12, Value = Math.Clamp((int)Math.Round(sx.VolumeDb), -60, 12), TickStyle = TickStyle.None, AutoSize = false, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right, Tag = sx };
                 var mute = new CheckBox { Text = "Muto", Left = row.Width - 62, Top = 28, AutoSize = true, Checked = sx.Muted, Anchor = AnchorStyles.Top | AnchorStyles.Right, Tag = sx };
                 tb.ValueChanged += (o, e) => { sx.VolumeDb = tb.Value; val.Text = tb.Value + " dB"; engine.ApplyVolume(sx); };
                 tb.MouseUp += (o, e) => { settings.Save(); if (!engine.LiveControl) ScheduleRestart(); };
@@ -363,6 +418,7 @@ namespace VHSCapture
             if (!FFmpeg.Exists || engine.IsRecording) return;
             restartTimer.Stop();
             frames = 0; vu.Reset();
+            lock (runLog) runLog.Clear();
             canvas.Message = settings.Sources.Any(x => x.Visible) ? "Avvio anteprima…" : "Nessuna sorgente: premi ＋ per aggiungere il grabber";
             canvas.SetFrame(null);
             try { engine.Start(settings, null); }
@@ -471,7 +527,7 @@ namespace VHSCapture
                 BeginInvoke(new Action(() =>
                 {
                     canvas.SetFrame(bmp);
-                    frames++; lastFrameAt = DateTime.Now;
+                    frames++; lastFrameAt = DateTime.Now; autoRetried = false;
                 }));
             }
             catch { bmp.Dispose(); }
@@ -490,6 +546,7 @@ namespace VHSCapture
                         AppendLog("ATTENZIONE: ffmpeg è uscito durante la registrazione — chiudo il file");
                         StopRecording(false);
                     }
+                    if (frames == 0 && code != 0 && !autoRetried && TryAutoFallback()) return;
                     if (frames == 0 && code != 0) { canvas.Message = "ffmpeg non è partito — vedi il Log qui sotto"; if (splitLog.Panel2Collapsed) ToggleLog(); }
                     else canvas.Message = "Anteprima ferma";
                     canvas.SetFrame(null);
@@ -497,6 +554,27 @@ namespace VHSCapture
                     SetButtons();
                 }
             }));
+        }
+
+        /// <summary>Se il dispositivo ha rifiutato risoluzione/fps, riprova una volta lasciando decidere al driver.</summary>
+        bool TryAutoFallback()
+        {
+            string log; lock (runLog) log = runLog.ToString();
+            if (!log.Contains("Could not set video options")) return false;
+            bool changed = false;
+            foreach (var src in settings.Sources.Where(x => x.Visible && x.Type == SourceType.Capture))
+            {
+                if (src.InputSize != "auto" || src.InputFps != "auto")
+                {
+                    AppendLog($"\"{src.VideoDevice}\" non supporta {src.InputSize} @ {src.InputFps}: passo a risoluzione/fps automatici");
+                    src.InputSize = "auto"; src.InputFps = "auto"; changed = true;
+                }
+            }
+            if (!changed) return false;
+            autoRetried = true;
+            settings.Save();
+            StartPreview();
+            return true;
         }
 
         void AppendLog(string line)

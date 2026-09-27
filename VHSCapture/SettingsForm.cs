@@ -122,7 +122,9 @@ namespace VHSCapture
         static Card Group(string title) => new Card { HeaderText = title, Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(12, 30, 12, 10), Margin = new Padding(0, 0, 0, 10) };
         static TableLayoutPanel Grid(Card g)
         {
-            var t = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true, RowCount = 0 };
+            var t = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, RowCount = 0, Location = new Point(g.Padding.Left, g.Padding.Top), Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+            t.Width = Math.Max(200, g.ClientSize.Width - g.Padding.Horizontal);
+            g.Resize += (o, e) => t.Width = Math.Max(200, g.ClientSize.Width - g.Padding.Horizontal);
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -140,8 +142,8 @@ namespace VHSCapture
             t.RowCount = r + 1;
             return l;
         }
-        static ComboBox Combo() => new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
-        static NumericUpDown Num(int min, int max, int step) => new NumericUpDown { Minimum = min, Maximum = max, Increment = step };
+        static ComboBox Combo() => new SafeCombo { DropDownStyle = ComboBoxStyle.DropDownList };
+        static NumericUpDown Num(int min, int max, int step) => new SafeNumeric { Minimum = min, Maximum = max, Increment = step };
         static Label Muted(string t) => new Label { Text = t, AutoSize = true, Tag = "muted", Margin = new Padding(0, 6, 0, 0) };
         static void Sel(ComboBox cb, string v)
         {

@@ -70,7 +70,7 @@ namespace VHSCapture
                 case PictureBox _:
                     c.BackColor = Color.Black; break;
                 case ListView lv:
-                    lv.BackColor = Input; lv.ForeColor = Fore; lv.BorderStyle = BorderStyle.FixedSingle; break;
+                    lv.BackColor = Input; lv.ForeColor = Fore; break; // NON toccare BorderStyle: ricrea l'handle e perde le spunte
                 case TrackBar tb:
                     tb.BackColor = (tb.Parent?.Tag as string == "panel" || InCard(tb)) ? Panel : Back; break;
                 case VuMeter _:

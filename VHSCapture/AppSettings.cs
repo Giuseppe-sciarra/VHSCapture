@@ -58,6 +58,15 @@ namespace VHSCapture
             InputSize == o.InputSize && InputFps == o.InputFps && Deinterlace == o.Deinterlace && RtBufMB == o.RtBufMB &&
             ImagePath == o.ImagePath && Color == o.Color;
 
+        public void CopyStructuralFrom(Source o)
+        {
+            Type = o.Type; Visible = o.Visible; VideoDevice = o.VideoDevice; AudioDevice = o.AudioDevice;
+            InputSize = o.InputSize; InputFps = o.InputFps; Deinterlace = o.Deinterlace; RtBufMB = o.RtBufMB;
+            ImagePath = o.ImagePath; Color = o.Color;
+        }
+
+        public void CopyAllFrom(Source o) { CopyStructuralFrom(o); CopyLiveFrom(o); }
+
         public void CopyLiveFrom(Source o)
         {
             X = o.X; Y = o.Y; W = o.W; H = o.H;

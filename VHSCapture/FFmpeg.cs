@@ -570,8 +570,7 @@ namespace VHSCapture
                 Meters = MetersDisabled ? new Dictionary<string, string>() : audioIds.ToDictionary(id => id, id => "vhscap_me_" + id + "_" + tag),
                 Analysis = AnalysisDisabled ? new Dictionary<string, string>() :
                     s.Sources.Where(x => x.Visible && x.Type == SourceType.Capture && IsUsable(x)).Take(1).ToDictionary(x => x.Id, x => "vhscap_an_" + x.Id + "_" + tag),
-                FrameRate = AnalysisDisabled ? new Dictionary<string, string>() :
-                    s.Sources.Where(x => x.Visible && x.Type == SourceType.Capture && IsUsable(x)).Take(1).ToDictionary(x => x.Id, x => "vhscap_fr_" + x.Id + "_" + tag),
+                FrameRate = new Dictionary<string, string>(),
             };
 
             // server delle pipe PRIMA di avviare ffmpeg
@@ -909,7 +908,7 @@ namespace VHSCapture
             }
         }
 
-        class SigState { public double yl, yh, ya, ul, uh, ua, vl, vh; public bool any; }
+        class SigState { public double yl, yh, ya, ul, uh, ua, vl, vh; public bool any; public DateTime lastEmit; }
         readonly ConcurrentDictionary<string, SigState> sig = new ConcurrentDictionary<string, SigState>();
 
         void OnAnalysisLine(string id, string line)
@@ -917,12 +916,15 @@ namespace VHSCapture
             var g = sig.GetOrAdd(id, _ => new SigState());
             if (line.StartsWith("frame:"))
             {
-                if (g.any)
+                OnFrameLine(line);   // fps reali della sorgente
+                bool due = (DateTime.Now - g.lastEmit).TotalMilliseconds >= 500;
+                if (g.any && due)
                 {
                     // uniforme = immagine piatta (il rumore del nastro sparisce nel rimpicciolimento a 64x36)
                     bool uniform = g.yh - g.yl <= 12 && g.uh - g.ul <= 10 && g.vh - g.vl <= 10;
                     string kind = !uniform ? "" : g.ua >= 160 ? "blu" : g.ya <= 40 ? "nero" : "";
                     SignalState?.Invoke(id, kind != "", kind);
+                    g.lastEmit = DateTime.Now;
                 }
                 g.any = false;
                 return;
@@ -1099,8 +1101,10 @@ namespace VHSCapture
                     {
                         // ramo di analisi per la fine cassetta: 2 fps, 64x36, statistiche del segnale → pipe
                         graph.Append($"[{i}:v]{string.Join(",", chain)},split=2[cs{k}][an{k}];");
-                        string frCount = pn.FrameRate.TryGetValue(src.Id, out var frPipe) ? $"metadata=mode=add:key=vhs.f:value=1,metadata=mode=print:direct=1:file={PipeNames.InFilter(frPipe)}," : "";   // senza una chiave il print non scrive nulla (verificato)
-                        graph.Append($"[an{k}]{frCount}fps=2,scale=64:36:flags=area,signalstats,metadata=mode=print:direct=1:file={PipeNames.InFilter(anPipe)}[ano{k}];");
+                        // A PIENA VELOCITÀ: un'uscita a 2 fps resta indietro fino a 500 ms e ffmpeg 7 frena tutte le altre
+                        // per tenerle allineate → anteprima a raffiche (misurato: pause di 498 ms contro 35 ms così).
+                        // Su 64x36 costa pochissimo; il campionamento a 2/s lo fa l'app.
+                        graph.Append($"[an{k}]scale=64:36:flags=area,signalstats,metadata=mode=print:direct=1:file={PipeNames.InFilter(anPipe)}[ano{k}];");
                         analysisLabels.Add($"[ano{k}]");
                         chain.Clear();
                         chain.Add("null");

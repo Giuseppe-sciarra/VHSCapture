@@ -29,7 +29,7 @@ namespace VHSCapture
         bool finalizing, syncingList;
         int frames; DateTime lastFrameAt = DateTime.MinValue;
         readonly System.Text.StringBuilder runLog = new System.Text.StringBuilder();
-        bool autoRetried;
+        bool autoRetried, retryRecording;
 
         public MainForm()
         {
@@ -39,6 +39,14 @@ namespace VHSCapture
             ClientSize = new Size(settings.WindowW, settings.WindowH);
             StartPosition = FormStartPosition.CenterScreen;
             if (settings.WindowMax) WindowState = FormWindowState.Maximized;
+            KeyPreview = true;
+            KeyDown += (o, e) =>
+            {
+                if (e.KeyCode != Keys.F9) return;
+                e.Handled = true;
+                if (engine.IsRecording) { if (!finalizing) StopRecording(true); }
+                else StartRecording();
+            };
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             BuildUi();
@@ -67,6 +75,7 @@ namespace VHSCapture
                 }
                 if (settings.Sources.Count == 0) AddSource(SourceType.Capture);
                 else StartPreview();
+                CheckEncoderAsync();
             };
             FormClosing += (o, e) =>
             {
@@ -98,7 +107,9 @@ namespace VHSCapture
             var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Tag = "panel" };
             btnPreview = Ui.Btn("▶   Anteprima", "normal", (o, e) => StartPreview());
             btnRec = Ui.Btn("⏺   Registra", "rec", (o, e) => StartRecording(), 130);
+            new ToolTip().SetToolTip(btnRec, "Registra (F9)");
             btnStop = Ui.Btn("⏹   Stop", "normal", (o, e) => StopRecording(true)); btnStop.Enabled = false;
+            new ToolTip().SetToolTip(btnStop, "Ferma registrazione (F9)");
             var lblName = new Label { Text = "Nome file", AutoSize = true, Tag = "muted", Margin = new Padding(20, 10, 6, 0) };
             txtName = new TextBox { Width = 240, Margin = new Padding(0, 6, 0, 0), PlaceholderText = "es. Rossi_matrimonio_1994", Font = new Font("Segoe UI", 10f) };
             btnSettings = Ui.Btn("⚙   Uscita", "ghost", (o, e) => OpenSettings()); btnSettings.Margin = new Padding(20, 0, 8, 0);
@@ -472,11 +483,21 @@ namespace VHSCapture
             finalizing = true;
             SetButtons();
             lblRec.Text = "Chiusura file…"; lblRec.Fill = Color.Transparent; lblRec.ForeColor = Theme.Fore;
+            canvas.RecText = null; canvas.Invalidate();
 
             string written = recFile, final = finalFile;
             await Task.Run(() => engine.Stop());
 
-            if (settings.SafeRecording && !string.Equals(written, final, StringComparison.OrdinalIgnoreCase))
+            static bool HasData(string f) { try { return File.Exists(f) && new FileInfo(f).Length > 4096; } catch { return false; } }
+
+            if (!HasData(written))
+            {
+                try { if (File.Exists(written)) File.Delete(written); } catch { }
+                AppendLog("Registrazione NON salvata: ffmpeg non ha scritto niente (vedi errori sopra)");
+                if (!retryRecording)
+                    MessageBox.Show(this, "La registrazione non è partita e non è stato salvato nulla.\nControlla il Log.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            else if (settings.SafeRecording && !string.Equals(written, final, StringComparison.OrdinalIgnoreCase))
             {
                 lblRec.Text = "Conversione in MP4 (senza ricodifica)…";
                 bool ok = await Task.Run(() => FFmpeg.RemuxToMp4(written, final, AppendLog));
@@ -491,6 +512,7 @@ namespace VHSCapture
 
             finalizing = false;
             lblRec.Text = "";
+            if (retryRecording && !IsDisposed) { retryRecording = false; SetButtons(); StartRecording(); return; }
             if (restartPreview && !IsDisposed) StartPreview();
             SetButtons();
         }
@@ -549,8 +571,17 @@ namespace VHSCapture
                 {
                     if (engine.IsRecording)
                     {
-                        AppendLog("ATTENZIONE: ffmpeg è uscito durante la registrazione — chiudo il file");
-                        StopRecording(false);
+                        string lg; lock (runLog) lg = runLog.ToString();
+                        bool encFail = lg.Contains("Error while opening encoder") || lg.Contains("Could not open encoder") || lg.Contains("Error creating a MFX session");
+                        if (encFail && settings.Encoder != "libx264")
+                        {
+                            AppendLog($"L'encoder {settings.Encoder} non si apre su questo PC: riprovo con x264 software");
+                            settings.Encoder = "libx264"; settings.Save();
+                            retryRecording = true;
+                        }
+                        else AppendLog("ATTENZIONE: ffmpeg è uscito durante la registrazione — chiudo il file");
+                        StopRecording(!retryRecording);
+                        return;
                     }
                     if (frames == 0 && code != 0 && !autoRetried && TryAutoFallback()) return;
                     if (frames == 0 && code != 0) { canvas.Message = "ffmpeg non è partito — vedi il Log qui sotto"; if (splitLog.Panel2Collapsed) ToggleLog(); }
@@ -583,6 +614,18 @@ namespace VHSCapture
             return true;
         }
 
+        async void CheckEncoderAsync()
+        {
+            var list = await Task.Run(() => FFmpeg.ListWorkingH264Encoders());
+            AppendLog("Encoder funzionanti su questo PC: " + string.Join(", ", list));
+            if (!list.Contains(settings.Encoder))
+            {
+                AppendLog($"L'encoder {settings.Encoder} non funziona su questo PC: passo a {list[0]}");
+                settings.Encoder = list[0];
+                settings.Save();
+            }
+        }
+
         void AppendLog(string line)
         {
             if (!IsHandleCreated || IsDisposed) return;
@@ -613,6 +656,8 @@ namespace VHSCapture
                 bool blink = (DateTime.Now.Millisecond / 500) % 2 == 0;
                 lblRec.Fill = Theme.Rec; lblRec.ForeColor = Color.White;
                 lblRec.Text = $"{(blink ? "●" : "○")} REC  {el:hh\\:mm\\:ss}   {Fmt(size)}   {Path.GetFileName(finalFile)}";
+                canvas.RecText = $"{(blink ? "●" : "○")}  REC  {el:hh\\:mm\\:ss}";
+                canvas.Invalidate();
                 if (settings.MaxMinutes > 0 && el.TotalMinutes >= settings.MaxMinutes)
                 {
                     AppendLog($"Stop automatico dopo {settings.MaxMinutes} minuti");
@@ -623,6 +668,7 @@ namespace VHSCapture
             }
             else if (!finalizing)
             {
+                if (canvas.RecText != null) { canvas.RecText = null; canvas.Invalidate(); }
                 lblRec.Fill = engine.IsRunning ? Theme.Accent : Color.Transparent;
                 lblRec.ForeColor = engine.IsRunning ? Color.White : Theme.Fore;
                 lblRec.Text = engine.IsRunning ? "●  Anteprima" : "";

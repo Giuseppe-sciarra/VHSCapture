@@ -16,6 +16,8 @@ namespace VHSCapture
         public Source Selected { get; private set; }
         public Bitmap Frame { get; private set; }
         public string Message { get; set; } = "";
+        /// <summary>Testo del badge REC (null = non in registrazione).</summary>
+        public string RecText { get; set; }
 
         public event Action<Source> SelectionChanged;
         public event Action<Source, bool> TransformChanged;   // bool = definitivo (mouse up)
@@ -97,7 +99,21 @@ namespace VHSCapture
                 var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
                 g.DrawString(string.IsNullOrEmpty(Message) ? "Nessuna anteprima" : Message, f, b, dr, sf);
             }
-            using (var pen = new Pen(Color.FromArgb(90, 90, 90))) g.DrawRectangle(pen, dr.X - 1, dr.Y - 1, dr.Width + 1, dr.Height + 1);
+            if (RecText != null)
+            {
+                // bordo rosso + badge: si vede subito che stai registrando, e il video continua a scorrere sotto
+                using (var pen = new Pen(Theme.Rec, 3)) g.DrawRectangle(pen, dr.X - 2, dr.Y - 2, dr.Width + 3, dr.Height + 3);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using var f = new Font("Segoe UI Semibold", 11f);
+                var sz = g.MeasureString(RecText, f);
+                var br = new Rectangle(dr.X + 12, dr.Y + 12, (int)sz.Width + 20, (int)sz.Height + 8);
+                using (var path = Ui.Rounded(br, br.Height / 2))
+                using (var b = new SolidBrush(Color.FromArgb(220, Theme.Rec))) g.FillPath(b, path);
+                g.DrawString(RecText, f, Brushes.White, br.X + 10, br.Y + 4);
+                g.SmoothingMode = SmoothingMode.None;
+            }
+            else
+                using (var pen = new Pen(Color.FromArgb(90, 90, 90))) g.DrawRectangle(pen, dr.X - 1, dr.Y - 1, dr.Width + 1, dr.Height + 1);
 
             // contorni sorgenti non selezionate (tenui)
             using (var thin = new Pen(Color.FromArgb(110, 255, 255, 255)) { DashStyle = DashStyle.Dot })

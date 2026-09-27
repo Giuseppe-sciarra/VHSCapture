@@ -58,7 +58,7 @@ namespace VHSCapture
             var gVid = Group("Encoder video (come OBS)");
             var tVid = Grid(gVid);
             cbEncoder = Combo();
-            Row(tVid, "Encoder", cbEncoder, null);
+            Row(tVid, "Encoder", cbEncoder, Muted("solo quelli che funzionano su questo PC"));
             cbRc = Combo(); cbRc.Items.AddRange(new object[] { "CBR", "VBR", "CRF" });
             Row(tVid, "Controllo bitrate", cbRc, null);
             nBitrate = Num(500, 60000, 500);
@@ -157,7 +157,9 @@ namespace VHSCapture
             cbCanvas.Text = $"{s.CanvasW}x{s.CanvasH}";
             cbFps.Text = s.Fps;
             cbEncoder.Items.Clear();
-            foreach (var e in FFmpeg.ListH264Encoders()) cbEncoder.Items.Add(EncLabel(e));
+            Cursor = Cursors.WaitCursor;
+            foreach (var e in FFmpeg.ListWorkingH264Encoders()) cbEncoder.Items.Add(EncLabel(e));
+            Cursor = Cursors.Default;
             Sel(cbEncoder, EncLabel(s.Encoder));
             if (cbEncoder.SelectedIndex < 0 && cbEncoder.Items.Count > 0) cbEncoder.SelectedIndex = 0;
             Sel(cbRc, s.RateControl);

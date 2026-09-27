@@ -82,6 +82,37 @@ namespace VHSCapture
             return sizes;
         }
 
+        static List<string> workingCache;
+        static readonly object encLock = new object();
+
+        /// <summary>Encoder H.264 che si aprono DAVVERO su questo PC (prova di 3 frame per ciascuno). Il risultato resta in cache.</summary>
+        public static List<string> ListWorkingH264Encoders()
+        {
+            lock (encLock)
+            {
+                if (workingCache != null) return new List<string>(workingCache);
+                var compiled = ListH264Encoders();
+                var ok = new System.Collections.Concurrent.ConcurrentBag<string>();
+                System.Threading.Tasks.Parallel.ForEach(compiled, e => { if (e == "libx264" || TestEncoder(e)) ok.Add(e); });
+                workingCache = compiled.Where(ok.Contains).ToList();
+                if (workingCache.Count == 0) workingCache.Add("libx264");
+                return new List<string>(workingCache);
+            }
+        }
+
+        public static bool TestEncoder(string enc)
+        {
+            try
+            {
+                var psi = Psi($"-hide_banner -loglevel error -f lavfi -i color=c=black:s=1280x720:r=25:d=0.5 -frames:v 5 -pix_fmt yuv420p -c:v {enc} -f null -");
+                using var p = Process.Start(psi);
+                var err = p.StandardError.ReadToEndAsync(); var outp = p.StandardOutput.ReadToEndAsync();
+                if (!p.WaitForExit(10000)) { try { p.Kill(); } catch { } return false; }
+                return p.ExitCode == 0;
+            }
+            catch { return false; }
+        }
+
         public static List<string> ListH264Encoders()
         {
             var res = new List<string>();
@@ -207,6 +238,8 @@ namespace VHSCapture
         Process proc; Thread readThread; volatile bool stopping;
         ZmqControl zmq;
         AppSettings cfg;
+        HashSet<string> activeIds = new HashSet<string>();
+        HashSet<string> activeAudioIds = new HashSet<string>();
 
         public void Start(AppSettings s, string outputFile)
         {
@@ -219,6 +252,8 @@ namespace VHSCapture
             PW = 960; PH = Math.Max(2, (int)Math.Round(960.0 * s.CanvasH / s.CanvasW / 2) * 2);
 
             bool live = s.LiveControl && FFmpeg.HasZmq;
+            activeIds = new HashSet<string>(s.Sources.Where(x => x.Visible && IsUsable(x)).Select(x => x.Id));
+            activeAudioIds = new HashSet<string>(s.Sources.Where(x => x.Visible && IsUsable(x) && x.HasAudio).Select(x => x.Id));
             string args = BuildArgs(s, outputFile, PW, PH, live);
             LastCommand = "ffmpeg " + args;
             Log?.Invoke(LastCommand);
@@ -275,9 +310,16 @@ namespace VHSCapture
 
         // ---------- comandi live ----------
 
+        static bool IsUsable(Source x) => x.Type switch
+        {
+            SourceType.Capture => !string.IsNullOrWhiteSpace(x.VideoDevice),
+            SourceType.Image => File.Exists(x.ImagePath),
+            _ => true,
+        };
+
         public void ApplyTransform(Source src)
         {
-            if (!LiveControl) return;
+            if (!LiveControl || !activeIds.Contains(src.Id)) return;
             zmq.Queue(src.Id + ":w", $"scale@s{src.Id} w {src.W}");
             zmq.Queue(src.Id + ":h", $"scale@s{src.Id} h {src.H}");
             zmq.Queue(src.Id + ":x", $"overlay@s{src.Id} x {src.X}");
@@ -286,7 +328,7 @@ namespace VHSCapture
 
         public void ApplyColor(Source src)
         {
-            if (!LiveControl) return;
+            if (!LiveControl || !activeIds.Contains(src.Id)) return;
             var ci = CultureInfo.InvariantCulture;
             if (src.Type == SourceType.Capture)
             {
@@ -306,7 +348,7 @@ namespace VHSCapture
 
         public void ApplyVolume(Source src)
         {
-            if (!LiveControl || !src.HasAudio) return;
+            if (!LiveControl || !src.HasAudio || !activeAudioIds.Contains(src.Id)) return;
             zmq.Queue(src.Id + ":vol", $"volume@a{src.Id} volume {src.VolumeLinear.ToString("0.#####", CultureInfo.InvariantCulture)}");
         }
 

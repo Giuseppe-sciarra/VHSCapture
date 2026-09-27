@@ -681,7 +681,17 @@ namespace VHSCapture
                     }
                     // l'encoder ora è sempre acceso: se non si apre, passo a x264 e riparto
                     string lg0; lock (runLog) lg0 = runLog.ToString();
-                    bool encFail = lg0.Contains("Error while opening encoder") || lg0.Contains("Could not open encoder") || lg0.Contains("Error creating a MFX session");
+                    // paracadute VU: se la pipe dei livelli non si apre, riparto senza misuratori (anteprima e registrazione prima di tutto)
+                    if (lg0.Contains("Could not open") && lg0.Contains("vhscap_me_") && !engine.MetersDisabled)
+                    {
+                        AppendLog("Misuratori audio non disponibili su questo PC: riparto senza VU");
+                        engine.MetersDisabled = true;
+                        StartPreview();
+                        return;
+                    }
+                    // solo un vero errore di apertura dell'encoder (non gli errori a cascata dopo un filtro fallito)
+                    bool graphFail = lg0.Contains("Error initializing filters") || lg0.Contains("Error reinitializing filters");
+                    bool encFail = !graphFail && (lg0.Contains("Error while opening encoder") || lg0.Contains("Error creating a MFX session") || lg0.Contains("Could not open encoder") && lg0.Contains("[enc:h264_"));
                     if (encFail && settings.Encoder != "libx264" && !autoRetried)
                     {
                         AppendLog($"L'encoder {settings.Encoder} non si apre su questo PC: passo a x264 software");

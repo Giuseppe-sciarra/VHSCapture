@@ -497,6 +497,9 @@ namespace VHSCapture
 
         public CaptureEngine() { recorder.Log += l => Log?.Invoke(l); }
 
+        /// <summary>Se true i livelli audio vanno a NUL (paracadute: l'anteprima e la registrazione non dipendono dal VU).</summary>
+        public bool MetersDisabled { get; set; }
+
         public void Start(AppSettings s, int previewW, bool monitor)
         {
             Stop();
@@ -522,7 +525,7 @@ namespace VHSCapture
                 Ts = "vhscap_ts_" + tag,
                 Progress = "vhscap_pr_" + tag,
                 Monitor = mon ? "vhscap_mo_" + tag : null,
-                Meters = audioIds.ToDictionary(id => id, id => "vhscap_me_" + id + "_" + tag),
+                Meters = MetersDisabled ? new Dictionary<string, string>() : audioIds.ToDictionary(id => id, id => "vhscap_me_" + id + "_" + tag),
             };
 
             // server delle pipe PRIMA di avviare ffmpeg
@@ -857,7 +860,12 @@ namespace VHSCapture
             public string Preview, Ts, Progress, Monitor;
             public Dictionary<string, string> Meters = new Dictionary<string, string>();
             public static string Win(string n) => @"\\.\pipe\" + n;
-            public static string Fwd(string n) => "//./pipe/" + n;   // per le opzioni dei filtri: niente backslash da escapare
+            /// <summary>
+            /// Percorso della pipe dentro l'opzione di un filtro. I backslash vanno escapati DUE volte
+            /// (parser del grafo + parser delle opzioni): ogni \ diventa \\\\ → ffmpeg apre \\.\pipe\nome.
+            /// (Le barre dritte //./pipe/ su Windows ffmpeg non le accetta.) Verificato su ffmpeg reale.
+            /// </summary>
+            public static string InFilter(string n) => Win(n).Replace("\\", "\\\\\\\\");
         }
 
         static string F(double v, string fmt = "0.###") => v.ToString(fmt, CultureInfo.InvariantCulture);
@@ -963,7 +971,7 @@ namespace VHSCapture
             foreach (var src in audioSrcs)
             {
                 string off = src.AudioOffsetMs != 0 ? $"asetpts=PTS+{F(src.AudioOffsetMs / 1000.0, "0.000")}/TB," : "";
-                string meterPipe = pn.Meters.TryGetValue(src.Id, out var mp) ? PipeNames.Fwd(mp) : "NUL";
+                string meterPipe = pn.Meters.TryGetValue(src.Id, out var mp) ? PipeNames.InFilter(mp) : "NUL";
                 graph.Append($"[{idx[src]}:a]{off}aresample=48000:async=1,volume@a{src.Id}=volume={F(src.VolumeGain, "0.#####")},asplit=2[am{a}][ax{a}];");
                 graph.Append($"[am{a}]asetnsamples=n=1600:p=0,astats=metadata=1:reset=1:measure_perchannel=RMS_level+Peak_level:measure_overall=none," +
                              $"ametadata=mode=print:file={meterPipe}[amo{a}];");

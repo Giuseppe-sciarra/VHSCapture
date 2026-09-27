@@ -1,0 +1,54 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish
+        run: >
+          dotnet publish VHSCapture/VHSCapture.csproj -c Release -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=1.0.${{ github.run_number }}
+          -o publish
+
+      - name: Download ffmpeg (gyan.dev essentials)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ff.zip
+          Expand-Archive ff.zip -DestinationPath ff
+          Copy-Item (Get-ChildItem ff -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName publish\ffmpeg.exe
+          Remove-Item publish\*.pdb -ErrorAction SilentlyContinue
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path publish\* -DestinationPath VHSCapture-win-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VHSCapture-win-x64
+          path: VHSCapture-win-x64.zip
+
+      - name: Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: VHSCapture v1.0.${{ github.run_number }}
+          files: VHSCapture-win-x64.zip
+          generate_release_notes: true

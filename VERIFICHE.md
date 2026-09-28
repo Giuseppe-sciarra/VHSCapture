@@ -1,59 +1,72 @@
-# Verifiche della consegna — 28 settembre 2026
+# Verifiche dei sorgenti 1.2.1 — 28 settembre 2026
 
-## Compilazione e pacchetto
+## Esito
 
-.NET SDK 8.0.425 su macOS ARM, destinazione net8.0-windows, pubblicazione win-x64 self-contained in file singolo, versione 1.1.0. Compilazione completata. Restano due avvisi già presenti nel sorgente originale: CS0675 nell'elaborazione dei timestamp e CS0067 sull'evento FrameReady non utilizzato.
+Compilazione Release `net8.0-windows` con .NET SDK 8.0.425 su macOS ARM: zero errori. Rimangono due avvisi preesistenti, CS0675 sui timestamp e CS0067 sull'evento FrameReady inutilizzato.
 
-Il pacchetto Windows contiene l'eseguibile compilato, FFmpeg Gyan 9.0.2 e relativa licenza. L'interfaccia Windows non è stata eseguita nell'ambiente di compilazione. Lo ZIP dei sorgenti esclude bin, obj, cache e SDK.
+**116 controlli C# superati**, incluse 16 sequenze prodotte da FFmpeg e prove effettive del registratore con un processo FFmpeg. Tre prove video aggiuntive hanno verificato registrazione e anteprima contemporanee. La consegna contiene solo sorgenti, risorse, test e workflow; non è stata prodotta una nuova distribuzione Windows per questa consegna.
 
-## Controlli automatici
+## Rilevamento encoder (1.2.1)
 
-48 controlli superati: 37 controlli di regressione in tests/PipelineChecks.csproj e 11 campioni generati da FFmpeg e passati al classificatore C# reale.
+Dieci controlli aggiuntivi: scelta NVIDIA manuale preservata anche con Intel disponibile; una prova negativa non cancella la scelta esplicita; preferenza automatica Intel e scelta automatica NVIDIA; lista vuota; NVENC visibile anche senza supporto compilato; prova reale x264; diagnostica presente per tutti gli encoder; motivo del fallimento conservato; una rivalutazione esplicita crea nuovi risultati invece di riutilizzare la cache. Ripetute le prove del registratore e del rilevatore di segnale.
 
-- Pipeline completa, H.264/AAC e pre-roll mantenuti anche fuori registrazione.
-- Nessun dimezzamento dell'anteprima; vecchie preferenze di risparmio ignorate.
-- Costruzione QSV: deinterlaccio a frequenza di campo, crop/scala, bande nere, fondo riusato e superfici QSV imposte fino all'encoder.
-- Tentativo D3D11, passaggio a DXVA2 una sola volta e ripristino dello stato dei tentativi.
-- TFF/BFF, input progressivo, PAL/NTSC, audio con/senza ascolto e assenza di audio.
-- Percorsi compatibili per scene multiple, correzioni colore, ritagli dispari e sorgenti fuori canvas.
-- Azzeramento di PAT/PMT, GOP e frammenti TS quando la pipeline viene riavviata.
-- Rilevamento indipendente dal colore, rigetto di metadati incompleti/non validi e di immagini con variazioni di luminanza o crominanza.
+La build WinForms compila; l'interfaccia aggiornata non è stata eseguita su Windows. La GTX 745 dell'utente non è collegata all'ambiente: non è verificato che il suo driver apra NVENC. Il nuovo riquadro nelle impostazioni permette di leggere quell'esito sul PC interessato. La visibilità di NVENC nella lista non è una certificazione di hardware rilevato.
 
-I controlli QSV verificano il comando e la logica dei tentativi, non l'esecuzione su una GPU Intel.
+## Scene buie e rilevamento
 
-## Prove video effettive
+Il filtro del progetto genera statistiche a 192×108 con tre componenti a 8 bit. L'analisi resta alla frequenza della sorgente; il rilevatore esamina ogni fotogramma e aggiorna l'interfaccia due volte al secondo. I valori minimi/massimi proteggono dettagli che sfuggono ai percentili; le differenze tra fotogrammi proteggono il movimento. La conferma richiede 12 secondi continui, prima dell'attesa configurata.
 
-FFmpeg 7.1 macOS ARM, testsrc2 720×576 a 25 fps per 5 secondi e tono audio a 48 kHz. I filtri sono estratti dai comandi generati dal progetto; DirectShow e le named pipe vengono sostituiti con sorgenti sintetiche e file locali.
+Test del rilevatore e del parser: attesa iniziale, ritorno del contenuto, dissolvenza lenta, valori non validi, metadati incompleti, interruzioni dell'analisi, audio attivo, silenzio misurato e livelli audio mancanti. Una sorgente con audio configurato ma non misurabile non viene considerata silenziosa.
 
-Due prove, con ascolto acceso e spento:
+FFmpeg 7.1 macOS ARM ha generato queste 16 sequenze, passate al classificatore C# dell'app:
 
-- file MP4 decodificabile a 1920×1080, base temporale 1/50 e traccia AAC;
-- anteprima a 960×540, base temporale 1/50, senza dimezzamento dei fotogrammi;
-- 249 frame in entrambi i rami dopo il drenaggio del deinterlaccio sul campione di 5 secondi;
-- con ascolto acceso, PCM stereo di 5 secondi.
+- Riconosciuti dopo conferma: nero, grigio, bianco, blu, rosso, verde, giallo, ciano e magenta uniformi.
+- Esclusi dallo stop: immagine testsrc2, dettagli cromatici a luminanza costante, testsrc2 molto scuro, piccolo dettaglio scuro su nero, piccolo pattern su blu, debolissima variazione temporale e rumore.
 
-Per l'auto-stop, FFmpeg ha prodotto statistiche reali dopo crop e ridimensionamento a 64×36. Il classificatore dell'app ha riconosciuto come uniformi nero, grigio, bianco, blu, rosso, verde, giallo, ciano e magenta. Ha escluso testsrc2 e un'immagine a luminanza costante con dettagli cromatici. Il tempo di attesa, i 10 secondi iniziali di contenuto e l'esclusione durante la pausa restano nel codice originale.
+Le sequenze sintetiche non equivalgono a prove su tutte le cassette o grabber. Non dimostrano la capacità di distinguere un filmato perfettamente uniforme e silenzioso dal segnale di riposo, che può essere identico.
 
-## Da verificare sul PC del laboratorio
+## Registratore effettivo
 
-Intel QuickSync e i driver effettivi, in particolare sui modelli di quarta generazione, DirectShow, disegno WinForms, pausa/ripresa dal dispositivo, auto-stop con il rumore reale del grabber e sincronismo audio/video. Non sono stati misurati consumo CPU o frame persi su quel PC. Non è garantita una percentuale CPU specifica.
+Un file MPEG-TS H.264/AAC sintetico di 8 secondi è stato alimentato al `TsRecorder` dell'app in blocchi da 7.913 byte, non allineati ai pacchetti TS. Il registratore ha creato i file tramite un processo FFmpeg reale.
 
-Un tentativo locale di allocare superfici hardware VideoToolbox non è riuscito nell'ambiente; non è contato come verifica GPU. Le prove software macOS non certificano l'esecuzione Windows né il percorso QSV.
+Superati:
 
-## Riprodurre le verifiche
+- lettura di PAT/PMT e pre-roll H.264, anche con adaptation field;
+- 10.000 pacchetti PAT malformati senza eccezioni del lettore;
+- avvio confermato dai messaggi di progresso del muxer e chiusura normale;
+- pausa/ripresa con file decodificabile;
+- MP4 frammentato, MP4 standard, MKV, file senza audio e divisione in più MP4 decodificabili (intervallo di 1 secondo nel test);
+- errore reale di destinazione inesistente, chiusura dello stato e del processo, poi nuova registrazione funzionante;
+- arresto forzato del processo rilevato e ripulito;
+- rifiuto di sovrascrivere un file esistente, verificato confrontando il suo contenuto prima e dopo;
+- saturazione del buffer simulata con segnalazione dell'errore, senza perdita silenziosa di pacchetti.
 
-Con .NET SDK 8, Python 3 e FFmpeg:
+La prima prova sul codice senza la correzione audio ha riprodotto `Malformed AAC bitstream detected` durante il passaggio a MP4. Con `aac_adtstoasc` esplicito, le prove di registrazione e decodifica sono passate. Il filtro cambia il confezionamento AAC, senza ricodificare. [Documentazione FFmpeg](https://ffmpeg.org/ffmpeg-bitstream-filters.html#aac_005fadtstoasc).
+
+## Pipeline video
+
+Tre prove effettive con sorgenti sintetiche: ascolto acceso, ascolto spento, ascolto e nuova analisi accesi. Il grafo viene estratto dal comando del progetto; DirectShow e named pipe sono sostituiti con ingressi sintetici e file locali.
+
+Per ogni prova: input 720×576 a 25 fps per 5 secondi; output MP4 H.264/AAC a 1920×1080 e anteprima 960×540, entrambi con 249 fotogrammi e base temporale 1/50. Con ascolto acceso, PCM stereo di 5 secondi. Nessun dimezzamento dell'anteprima quando si aggiunge l'analisi.
+
+I controlli QSV verificano costruzione dei comandi, superfici hardware, crop/scala/bande, TFF/BFF, fallback D3D11 → DXVA2 e percorsi compatibili. **Non eseguono il grafo su una GPU Intel.**
+
+## Limiti della verifica
+
+Non eseguiti: interfaccia WinForms, DirectShow e named pipe su Windows; QuickSync sui PC Intel del laboratorio; consumo CPU reale; sincronismo A/V e fluidità con i grabber effettivi; prove prolungate su cassette reali o su un disco pieno. Il guasto del processo e la destinazione inesistente sono reali; il buffer pieno è simulato. I test di pausa/ripresa controllano la decodificabilità del file, non certificano il sincronismo percepito sul dispositivo.
+
+Un file parziale viene conservato, ma la sua recuperabilità dipende dal formato e dal punto di interruzione. Nessuna percentuale CPU specifica è garantita.
+
+## Riproduzione
+
+Con .NET SDK 8, Python 3 e un eseguibile FFmpeg compatibile:
 
 ```text
 dotnet run --project tests/PipelineChecks.csproj -c Release -- verification
 python tests/VerifyVideo.py --ffmpeg PERCORSO_FFMPEG --artifacts verification
-dotnet run --project tests/PipelineChecks.csproj -c Release -- verification verification/signals.json
+dotnet run --project tests/PipelineChecks.csproj -c Release -- verification verification/signals.json PERCORSO_FFMPEG
 ```
 
-## Riferimenti tecnici
+Il primo comando genera i grafi. Il secondo produce le sequenze e il flusso MPEG-TS. Il terzo esegue anche le prove con processi reali. I file generati restano nella cartella di verifica; il test copia o collega FFmpeg nella propria cartella `bin`. Il workflow GitHub Actions esegue questi passaggi prima della release Windows.
 
-- [FFmpeg: dispositivi hardware](https://ffmpeg.org/ffmpeg-doc.html#Advanced-Video-options)
-- [Sorgente ufficiale vpp_qsv](https://github.com/FFmpeg/FFmpeg/blob/n8.0/libavfilter/vf_vpp_qsv.c)
-- [Sorgente ufficiale overlay_qsv](https://github.com/FFmpeg/FFmpeg/blob/n8.0/libavfilter/vf_overlay_qsv.c)
-- [Intel: transizione Media SDK / oneVPL e runtime legacy](https://www.intel.com/content/www/us/en/docs/onevpl/upgrade-from-msdk/2023-1/transition-from-intel-r-media-sdk-to-intel-r.html)
-- [Distribuzione Windows FFmpeg Gyan](https://www.gyan.dev/ffmpeg/builds/)
+[Documentazione delle statistiche video FFmpeg](https://ffmpeg.org/ffmpeg-filters.html#signalstats).

@@ -33,7 +33,8 @@ namespace VHSCapture
         readonly AudioMonitor monitor = new AudioMonitor();
         EngineStats lastStats; double lastCpu;
         RoundedButton btnMonitor;
-        bool finalizing, syncingList;
+        bool finalizing, startingRecording, closingApp, syncingList;
+        bool CaptureBusy => engine.IsRecording || startingRecording || finalizing;
         int frames; DateTime lastFrameAt = DateTime.MinValue, previewStartedAt;
         readonly System.Text.StringBuilder runLog = new System.Text.StringBuilder();
         bool autoRetried, devicesResolved;
@@ -43,6 +44,7 @@ namespace VHSCapture
         string previewDiag = "";
         readonly List<(double af, double ag, double pf, double pg, long dr, double src, double outf)> diagAcc = new List<(double, double, double, double, long, double, double)>();
         // fine cassetta
+        DateTime lastSignalAt = DateTime.MinValue;
         DateTime? blankSince; string blankKind = ""; double blankStartRecSec = -1; int contentSamples; bool autoStopped;
 
         public MainForm()
@@ -58,7 +60,7 @@ namespace VHSCapture
             KeyPreview = true;
             KeyDown += (o, e) =>
             {
-                if (e.KeyCode == Keys.F5) { e.Handled = true; if (!engine.IsRecording) StartPreview(); return; }
+                if (e.KeyCode == Keys.F5) { e.Handled = true; if (!CaptureBusy) StartPreview(); return; }
                 if (e.KeyCode == Keys.F10) { e.Handled = true; TogglePause(); return; }
                 if (e.KeyCode != Keys.F9) return;
                 e.Handled = true;
@@ -75,7 +77,7 @@ namespace VHSCapture
             engine.AudioLevels += (id, rl, pl, rr, pr) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (mixerRows.TryGetValue(id, out var row)) row.Meter.SetLevels(rl, pl, rr, pr); })); } catch { } };
             engine.Stats += st => lastStats = st;
             // spostamenti/colore che il grafo attuale non può applicare al volo: riavvio breve dell'anteprima
-            engine.NeedsRestart += () => { if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (!engine.IsRecording) ScheduleRestart(); else AppendLog("La modifica si applica alla fine della registrazione"); })); } catch { } };
+            engine.NeedsRestart += () => { if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (!CaptureBusy) ScheduleRestart(); else AppendLog("La modifica si applica alla fine della registrazione"); })); } catch { } };
             engine.SignalState += (id, blank, kind) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => OnSignal(blank, kind))); } catch { } };
             engine.MonitorData += (d, n) => monitor.Add(d, n);
             engine.Log += l => { lock (runLog) { if (runLog.Length < 20000) runLog.AppendLine(l); } AppendLog(l); };
@@ -85,7 +87,7 @@ namespace VHSCapture
             timer.Tick += (o, e) => UpdateStatus();
             timer.Start();
             restartTimer = new System.Windows.Forms.Timer { Interval = 450 };
-            restartTimer.Tick += (o, e) => { restartTimer.Stop(); if (!engine.IsRecording) StartPreview(); };
+            restartTimer.Tick += (o, e) => { restartTimer.Stop(); if (!CaptureBusy) StartPreview(); };
 
             Shown += (o, e) =>
             {
@@ -106,12 +108,14 @@ namespace VHSCapture
             };
             FormClosing += (o, e) =>
             {
+                if (finalizing) { e.Cancel = true; return; }
                 if (engine.IsRecording)
                 {
                     if (MessageBox.Show(this, "Stai registrando. Fermare e uscire?", "VHSCapture", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     { e.Cancel = true; return; }
                     engine.StopRecording();   // chiude bene il file prima di uscire
                 }
+                closingApp = true;
                 engine.Stop();
                 monitor.Stop();
                 settings.WindowMax = WindowState == FormWindowState.Maximized;
@@ -186,7 +190,7 @@ namespace VHSCapture
             srcList.OpenProperties += sx => EditSource(sx);
             srcList.VisibilityToggled += sx =>
             {
-                if (engine.IsRecording) return;
+                if (CaptureBusy) return;
                 sx.Visible = !sx.Visible; settings.Save(); RefreshSourceList(); RebuildMixer(); RestartIfRunning(); canvas.Invalidate();
             };
             srcList.LockToggled += sx => { sx.Locked = !sx.Locked; settings.Save(); canvas.Invalidate(); srcList.Invalidate(); };
@@ -284,7 +288,7 @@ namespace VHSCapture
         {
             srcList.Sources = settings.Sources;
             srcList.Select(canvas?.Selected);
-            srcList.ReadOnlyStructure = engine.IsRecording;
+            srcList.ReadOnlyStructure = CaptureBusy;
             srcList.Invalidate();
             UpdateSourceButtons();
         }
@@ -306,16 +310,16 @@ namespace VHSCapture
                 if (!string.IsNullOrWhiteSpace(n)) { s.Name = n.Trim(); settings.Save(); RefreshSourceList(); RebuildMixer(); canvas.Invalidate(); }
             });
             m.Items.Add(new ToolStripSeparator());
-            var vis = m.Items.Add(s.Visible ? "Nascondi" : "Mostra", null, (o, e) => { if (engine.IsRecording) return; s.Visible = !s.Visible; settings.Save(); RefreshSourceList(); RebuildMixer(); RestartIfRunning(); canvas.Invalidate(); });
-            vis.Enabled = !engine.IsRecording;
+            var vis = m.Items.Add(s.Visible ? "Nascondi" : "Mostra", null, (o, e) => { if (CaptureBusy) return; s.Visible = !s.Visible; settings.Save(); RefreshSourceList(); RebuildMixer(); RestartIfRunning(); canvas.Invalidate(); });
+            vis.Enabled = !CaptureBusy;
             m.Items.Add(s.Locked ? "Sblocca" : "Blocca", null, (o, e) => { s.Locked = !s.Locked; settings.Save(); srcList.Invalidate(); canvas.Invalidate(); });
             m.Items.Add(new ToolStripSeparator());
             var up = m.Items.Add("Porta sopra", null, (o, e) => { canvas.Select(s); MoveSource(+1); });
             var dn = m.Items.Add("Porta sotto", null, (o, e) => { canvas.Select(s); MoveSource(-1); });
-            up.Enabled = dn.Enabled = !engine.IsRecording;
+            up.Enabled = dn.Enabled = !CaptureBusy;
             m.Items.Add(new ToolStripSeparator());
             var rm = m.Items.Add("Rimuovi", null, (o, e) => RemoveSource(s));
-            rm.Enabled = !engine.IsRecording;
+            rm.Enabled = !CaptureBusy;
             Theme.StyleMenu(m);
             m.Show(owner, at);
         }
@@ -364,8 +368,8 @@ namespace VHSCapture
 
         void UpdateSourceButtons()
         {
-            bool sel = canvas.Selected != null, rec = engine.IsRecording;
-            btnRemove.Enabled = sel && !rec; btnProps.Enabled = sel;
+            bool sel = canvas.Selected != null, rec = CaptureBusy;
+            btnRemove.Enabled = sel && !rec; btnProps.Enabled = sel && !startingRecording && !finalizing;
             int i = sel ? settings.Sources.IndexOf(canvas.Selected) : -1;
             btnUp.Enabled = sel && !rec && i < settings.Sources.Count - 1;
             btnDown.Enabled = sel && !rec && i > 0;
@@ -385,7 +389,7 @@ namespace VHSCapture
 
         void AddSource(SourceType type)
         {
-            if (engine.IsRecording) return;
+            if (CaptureBusy) return;
             var s = new Source { Type = type };
             s.Name = UniqueName(type switch { SourceType.Capture => "Grabber USB", SourceType.Image => "Immagine", _ => "Colore" });
             if (type == SourceType.Capture)
@@ -440,6 +444,7 @@ namespace VHSCapture
 
         void EditSource(Source s)
         {
+            if (startingRecording || finalizing) return;
             using var f = new SourceForm(s, settings, engine.IsRecording, LiveApply, StructuralApply, CropPreview, WithDeviceFree, AppendLog, id => engine.GetInputInfo(id));
             if (f.ShowDialog(this) != DialogResult.OK) { canvas.Invalidate(); RefreshMixerValues(); return; }
             var res = f.Result;
@@ -457,7 +462,7 @@ namespace VHSCapture
         void StructuralApply(Source s)
         {
             var target = settings.Sources.FirstOrDefault(x => x.Id == s.Id);
-            if (target == null || engine.IsRecording) return;
+            if (target == null || CaptureBusy) return;
             if (target.StructurallyEquals(s)) return;
             target.CopyStructuralFrom(s);
             RebuildMixer();
@@ -494,7 +499,7 @@ namespace VHSCapture
 
         void RemoveSource(Source s)
         {
-            if (engine.IsRecording) return;
+            if (CaptureBusy) return;
             if (MessageBox.Show(this, $"Rimuovere \"{s.Name}\"?", "VHSCapture", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             settings.Sources.Remove(s);
             settings.Save();
@@ -505,7 +510,7 @@ namespace VHSCapture
 
         void MoveSource(int dir)
         {
-            var s = canvas.Selected; if (s == null || engine.IsRecording) return;
+            var s = canvas.Selected; if (s == null || CaptureBusy) return;
             int i = settings.Sources.IndexOf(s), j = i + dir;
             if (j < 0 || j >= settings.Sources.Count) return;
             settings.Sources[i] = settings.Sources[j]; settings.Sources[j] = s;
@@ -589,19 +594,19 @@ namespace VHSCapture
         /// <summary>Ferma l'anteprima, esegue l'azione (es. dialogo del driver via ffmpeg), riavvia l'anteprima.</summary>
         void WithDeviceFree(Action a)
         {
-            if (engine.IsRecording) return;
+            if (CaptureBusy) return;
             bool was = engine.IsRunning;
             engine.Stop(); canvas.SetFrame(null); canvas.Message = "Dispositivo in uso dal dialogo del driver…"; canvas.Refresh();
             try { a(); } finally { if (was) StartPreview(); }
         }
 
-        void RestartIfRunning() { if (engine.IsRecording) return; if (engine.IsRunning) StartPreview(); }
-        void ScheduleRestart() { if (engine.IsRecording) return; restartTimer.Stop(); restartTimer.Start(); }
+        void RestartIfRunning() { if (CaptureBusy) return; if (engine.IsRunning) StartPreview(); }
+        void ScheduleRestart() { if (CaptureBusy) return; restartTimer.Stop(); restartTimer.Start(); }
 
-        void StartRecording()
+        async void StartRecording()
         {
             if (!FFmpeg.Exists) return;
-            if (engine.IsRecording || finalizing) return;
+            if (CaptureBusy) return;
             if (!settings.Sources.Any(x => x.Visible)) { MessageBox.Show(this, "Aggiungi almeno una sorgente.", "VHSCapture"); return; }
 
             string folder = settings.ResolvedOutputFolder();
@@ -612,8 +617,12 @@ namespace VHSCapture
             }
             string name = txtName.Text.Trim();
             foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
-            string stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            string stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff");
             string baseName = string.IsNullOrEmpty(name) ? $"{settings.FilePrefix}_{stamp}" : $"{settings.FilePrefix}_{name}_{stamp}";
+            foreach (var c in Path.GetInvalidFileNameChars()) baseName = baseName.Replace(c, '_');
+            string rootName = baseName; int suffix = 1;
+            while (File.Exists(Path.Combine(folder, baseName + ".mp4")) || File.Exists(Path.Combine(folder, baseName + ".mkv")) || File.Exists(Path.Combine(folder, baseName + "_000.mp4")))
+                baseName = rootName + "_" + suffix++;
             recFolder = folder; recBase = baseName;
             finalFile = Path.Combine(folder, baseName + ".mp4");
             if (settings.SplitMinutes > 0 && !settings.SafeRecording)
@@ -622,36 +631,80 @@ namespace VHSCapture
                 recFile = settings.SafeRecording ? Path.Combine(folder, baseName + ".mkv") : finalFile;
 
             restartTimer.Stop();
-            // come OBS: la pipeline resta accesa, si attacca solo il muxer. Nessuno scatto, nessun frame perso.
-            if (!engine.IsRunning) StartPreview();
-            try { engine.StartRecording(settings, recFile); }
-            catch (Exception ex) { AppendLog("Errore avvio registrazione: " + ex.Message); return; }
-            recStart = DateTime.Now;
-            blankSince = null; blankStartRecSec = -1; contentSamples = 0; autoStopped = false;
-            pausedSince = null; pausedTotal = TimeSpan.Zero;
-            AppendLog("Registrazione avviata: " + Path.GetFileName(recFile));
-            SetButtons();
+            startingRecording = true; SetButtons();
+            lblRec.Text = "Preparazione registrazione…";
+            bool muxStarted = false;
+            try
+            {
+                // Verifica la cartella prima di agganciare il muxer, senza toccare file esistenti.
+                string probe = Path.Combine(folder, ".vhscapture-" + Guid.NewGuid().ToString("N") + ".tmp");
+                using (var writable = new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) writable.WriteByte(0);
+                if (!engine.IsRunning) StartPreview();
+                var ready = Stopwatch.StartNew();
+                while (!engine.Recorder.HasBufferedKeyFrame)
+                {
+                    if (closingApp || IsDisposed) return;
+                    if (ready.Elapsed.TotalSeconds > 25)
+                        throw new IOException("Il grabber non ha fornito un fotogramma completo. Controlla l'anteprima e riprova.");
+                    await Task.Delay(100);
+                }
+                if (closingApp || IsDisposed) return;
+                // La pipeline GPU resta accesa: il muxer si aggancia al pre-roll già pronto.
+                engine.StartRecording(settings, recFile); muxStarted = true;
+                recStart = DateTime.Now;
+                pausedSince = null; pausedTotal = TimeSpan.Zero;
+                ready.Restart();
+                while (!engine.Recorder.OutputStarted || RecordedBytes(recFile) == 0)
+                {
+                    if (closingApp || IsDisposed) return;
+                    if (engine.Recorder.LastError != null) throw new IOException(engine.Recorder.LastError);
+                    if (!engine.IsRunning || !engine.Recorder.MuxAlive) throw new IOException("Il dispositivo o il processo di registrazione si è fermato durante l'avvio.");
+                    if (ready.Elapsed.TotalSeconds > 15) throw new IOException("Il file non ha iniziato a ricevere video entro il tempo previsto. Controlla la destinazione e riprova.");
+                    await Task.Delay(100);
+                }
+                if (engine.Recorder.LastError != null) throw new IOException(engine.Recorder.LastError);
+                blankSince = null; blankStartRecSec = -1; contentSamples = 0; autoStopped = false;
+                lastSignalAt = DateTime.MinValue;
+                AppendLog("Registrazione avviata: " + Path.GetFileName(recFile));
+            }
+            catch (Exception ex)
+            {
+                if (muxStarted) await Task.Run(() => engine.StopRecording());
+                string partial = RecordedBytes(recFile) > 0 ? "\nIl file parziale è conservato: " + recFile : "";
+                AppendLog("Registrazione non avviata: " + ex.Message + partial);
+                if (!closingApp && !IsDisposed) MessageBox.Show(this, "Registrazione non avviata.\n" + ex.Message + partial, "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally
+            {
+                startingRecording = false;
+                if (!closingApp && !IsDisposed) { lblRec.Text = ""; SetButtons(); }
+            }
         }
 
         async void StopRecording(bool restartPreview)
         {
-            if (!engine.IsRecording) return;
+            if (!engine.IsRecording || finalizing || startingRecording) return;
             finalizing = true;
             SetButtons();
             lblRec.Text = "Chiusura file…"; lblRec.Fill = Color.Transparent; lblRec.ForeColor = Theme.Fore;
             canvas.RecText = null; canvas.Invalidate();
 
+            try
+            {
             string written = recFile, final = finalFile;
             bool muxOk = await Task.Run(() => engine.StopRecording());
-            if (!muxOk) AppendLog("Il muxer non è uscito pulito: controlla il file");
+            if (!muxOk) AppendLog("Registrazione interrotta: " + (engine.Recorder.LastError ?? "Chiusura non completata. Il file parziale è conservato."));
 
-            bool HasData(string f) => RecordedBytes(f) > 4096;
+            bool HasData(string f) => RecordedBytes(f) > 0;
 
             if (!HasData(written))
             {
-                try { foreach (var fx in RecordedFiles(written)) File.Delete(fx); } catch { }
                 AppendLog("Registrazione NON salvata: ffmpeg non ha scritto niente (vedi errori sopra)");
                 MessageBox.Show(this, "La registrazione non è partita e non è stato salvato nulla.\nControlla il Log.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            else if (!muxOk)
+            {
+                MessageBox.Show(this, "La registrazione si è interrotta. Il file parziale è conservato in:\n" + written + "\n\n" + engine.Recorder.LastError, "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             else if (settings.SafeRecording && !string.Equals(written, final, StringComparison.OrdinalIgnoreCase))
             {
@@ -669,7 +722,7 @@ namespace VHSCapture
 
             // coda uniforme: se lo stop è automatico la taglio (senza ricodifica)
             string mainFile = RecordedFiles(final).LastOrDefault();
-            if (autoStopped && settings.TrimBlankTail && blankStartRecSec > 0 && mainFile != null && !final.Contains("%03d"))
+            if (muxOk && autoStopped && settings.TrimBlankTail && blankStartRecSec > 0 && mainFile != null && !final.Contains("%03d"))
             {
                 lblRec.Text = "Taglio la coda uniforme…";
                 // il file parte dal keyframe precedente al clic: margine = intervallo keyframe + 1 s
@@ -679,7 +732,7 @@ namespace VHSCapture
             }
 
             // nome della cassetta: rinomina il file (niente più rinomina a mano in Esplora file)
-            if (settings.AskNameAtEnd && RecordedFiles(final).Any())
+            if (muxOk && settings.AskNameAtEnd && RecordedFiles(final).Any())
             {
                 string suggested = txtName.Text.Trim();
                 string n = Prompt("Nome della cassetta", "Come si chiama questa cassetta? (Invio per confermare, Annulla per lasciare il nome automatico)", suggested);
@@ -702,16 +755,29 @@ namespace VHSCapture
                 else AppendLog($"Audio nel file OK: medio {mean:0.0} dB, picco {max:0.0} dB" + (max >= -0.5 ? " — satura, abbassa il volume nel mixer" : ""));
             }
 
-            finalizing = false;
-            pausedSince = null; pausedTotal = TimeSpan.Zero;
-            lblRec.Text = "";
-            if (restartPreview && !IsDisposed && !engine.IsRunning) StartPreview();
-            SetButtons();
+            }
+            catch (Exception ex)
+            {
+                AppendLog("Errore nella chiusura: " + ex.Message + ". I file esistenti sono conservati.");
+                try { await Task.Run(() => engine.StopRecording()); } catch { }
+                if (!IsDisposed) MessageBox.Show(this, "Non è stato possibile completare la chiusura. I file esistenti sono conservati.\n" + ex.Message, "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            finally
+            {
+                finalizing = false; blankSince = null;
+                pausedSince = null; pausedTotal = TimeSpan.Zero;
+                if (!IsDisposed && !closingApp)
+                {
+                    lblRec.Text = "";
+                    if (restartPreview && !engine.IsRunning) StartPreview();
+                    SetButtons();
+                }
+            }
         }
 
         void OpenSettings()
         {
-            if (engine.IsRecording) { MessageBox.Show(this, "Ferma la registrazione prima di cambiare le impostazioni.", "VHSCapture"); return; }
+            if (CaptureBusy) { MessageBox.Show(this, "Ferma la registrazione prima di cambiare le impostazioni.", "VHSCapture"); return; }
             using var f = new SettingsForm(settings);
             var r = f.ShowDialog(this);
             Theme.Apply(this, settings.DarkTheme);
@@ -802,7 +868,7 @@ namespace VHSCapture
 
         void ToggleRecording()
         {
-            if (finalizing) return;
+            if (finalizing || startingRecording) return;
             if (engine.IsRecording) StopRecording(true);
             else StartRecording();
         }
@@ -812,9 +878,9 @@ namespace VHSCapture
         {
             if (btnRec == null) return;
             bool compact = compactState == true, rec = engine.IsRecording;
-            if (finalizing)
+            if (finalizing || startingRecording)
             {
-                btnRec.Text = compact ? "…" : "Chiusura file…";
+                btnRec.Text = compact ? "…" : startingRecording ? "Preparazione…" : "Chiusura file…";
                 btnRec.Variant = "stop"; btnRec.Enabled = false;
             }
             else if (rec)
@@ -832,7 +898,7 @@ namespace VHSCapture
             if (btnPause != null)
             {
                 bool p = pausedSince != null;
-                btnPause.Visible = rec && !finalizing;
+                btnPause.Visible = rec && !finalizing && !startingRecording;
                 btnPause.Text = compact ? (p ? "▶" : "⏸") : (p ? "▶   Riprendi" : "⏸   Pausa");
                 btnPause.Variant = p ? "accent" : "ghost";
                 btnPause.MinimumSize = new Size(compact ? 44 : 120, 36);
@@ -851,7 +917,7 @@ namespace VHSCapture
 
         void TogglePause()
         {
-            if (!engine.IsRecording || finalizing) return;
+            if (!engine.IsRecording || finalizing || startingRecording) return;
             if (pausedSince == null)
             {
                 engine.PauseRecording();
@@ -871,7 +937,7 @@ namespace VHSCapture
 
         void SetButtons()
         {
-            bool rec = engine.IsRecording;
+            bool rec = CaptureBusy;
             UpdateRecButton();
             btnSettings.Enabled = !rec && !finalizing;
             txtName.Enabled = !rec;
@@ -902,6 +968,7 @@ namespace VHSCapture
                 {
                     if (engine.IsRecording)
                     {
+                        engine.Recorder.ReportFailure("Il dispositivo di cattura si è fermato durante la registrazione.");
                         AppendLog("ATTENZIONE: la pipeline si è fermata durante la registrazione — chiudo il file");
                         StopRecording(true);
                         return;
@@ -985,30 +1052,22 @@ namespace VHSCapture
 
         async void CheckEncoderAsync()
         {
-            var list = await Task.Run(() => FFmpeg.ListWorkingH264Encoders());   // già ordinato: hardware prima
+            var results = await Task.Run(() => FFmpeg.ProbeH264Encoders());
+            var list = results.Where(x => x.Works).Select(x => x.Encoder).ToList();
+            if (IsDisposed || closingApp) return;
             AppendLog("Encoder funzionanti su questo PC: " + string.Join(", ", list));
-            string pick = null;
-            if (settings.IntelGpu && settings.Encoder != "h264_qsv" && list.Contains("h264_qsv"))
-            {
-                AppendLog("Uso Intel QuickSync H.264 per mantenere filtri ed encoder sulla stessa GPU");
-                pick = "h264_qsv";
-            }
-            else if (!list.Contains(settings.Encoder))
-            {
-                AppendLog($"L'encoder {settings.Encoder} non funziona su questo PC: passo a {list[0]}");
-                pick = list[0];
-            }
-            else if (!settings.EncoderUserSet && settings.Encoder == "libx264" && list[0] != "libx264")
-            {
-                // l'encoder è sempre acceso: quello software pesa sulla CPU anche in anteprima. Uso quello della scheda video (come OBS).
-                AppendLog($"Uso l'encoder hardware {EncName(list[0])} invece di x264: molta meno CPU. Si cambia in Impostazioni → Registrazione.");
-                pick = list[0];
-            }
+            if (CaptureBusy) return;
+            foreach (var result in results)
+                if (!result.Works) AppendLog("Verifica " + result.Encoder + ": " + result.Detail);
+            string chosen = FFmpeg.ChooseEncoder(settings, list);
+            string pick = chosen != settings.Encoder ? chosen : null;
+            if (settings.EncoderUserSet && !list.Contains(settings.Encoder))
+                AppendLog("L'encoder scelto non supera la prova iniziale: mantengo la tua scelta. Controlla Impostazioni → Registrazione → Verifica encoder.");
             if (pick != null)
             {
                 settings.Encoder = pick;
                 settings.Save();
-                if (engine.IsRunning && !engine.IsRecording) StartPreview();
+                if (engine.IsRunning && !CaptureBusy) StartPreview();
             }
         }
 
@@ -1152,28 +1211,34 @@ namespace VHSCapture
         DateTime lastDiskCheck = DateTime.MinValue, lastCpuSample = DateTime.MinValue; long lastFree = -1;
 
         /// <summary>
-        /// Fine cassetta: se durante la registrazione arriva schermo uniforme di qualsiasi colore per N secondi, si ferma da sola.
-        /// Si arma solo dopo almeno 10 s di immagine vera, così se premi Registra prima del Play non si ferma subito.
+        /// Lo stop richiede una conferma continua dal rilevatore di dettagli/movimento/audio e poi l'attesa configurata.
+        /// Solo contenuto effettivo arma lo stop; dati mancanti, pause e preparazione annullano il conto alla rovescia.
         /// </summary>
         void OnSignal(bool blank, string kind)
         {
-            if (pausedSince != null) { blankSince = null; return; }   // in pausa lo stop automatico non vale
+            var now = DateTime.UtcNow;
+            if ((now - lastSignalAt).TotalSeconds > 2) blankSince = null;
+            lastSignalAt = now;
+            // Una seconda cattura non analizzata potrebbe ancora contenere video valido.
+            if (pausedSince != null || startingRecording || finalizing || !engine.IsRecording ||
+                settings.Sources.Count(x => x.Visible && x.Type == SourceType.Capture) != 1)
+            { blankSince = null; return; }
             if (!blank)
             {
-                blankSince = null; blankKind = "";
-                if (engine.IsRecording) contentSamples++;
+                blankSince = null; blankKind = ""; blankStartRecSec = -1;
+                // La conferma di uno schermo piatto NON arma lo stop come se fosse una scena vera.
+                if (kind == "contenuto") contentSamples++;
                 return;
             }
+            if (!settings.AutoStopOnBlank || contentSamples < 20) { blankSince = null; return; }
             if (blankSince == null)
             {
-                blankSince = DateTime.Now; blankKind = kind;
-                blankStartRecSec = engine.IsRecording ? RecElapsed().TotalSeconds : -1;
+                blankSince = now; blankKind = kind;
+                blankStartRecSec = RecElapsed().TotalSeconds;
             }
-            if (!engine.IsRecording || finalizing || !settings.AutoStopOnBlank) return;
-            bool armed = contentSamples >= 20;   // 20 campioni a 2/s = 10 s di immagine vera
-            if (armed && (DateTime.Now - blankSince.Value).TotalSeconds >= Math.Max(5, settings.AutoStopSeconds))
+            if ((now - blankSince.Value).TotalSeconds >= Math.Max(5, settings.AutoStopSeconds))
             {
-                AppendLog($"Fine cassetta rilevata (schermo {blankKind} da {settings.AutoStopSeconds} s): fermo la registrazione");
+                AppendLog($"Probabile fine cassetta confermata: immagine senza dettagli o movimento e senza audio rilevato. Stop dopo {settings.AutoStopSeconds} s aggiuntivi.");
                 autoStopped = true;
                 StopRecording(true);
             }
@@ -1269,8 +1334,16 @@ namespace VHSCapture
             }
             lblStatus.Text = string.Join("   ·   ", parts);
 
-            if (engine.IsRecording)
+            if ((DateTime.UtcNow - lastSignalAt).TotalSeconds > 2) blankSince = null;
+            if (engine.IsRecording && !finalizing && !startingRecording)
             {
+                if (engine.Recorder.LastError != null || !engine.Recorder.MuxAlive ||
+                    pausedSince == null && engine.Recorder.OutputStarted && engine.Recorder.SecondsSinceOutput > 20)
+                {
+                    engine.Recorder.ReportFailure(engine.Recorder.LastError ?? "Il file non sta più ricevendo video.");
+                    AppendLog(engine.Recorder.LastError);
+                    StopRecording(true); return;
+                }
                 var el = RecElapsed();
                 bool isPaused = pausedSince != null;
                 long size = 0;
@@ -1282,8 +1355,8 @@ namespace VHSCapture
                 canvas.RecText = isPaused ? $"⏸  IN PAUSA  {el:hh\\:mm\\:ss}" : $"{(blink ? "●" : "○")}  REC  {el:hh\\:mm\\:ss}";
                 if (blankSince != null && settings.AutoStopOnBlank && !isPaused)
                 {
-                    int left = Math.Max(0, settings.AutoStopSeconds - (int)(DateTime.Now - blankSince.Value).TotalSeconds);
-                    canvas.RecText += contentSamples >= 20 ? $"    schermo {blankKind}: stop tra {left} s" : $"    schermo {blankKind} (in attesa del Play)";
+                    int left = Math.Max(0, settings.AutoStopSeconds - (int)(DateTime.UtcNow - blankSince.Value).TotalSeconds);
+                    canvas.RecText += $"    probabile fine cassetta: stop tra {left} s";
                 }
                 canvas.Invalidate();
                 if (settings.MaxMinutes > 0 && el.TotalMinutes >= settings.MaxMinutes)
@@ -1294,7 +1367,7 @@ namespace VHSCapture
                 if ((DateTime.Now - lastFrameAt).TotalSeconds > 5 && frames > 0)
                     lblRec.Text += "   ⚠ nessun frame da " + (int)(DateTime.Now - lastFrameAt).TotalSeconds + "s";
             }
-            else if (!finalizing)
+            else if (!finalizing && !startingRecording)
             {
                 if (canvas.RecText != null) { canvas.RecText = null; canvas.Invalidate(); }
                 lblRec.Fill = engine.IsRunning ? Theme.Accent : Color.Transparent;

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace VHSCapture
@@ -19,6 +21,10 @@ namespace VHSCapture
         // Registrazione
         ComboBox cbFormat, cbEncoder, cbRc, cbPreset; NumericUpDown nBitrate, nCrf, nSplit, nKey;
         Label lblBitrate, lblCrf, lblPreset;
+        TextBox encoderStatus;
+        RoundedButton btnProbe, btnSave;
+        bool probingEncoders, encoderChosen;
+        readonly Dictionary<string, FFmpeg.EncoderProbeResult> encoderResults = new Dictionary<string, FFmpeg.EncoderProbeResult>();
         // Video
         ComboBox cbCanvas, cbFps;
         // Audio
@@ -46,13 +52,14 @@ namespace VHSCapture
             LoadValues();
             Theme.Apply(this, s.DarkTheme);
             StyleNav();
+            Shown += async (o, e) => await RefreshEncoders(false);
         }
 
         // ================= struttura =================
         void Build()
         {
             var pBtn = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, Height = 58, Padding = new Padding(12, 10, 12, 10) };
-            var btnOk = Ui.Btn("Salva", "accent", null, 110);
+            var btnOk = btnSave = Ui.Btn("Salva", "accent", null, 110);
             var btnCancel = Ui.Btn("Annulla", "normal", null, 110);
             btnOk.Click += (o, e) => { if (SaveValues()) { DialogResult = DialogResult.OK; Close(); } };
             btnCancel.Click += (o, e) => { DialogResult = DialogResult.Cancel; Close(); };
@@ -213,16 +220,24 @@ namespace VHSCapture
             Row(file, "Dividi file ogni (minuti)", nSplit, "0 = no. Utile per chiavette FAT32 (4 GB)");
 
             var fine = Section(p, "Fine cassetta");
-            chkAutoStop = Check(fine, "Ferma da sola quando la cassetta finisce", "Quando il grabber manda uno schermo uniforme di qualsiasi colore, anche grigio (videoregistratore senza segnale). Si attiva solo dopo 10 s di immagine, così se premi Registra prima del Play non si ferma.");
+            chkAutoStop = Check(fine, "Ferma da sola quando la cassetta finisce", "Controlla dettagli, movimento e audio, anche nelle scene buie. Prima conferma per 12 s uno schermo fermo e privo di dettagli, poi attende il tempo indicato. Si arma dopo 10 s di contenuto. Un nero pieno e silenzioso prolungato resta indistinguibile dalla perdita del segnale.");
             nAutoSec = Num(5, 600, 5);
-            Row(fine, "Dopo quanti secondi", nAutoSec, "20–30 vanno bene");
+            Row(fine, "Attesa dopo la conferma (s)", nAutoSec, "In aggiunta ai 12 s iniziali");
             chkTrim = Check(fine, "Taglia la parte uniforme finale dal file", "Senza ricodifica, pochi secondi anche per file lunghi.");
             chkAskName = Check(fine, "Chiedi il nome della cassetta alla fine", "Il file viene rinominato \"Nome cassetta.mp4\". Se annulli resta il nome automatico.");
             chkAutoStop.CheckedChanged += (o, e) => { nAutoSec.Enabled = chkTrim.Enabled = chkAutoStop.Checked; };
 
             var enc = Section(p, "Encoder video");
             cbEncoder = Combo();
-            Row(enc, "Encoder", cbEncoder, "solo quelli che funzionano su questo PC");
+            Row(enc, "Encoder", cbEncoder);
+            btnProbe = Ui.Btn("Verifica encoder", "normal", null, 180);
+            btnProbe.Click += async (o, e) => await RefreshEncoders(true);
+            Row(enc, "Rilevamento", btnProbe);
+            encoderStatus = new TextBox { ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical, Width = LabelW + FieldW, Height = 92, Margin = new Padding(0, 2, 0, 8) };
+            var et = T(enc); int er = et.RowCount++;
+            et.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            et.Controls.Add(encoderStatus, 0, er); et.SetColumnSpan(encoderStatus, 2);
+            cbEncoder.SelectionChangeCommitted += (o, e) => encoderChosen = true;
             cbRc = Combo("CBR", "VBR", "CRF");
             Row(enc, "Controllo bitrate", cbRc);
             nBitrate = Num(500, 100000, 500);
@@ -235,7 +250,7 @@ namespace VHSCapture
             Row(enc, "Keyframe ogni (secondi)", nKey, "OBS usa 2");
             Note(enc, "La pipeline e l'encoder hardware restano attivi: Registra avvia la scrittura senza riaprire il grabber.");
             cbRc.SelectedIndexChanged += (o, e) => UpdateEnabled();
-            cbEncoder.SelectedIndexChanged += (o, e) => UpdateEnabled();
+            cbEncoder.SelectedIndexChanged += (o, e) => { UpdateEnabled(); ShowEncoderStatus(); };
         }
 
         void BuildVideo()
@@ -292,9 +307,7 @@ namespace VHSCapture
 
             cbFormat.SelectedIndex = s.SafeRecording ? 2 : (s.FragmentedMp4 ? 1 : 0);
             nSplit.Value = Math.Clamp(s.SplitMinutes, 0, 600);
-            Cursor = Cursors.WaitCursor;
-            foreach (var e in FFmpeg.ListWorkingH264Encoders()) cbEncoder.Items.Add(EncLabel(e));
-            Cursor = Cursors.Default;
+            foreach (var e in new[] { "h264_qsv", "h264_nvenc", "h264_amf", "libx264" }) cbEncoder.Items.Add(EncLabel(e));
             Sel(cbEncoder, EncLabel(s.Encoder));
             if (cbEncoder.SelectedIndex < 0 && cbEncoder.Items.Count > 0) cbEncoder.SelectedIndex = 0;
             Sel(cbRc, s.RateControl);
@@ -328,6 +341,15 @@ namespace VHSCapture
 
         bool SaveValues()
         {
+            if (probingEncoders) return false;
+            string selected = EncFromLabel(cbEncoder.Text);
+            if ((encoderChosen || selected != s.Encoder) && (!encoderResults.TryGetValue(selected, out var probe) || !probe.Works))
+            {
+                MessageBox.Show(this, "Questo encoder non ha superato la verifica. Il motivo è nel riquadro Encoder video. Premi Verifica encoder per riprovare.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                nav.SelectedItem = "Registrazione";
+                return false;
+            }
+
             var p = cbCanvas.Text.Trim().ToLowerInvariant().Split('x');
             if (p.Length != 2 || !int.TryParse(p[0], out int cw) || !int.TryParse(p[1], out int ch) || cw < 64 || ch < 64)
             {
@@ -349,7 +371,7 @@ namespace VHSCapture
             s.FragmentedMp4 = cbFormat.SelectedIndex == 1;
             s.SplitMinutes = (int)nSplit.Value;
             var enc = EncFromLabel(cbEncoder.Text);
-            if (enc != s.Encoder) s.EncoderUserSet = true;   // da qui in poi l'encoder lo decide l'utente
+            if (encoderChosen || enc != s.Encoder) s.EncoderUserSet = true;   // da qui in poi l'encoder lo decide l'utente
             s.Encoder = enc;
             s.RateControl = string.IsNullOrEmpty(cbRc.Text) ? "CBR" : cbRc.Text;
             s.VideoBitrate = (int)nBitrate.Value;
@@ -372,6 +394,40 @@ namespace VHSCapture
             s.IntelFieldOrder = cbIntelField.SelectedIndex == 1 ? "bff" : "tff";
             s.Save();
             return true;
+        }
+
+        async Task RefreshEncoders(bool refresh)
+        {
+            if (probingEncoders) return;
+            probingEncoders = true; btnProbe.Enabled = btnSave.Enabled = false;
+            encoderStatus.Text = "Verifica in corso…";
+            try
+            {
+                var results = await Task.Run(() => FFmpeg.ProbeH264Encoders(refresh));
+                if (IsDisposed) return;
+                string selected = EncFromLabel(cbEncoder.Text);
+                encoderResults.Clear(); cbEncoder.Items.Clear();
+                foreach (var result in results)
+                {
+                    encoderResults[result.Encoder] = result;
+                    cbEncoder.Items.Add(EncLabel(result.Encoder) + (result.Works ? " — pronto" : " — non disponibile"));
+                }
+                for (int i = 0; i < cbEncoder.Items.Count; i++)
+                    if (EncFromLabel(cbEncoder.Items[i].ToString()) == selected) { cbEncoder.SelectedIndex = i; break; }
+            }
+            catch (Exception ex) { if (!IsDisposed) encoderStatus.Text = "Verifica non completata: " + ex.Message; }
+            finally
+            {
+                probingEncoders = false;
+                if (!IsDisposed) { btnProbe.Enabled = btnSave.Enabled = true; ShowEncoderStatus(); }
+            }
+        }
+
+        void ShowEncoderStatus()
+        {
+            if (encoderStatus == null || probingEncoders) return;
+            encoderStatus.Text = encoderResults.TryGetValue(EncFromLabel(cbEncoder.Text), out var result)
+                ? result.Detail : "Verifica non ancora completata. La presenza in elenco non certifica una scheda installata: controlla l'esito della prova.";
         }
 
         void UpdateEnabled()

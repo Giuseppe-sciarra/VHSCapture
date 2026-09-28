@@ -198,7 +198,7 @@ namespace VHSCapture
         public int KeyframeSec { get; set; } = 2;              // intervallo keyframe (OBS: 2 s)
 
         // Fine cassetta
-        public bool AutoStopOnBlank { get; set; } = true;      // ferma quando il grabber manda schermo uniforme di qualsiasi colore
+        public bool AutoStopOnBlank { get; set; } = true;      // arresto prudente dopo conferma di assenza di dettagli, movimento e audio
         public int AutoStopSeconds { get; set; } = 30;
         public bool TrimBlankTail { get; set; } = true;        // taglia la coda uniforme dal file
         public bool AskNameAtEnd { get; set; } = true;         // a fine registrazione chiede il nome della cassetta e rinomina

@@ -111,37 +111,79 @@ namespace VHSCapture
             return sizes;
         }
 
-        static List<string> workingCache;
+        public sealed class EncoderProbeResult
+        {
+            public string Encoder { get; }
+            public bool Included { get; }
+            public bool Works { get; }
+            public string Detail { get; }
+            public EncoderProbeResult(string encoder, bool included, bool works, string detail)
+            { Encoder = encoder; Included = included; Works = works; Detail = detail; }
+        }
+        static readonly string[] encoderOrder = { "h264_qsv", "h264_nvenc", "h264_amf", "libx264" };
+        static List<EncoderProbeResult> encoderCache;
+        static long cacheAt;
+        static DateTime cacheBinaryDate;
         static readonly object encLock = new object();
 
-        /// <summary>Encoder H.264 che si aprono DAVVERO su questo PC (prova di pochi frame). Il risultato resta in cache.</summary>
-        public static List<string> ListWorkingH264Encoders()
+        // Esiti e cause rimangono visibili. Cache breve e rivalutazione esplicita dopo un errore.
+        public static List<EncoderProbeResult> ProbeH264Encoders(bool refresh = false)
         {
             lock (encLock)
             {
-                if (workingCache != null) return new List<string>(workingCache);
+                var binaryDate = File.Exists(ExePath) ? File.GetLastWriteTimeUtc(ExePath) : DateTime.MinValue;
+                double age = (Stopwatch.GetTimestamp() - cacheAt) / (double)Stopwatch.Frequency;
+                if (!refresh && encoderCache != null && age < 30 && binaryDate == cacheBinaryDate)
+                    return new List<EncoderProbeResult>(encoderCache);
                 var compiled = ListH264Encoders();
-                var ok = new ConcurrentBag<string>();
-                System.Threading.Tasks.Parallel.ForEach(compiled, e => { if (e == "libx264" || TestEncoder(e)) ok.Add(e); });
-                // preferenza: hardware prima (come OBS)
-                var order = new[] { "h264_qsv", "h264_nvenc", "h264_amf", "libx264" };
-                workingCache = order.Where(ok.Contains).ToList();
-                if (workingCache.Count == 0) workingCache.Add("libx264");
-                return new List<string>(workingCache);
+                var results = new List<EncoderProbeResult>();
+                // Nessuna apertura simultanea di sessioni hardware per il rilevamento.
+                foreach (var encoder in encoderOrder)
+                    results.Add(compiled.Contains(encoder) ? ProbeEncoder(encoder) :
+                        new EncoderProbeResult(encoder, false, false, Exists ? "Questo FFmpeg non include l'encoder " + encoder + "." : "ffmpeg.exe non trovato accanto al programma."));
+                encoderCache = results; cacheAt = Stopwatch.GetTimestamp(); cacheBinaryDate = binaryDate;
+                return new List<EncoderProbeResult>(results);
             }
         }
 
-        public static bool TestEncoder(string enc)
+        public static List<string> ListWorkingH264Encoders()
         {
+            var working = ProbeH264Encoders().Where(x => x.Works).Select(x => x.Encoder).ToList();
+            if (working.Count == 0) working.Add("libx264");
+            return working;
+        }
+
+        public static string ChooseEncoder(AppSettings settings, IList<string> working)
+        {
+            // La scelta esplicita dell'utente precede la preferenza automatica Intel.
+            if (settings.EncoderUserSet) return settings.Encoder;
+            if (settings.IntelGpu && working.Contains("h264_qsv")) return "h264_qsv";
+            if (working.Contains(settings.Encoder) && settings.Encoder != "libx264") return settings.Encoder;
+            return working.Count > 0 ? working[0] : settings.Encoder;
+        }
+
+        public static EncoderProbeResult ProbeEncoder(string enc)
+        {
+            if (!encoderOrder.Contains(enc)) return new EncoderProbeResult(enc, false, false, "Encoder non previsto.");
             try
             {
-                using var p = Process.Start(Psi($"-hide_banner -loglevel error -f lavfi -i color=c=black:s=1280x720:r=25:d=0.5 -frames:v 5 -pix_fmt yuv420p -c:v {enc} -f null -"));
-                var a = p.StandardError.ReadToEndAsync(); var b = p.StandardOutput.ReadToEndAsync();
-                if (!p.WaitForExit(10000)) { try { p.Kill(); } catch { } return false; }
-                return p.ExitCode == 0;
+                using var p = Process.Start(Psi($"-hide_banner -nostdin -loglevel error -f lavfi -i color=c=black:s=1280x720:r=25:d=0.5 -frames:v 5 -pix_fmt yuv420p -c:v {enc} -f null -"));
+                var errors = p.StandardError.ReadToEndAsync(); var output = p.StandardOutput.ReadToEndAsync();
+                if (!p.WaitForExit(10000))
+                {
+                    try { p.Kill(); p.WaitForExit(2000); } catch { }
+                    return new EncoderProbeResult(enc, true, false, "La verifica non si è conclusa entro 10 secondi. Premi Verifica encoder per riprovare.");
+                }
+                bool drained = System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] { errors, output }, 2000);
+                string detail = drained ? errors.Result.Trim() : "Lettura della risposta FFmpeg non completata.";
+                bool ok = p.ExitCode == 0;
+                return new EncoderProbeResult(enc, true, ok, ok ? "Pronto: prova di codifica H.264 riuscita." :
+                    string.IsNullOrEmpty(detail) ? "FFmpeg ha rifiutato l'encoder (codice " + p.ExitCode + ")." : detail);
             }
-            catch { return false; }
+            catch (Exception ex) { return new EncoderProbeResult(enc, true, false, ex.Message); }
         }
+
+        public static bool TestEncoder(string enc) => ProbeEncoder(enc).Works;
 
         public static List<string> ListH264Encoders()
         {
@@ -160,7 +202,12 @@ namespace VHSCapture
             {
                 using var p = Process.Start(Psi(args));
                 var so = p.StandardOutput.ReadToEndAsync(); var se = p.StandardError.ReadToEndAsync();
-                p.WaitForExit(10000);
+                if (!p.WaitForExit(10000))
+                {
+                    try { p.Kill(); p.WaitForExit(2000); } catch { }
+                    return "FFmpeg non ha risposto entro 10 secondi.";
+                }
+                if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] { so, se }, 2000)) return "Risposta FFmpeg incompleta.";
                 return stdout ? so.Result : se.Result;
             }
             catch (Exception ex) { return ex.Message; }
@@ -330,7 +377,20 @@ namespace VHSCapture
         Process mux;
         System.Collections.Concurrent.BlockingCollection<byte[]> queue;
         Thread writer;
-        volatile bool armed, recording, closing;
+        volatile bool armed, recording, closing, muxStopping;
+        string lastError;
+        long outputTimeUs, lastOutputTick;
+        public string LastError => Volatile.Read(ref lastError);
+        public void ReportFailure(string message) => Fail(message);
+        public bool OutputStarted => Interlocked.Read(ref outputTimeUs) > 0;
+        public double SecondsSinceOutput => (Stopwatch.GetTimestamp() - Interlocked.Read(ref lastOutputTick)) / (double)Stopwatch.Frequency;
+        void Fail(string message)
+        {
+            if (Interlocked.CompareExchange(ref lastError, message, null) != null) return;
+            Log?.Invoke("Registrazione interrotta: " + message);
+            try { queue?.CompleteAdding(); } catch { }
+            closed.Set();
+        }
         readonly ManualResetEventSlim closed = new ManualResetEventSlim(true);
         public bool IsRecording => recording || armed || paused || pausing || resumeArmed;
 
@@ -352,6 +412,7 @@ namespace VHSCapture
             lock (this)
             {
                 if (!paused && !pausing) return;
+                Interlocked.Exchange(ref lastOutputTick, Stopwatch.GetTimestamp());
                 if (pausing) { pausing = false; return; }   // pausa chiesta e annullata prima di scattare
                 paused = false;
                 if (haveKey && gop.Count > 0) { StartSegment(gop[0]); foreach (var p in gop) Write(p); recording = true; }
@@ -373,7 +434,7 @@ namespace VHSCapture
         static int PayloadStart(byte[] p)
         {
             int afc = (p[3] >> 4) & 3;
-            if (afc == 2) return -1;                 // solo adaptation field
+            if (afc == 0 || afc == 2) return -1;                 // solo adaptation field
             int o = 4;
             if (afc == 3) o += 1 + p[4];
             return o < 188 ? o : -1;
@@ -497,8 +558,10 @@ namespace VHSCapture
             int afc = (b[o + 3] >> 4) & 3;
             var pkt = new byte[PKT]; Buffer.BlockCopy(b, o, pkt, 0, PKT);
 
-            if (pid == 0 && pusi) { pat = pkt; ParsePat(pkt); }
-            else if (pid == pmtPid && pusi) { pmt = pkt; ParsePmt(pkt); }
+            if (pkt[0] != 0x47 || (pkt[1] & 0x80) != 0 || afc == 0) return;
+            if ((afc == 2 || afc == 3) && pkt[4] > 183) return;
+            if (pid == 0 && pusi && ParsePat(pkt)) pat = pkt;
+            else if (pid == pmtPid && pusi && ParsePmt(pkt)) pmt = pkt;
 
             bool key = false;
             if (pid == videoPid && pusi && (afc == 2 || afc == 3) && pkt[4] > 0 && (pkt[5] & 0x40) != 0) key = true;   // random_access_indicator
@@ -537,74 +600,116 @@ namespace VHSCapture
             if (recording) Write(pkt);
         }
 
-        void ParsePat(byte[] p)
+        static bool Section(byte[] p, int table, int minLength, out int ptr, out int end)
         {
-            int ptr = 4 + 1 + p[4];            // pointer_field
-            int secLen = ((p[ptr + 1] & 0x0F) << 8) | p[ptr + 2];
-            int end = Math.Min(ptr + 3 + secLen - 4, PKT);
-            for (int i = ptr + 8; i + 4 <= end; i += 4)
-            {
-                int prog = (p[i] << 8) | p[i + 1];
-                int pidv = ((p[i + 2] & 0x1F) << 8) | p[i + 3];
-                if (prog != 0) { pmtPid = pidv; return; }
-            }
+            ptr = end = 0;
+            int payload = PayloadStart(p);
+            if (payload < 0) return false;
+            ptr = payload + 1 + p[payload];
+            if (ptr + 3 > PKT || p[ptr] != table || (p[ptr + 1] & 0x80) == 0) return false;
+            int length = ((p[ptr + 1] & 15) << 8) | p[ptr + 2];
+            // Le tabelle della nostra uscita FFmpeg stanno in un pacchetto. Non leggere sezioni tronche.
+            if (length < minLength || ptr + 3 + length > PKT) return false;
+            end = ptr + 3 + length - 4;
+            return (p[ptr + 5] & 1) != 0;
         }
 
-        void ParsePmt(byte[] p)
+        bool ParsePat(byte[] p)
         {
-            int ptr = 4 + 1 + p[4];
-            int secLen = ((p[ptr + 1] & 0x0F) << 8) | p[ptr + 2];
-            int end = Math.Min(ptr + 3 + secLen - 4, PKT);
-            int progInfoLen = ((p[ptr + 10] & 0x0F) << 8) | p[ptr + 11];
-            int i = ptr + 12 + progInfoLen;
-            while (i + 5 <= end)
+            if (!Section(p, 0, 13, out int ptr, out int end)) return false;
+            for (int i = ptr + 8; i + 4 <= end; i += 4)
             {
-                int type = p[i];
-                int pidv = ((p[i + 1] & 0x1F) << 8) | p[i + 2];
-                int esLen = ((p[i + 3] & 0x0F) << 8) | p[i + 4];
-                if (type == 0x1B || type == 0x24) { videoPid = pidv; return; }   // H.264 / HEVC
-                i += 5 + esLen;
+                if (((p[i] << 8) | p[i + 1]) == 0) continue;
+                int pid = ((p[i + 2] & 31) << 8) | p[i + 3];
+                if (pid == 0 || pid == 8191) return false;
+                if (pmtPid != pid) { pmt = null; videoPid = -1; haveKey = false; gop.Clear(); gopBytes = 0; }
+                pmtPid = pid; return true;
             }
+            return false;
+        }
+
+        bool ParsePmt(byte[] p)
+        {
+            if (!Section(p, 2, 18, out int ptr, out int end)) return false;
+            int info = ((p[ptr + 10] & 15) << 8) | p[ptr + 11];
+            for (int i = ptr + 12 + info; i + 5 <= end;)
+            {
+                int type = p[i], pid = ((p[i + 1] & 31) << 8) | p[i + 2];
+                int length = ((p[i + 3] & 15) << 8) | p[i + 4];
+                if (i + 5 + length > end) return false;
+                if ((type == 0x1B || type == 0x24) && pid > 0 && pid < 8191)
+                {
+                    if (videoPid != pid) { haveKey = false; gop.Clear(); gopBytes = 0; }
+                    videoPid = pid; return true;
+                }
+                i += 5 + length;
+            }
+            return false;
         }
 
         void Enqueue(byte[] pkt)
         {
             var q = queue;
-            if (q == null) return;
-            // mai lanciare eccezioni qui: bloccherebbe la lettura della pipe TS e quindi tutta la pipeline
-            try { q.TryAdd(pkt); } catch { }
+            if (q == null || LastError != null) return;
+            // La cattura resta fluida, ma una destinazione bloccata deve dare errore: mai perdere pacchetti in silenzio.
+            try { if (!q.TryAdd(pkt)) Fail("La destinazione non riesce a scrivere abbastanza velocemente (buffer pieno)."); }
+            catch (InvalidOperationException) { if (!muxStopping) Fail("La scrittura del file si è chiusa inaspettatamente."); }
         }
 
         /// <summary>Inizia a registrare: scrive subito dall'ultimo keyframe (nessun frame perso, nessuno scatto).</summary>
         public void Start(string muxArgs)
         {
             Stop(false);
+            Interlocked.Exchange(ref lastError, null); muxStopping = false;
+            Interlocked.Exchange(ref outputTimeUs, 0);
+            Interlocked.Exchange(ref lastOutputTick, Stopwatch.GetTimestamp());
             LastCommand = "ffmpeg " + muxArgs;
             Log?.Invoke("mux: " + LastCommand);
             var psi = FFmpeg.Psi(muxArgs);
-            mux = new Process { StartInfo = psi };
-            mux.ErrorDataReceived += (o, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) Log?.Invoke("mux: " + e.Data); };
-            mux.OutputDataReceived += (o, e) => { };
-            mux.Start();
+            mux = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            var process = mux;
+            string muxDetail = null;
+            mux.ErrorDataReceived += (o, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) { muxDetail = e.Data; Log?.Invoke("mux: " + e.Data); } };
+            mux.OutputDataReceived += (o, e) =>
+            {
+                const string key = "out_time_us=";
+                if (!ReferenceEquals(mux, process) || e.Data == null || !e.Data.StartsWith(key) || !long.TryParse(e.Data.Substring(key.Length), out long t)) return;
+                if (t > Interlocked.Read(ref outputTimeUs))
+                {
+                    Interlocked.Exchange(ref outputTimeUs, t);
+                    Interlocked.Exchange(ref lastOutputTick, Stopwatch.GetTimestamp());
+                }
+            };
+            mux.Exited += (o, e) =>
+            {
+                if (ReferenceEquals(mux, process) && !muxStopping)
+                    Fail("Il processo di registrazione si è arrestato. " + muxDetail);
+            };
+            try { mux.Start(); }
+            catch { mux.Dispose(); mux = null; throw; }
             mux.BeginErrorReadLine(); mux.BeginOutputReadLine();
             try { mux.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { }
 
-            queue = new System.Collections.Concurrent.BlockingCollection<byte[]>(new System.Collections.Concurrent.ConcurrentQueue<byte[]>(), 1_500_000); // ~280 MB max
+            queue = new System.Collections.Concurrent.BlockingCollection<byte[]>(new System.Collections.Concurrent.ConcurrentQueue<byte[]>(), 350_000); // ~66 MB max
             var q = queue; var stdin = mux.StandardInput.BaseStream;
             writer = new Thread(() =>
             {
                 var buf = new byte[PKT * 512]; int used = 0;
                 try
                 {
-                    foreach (var pkt in q.GetConsumingEnumerable())
+                    while (!q.IsCompleted)
                     {
-                        Buffer.BlockCopy(pkt, 0, buf, used, PKT); used += PKT;
-                        if (used == buf.Length || q.Count == 0) { stdin.Write(buf, 0, used); used = 0; if (q.Count == 0) stdin.Flush(); }
+                        if (q.TryTake(out var pkt, 40))
+                        {
+                            Buffer.BlockCopy(pkt, 0, buf, used, PKT); used += PKT;
+                            if (used < buf.Length) continue;
+                        }
+                        if (used > 0) { stdin.Write(buf, 0, used); used = 0; }
                     }
                     if (used > 0) stdin.Write(buf, 0, used);
                     stdin.Flush();
                 }
-                catch (Exception ex) { Log?.Invoke("mux: scrittura interrotta: " + ex.Message); }
+                catch (Exception ex) { if (ReferenceEquals(mux, process)) Fail("Scrittura del file fallita: " + ex.Message); }
                 try { stdin.Close(); } catch { }
             }) { IsBackground = true, Name = "mux-writer" };
             writer.Start();
@@ -626,28 +731,47 @@ namespace VHSCapture
         /// <summary>Ferma: chiude lo stdin del muxer, che finalizza il file. Ritorna true se il muxer è uscito pulito.</summary>
         public bool Stop(bool wait = true)
         {
-            if (recording && wait)
+            muxStopping = true;
+            if (recording && wait && LastError == null)
             {
                 closed.Reset(); closing = true;
                 closed.Wait(1000);          // al massimo un frame
             }
-            recording = false; armed = false; closing = false; closed.Set();
-            pausing = paused = resumeArmed = false;
-            var q = queue; queue = null;
-            try { q?.CompleteAdding(); } catch { }
-            try { writer?.Join(30000); } catch { }
-            writer = null;
-            var m = mux; mux = null;
-            if (m == null) return true;
-            bool ok = true;
-            try
+            System.Collections.Concurrent.BlockingCollection<byte[]> q;
+            lock (this)
             {
-                if (!m.WaitForExit(wait ? 60000 : 5000)) { Log?.Invoke("mux non risponde, chiusura forzata"); try { m.Kill(); } catch { } ok = false; }
-                else ok = m.ExitCode == 0;
+                recording = armed = closing = pausing = paused = resumeArmed = false; closed.Set();
+                q = queue; queue = null;
+                try { q?.CompleteAdding(); } catch { }
             }
-            catch { ok = false; }
-            try { m.Dispose(); } catch { }
-            return ok;
+            var m = mux; var w = writer;
+            bool drained = true;
+            try { drained = w == null || w.Join(wait && LastError == null ? 30000 : 3000); } catch { drained = false; }
+            if (!drained)
+            {
+                Fail("La destinazione non risponde: file chiuso dopo il timeout.");
+                try { m?.Kill(); } catch { }
+                try { drained = w.Join(3000); } catch { }
+            }
+            writer = null;
+            bool ok = drained && LastError == null;
+            if (m != null)
+            {
+                try
+                {
+                    if (!m.WaitForExit(wait ? 60000 : 5000))
+                    {
+                        Fail("Il processo non ha completato la chiusura del file.");
+                        try { m.Kill(); m.WaitForExit(3000); } catch { } ok = false;
+                    }
+                    else if (m.ExitCode != 0) { Fail("Chiusura del file fallita (codice " + m.ExitCode + ")."); ok = false; }
+                }
+                catch { ok = false; }
+                mux = null;
+                try { m.Dispose(); } catch { }
+            }
+            if (drained) q?.Dispose();
+            return ok && LastError == null;
         }
 
         public bool HasBufferedKeyFrame { get { lock (this) return haveKey && pat != null && pmt != null && gop.Count > 0; } }
@@ -664,7 +788,7 @@ namespace VHSCapture
             }
         }
 
-        public bool MuxAlive => mux != null && !mux.HasExited;
+        public bool MuxAlive { get { try { return mux != null && !mux.HasExited; } catch { return false; } } }
     }
 
     // =====================================================================================
@@ -686,8 +810,8 @@ namespace VHSCapture
         public event Action<string, double, double, double, double> AudioLevels;
         public event Action<byte[], int> MonitorData;
         public event Action<EngineStats> Stats;
-        /// <summary>Stato del segnale della sorgente analizzata (2 volte al secondo): vuoto = schermo uniforme di qualsiasi colore.</summary>
-        public event Action<string, bool, string> SignalState;   // id, vuoto, "uniforme"/""
+        /// <summary>Stato della sorgente (2 volte al secondo), confermato su ogni frame: contenuto, verifica o assenza probabile.</summary>
+        public event Action<string, bool, string> SignalState;   // id, assenza confermata, stato
         public event Action<string> Log;
         public event Action<int> Exited;
 
@@ -734,7 +858,7 @@ namespace VHSCapture
             stopping = false;
             runningSources = s.Sources.ToDictionary(x => x.Id, x => x.Clone());
             GpuActive = !GpuDisabled && CanUseQsv(s);
-            inputInfo.Clear(); inputSize.Clear(); sig.Clear(); inInputSection = false;
+            inputInfo.Clear(); inputSize.Clear(); sig.Clear(); audioActivity.Clear(); audioObserved.Clear(); inInputSection = false;
 
             PW = Math.Clamp(previewW / 2 * 2, 480, 1280);
             PreviewRate = double.TryParse(PreviewFps(string.IsNullOrWhiteSpace(s.Fps) ? "25" : s.Fps), NumberStyles.Float, CultureInfo.InvariantCulture, out var pr) && pr > 0 ? pr : 30;
@@ -889,6 +1013,7 @@ namespace VHSCapture
         public void StartRecording(AppSettings s, string outputFile)
         {
             if (!IsRunning) throw new InvalidOperationException("Pipeline non avviata");
+            if (!recorder.HasBufferedKeyFrame) throw new InvalidOperationException("Il grabber non ha ancora fornito un fotogramma completo. Attendi l'anteprima e riprova.");
             recorder.Start(MuxArgs(s, outputFile));
         }
 
@@ -899,7 +1024,7 @@ namespace VHSCapture
 
         static string MuxArgs(AppSettings s, string outputFile)
         {
-            var sb = new StringBuilder("-hide_banner -loglevel warning -y -fflags +genpts+discardcorrupt -probesize 5M -analyzeduration 2M -f mpegts -i pipe:0 -map 0 -c copy ");
+            var sb = new StringBuilder("-hide_banner -loglevel warning -nostats -progress pipe:1 -stats_period 0.5 -n -fflags +genpts+discardcorrupt -probesize 5M -analyzeduration 2M -f mpegts -i pipe:0 -map 0 -c copy -bsf:a aac_adtstoasc ");
             bool mkv = outputFile.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
             string movflags = s.FragmentedMp4 && !mkv ? "+frag_keyframe+empty_moov+default_base_moof" : null;
             if (s.SplitMinutes > 0 && !mkv)
@@ -1139,7 +1264,13 @@ namespace VHSCapture
             var m = meters.GetOrAdd(id, _ => new MeterState());
             if (line.StartsWith("frame:"))
             {
-                if (m.any) AudioLevels?.Invoke(id, m.rl, m.pl, m.rr, m.pr);
+                if (m.any)
+                {
+                    audioObserved[id] = signalClock.Elapsed.TotalSeconds;
+                    if (Math.Max(m.pl, m.pr) > -48 && Math.Max(m.rl, m.rr) > -60)
+                        audioActivity[id] = signalClock.Elapsed.TotalSeconds;
+                    AudioLevels?.Invoke(id, m.rl, m.pl, m.rr, m.pr);
+                }
                 m.rl = m.pl = m.rr = m.pr = -90; m.any = false;
                 return;
             }
@@ -1177,44 +1308,45 @@ namespace VHSCapture
             }
         }
 
-        class SigState { public double yl, yh, ul, uh, vl, vh; public int seen; public DateTime lastEmit; }
+        class SigState
+        {
+            public readonly double[] values = new double[NoSignalDetector.Keys.Length];
+            public readonly NoSignalDetector detector = new NoSignalDetector();
+            public int seen;
+            public double lastEmit = -1;
+        }
         readonly ConcurrentDictionary<string, SigState> sig = new ConcurrentDictionary<string, SigState>();
-
-        // Misura la variazione spaziale delle tre componenti, senza vincoli sul colore medio.
-        public static bool IsUniformSignal(double yl, double yh, double ul, double uh, double vl, double vh) =>
-            double.IsFinite(yl) && double.IsFinite(yh) && double.IsFinite(ul) && double.IsFinite(uh) &&
-            double.IsFinite(vl) && double.IsFinite(vh) &&
-            yh >= yl && yh - yl <= 12 && uh >= ul && uh - ul <= 10 && vh >= vl && vh - vl <= 10;
+        readonly ConcurrentDictionary<string, double> audioActivity = new ConcurrentDictionary<string, double>();
+        readonly ConcurrentDictionary<string, double> audioObserved = new ConcurrentDictionary<string, double>();
+        readonly Stopwatch signalClock = Stopwatch.StartNew();
 
         void OnAnalysisLine(string id, string line)
         {
             var g = sig.GetOrAdd(id, _ => new SigState());
-            if (line.StartsWith("frame:"))
+            lock (g)
             {
-                OnFrameLine(line);
-                bool due = (DateTime.Now - g.lastEmit).TotalMilliseconds >= 500;
-                if (g.seen != 0 && due)
+                if (line.StartsWith("frame:"))
                 {
-                    // Tutti i sei valori devono appartenere allo stesso frame: niente dati vecchi o incompleti.
-                    bool uniform = g.seen == 63 && IsUniformSignal(g.yl, g.yh, g.ul, g.uh, g.vl, g.vh);
-                    SignalState?.Invoke(id, uniform, uniform ? "uniforme" : "");
-                    g.lastEmit = DateTime.Now;
+                    OnFrameLine(line);
+                    double now = signalClock.Elapsed.TotalSeconds;
+                    bool audio = audioActivity.TryGetValue(id, out double active) && now - active < 3;
+                    bool audioKnown = !runningSources.TryGetValue(id, out var source) || !source.HasAudio ||
+                        audioObserved.TryGetValue(id, out double observed) && now - observed < 2;
+                    string state = g.detector.Observe(audioKnown && g.seen == (1 << NoSignalDetector.Keys.Length) - 1 ? g.values : null, now, audio);
+                    if (now - g.lastEmit >= .5)
+                    {
+                        SignalState?.Invoke(id, state == "assenza probabile", state);
+                        g.lastEmit = now;
+                    }
+                    g.seen = 0;
+                    return;
                 }
-                g.seen = 0;
-                return;
-            }
-            const string k = "lavfi.signalstats.";
-            if (!line.StartsWith(k)) return;
-            int eq = line.IndexOf('='); if (eq < 0) return;
-            if (!double.TryParse(line.Substring(eq + 1), NumberStyles.Float, CultureInfo.InvariantCulture, out double v)) return;
-            switch (line.Substring(k.Length, eq - k.Length))
-            {
-                case "YLOW": g.yl = v; g.seen |= 1; break;
-                case "YHIGH": g.yh = v; g.seen |= 2; break;
-                case "ULOW": g.ul = v; g.seen |= 4; break;
-                case "UHIGH": g.uh = v; g.seen |= 8; break;
-                case "VLOW": g.vl = v; g.seen |= 16; break;
-                case "VHIGH": g.vh = v; g.seen |= 32; break;
+                const string k = "lavfi.signalstats.";
+                if (!line.StartsWith(k)) return;
+                int eq = line.IndexOf('='); if (eq < 0) return;
+                int index = Array.IndexOf(NoSignalDetector.Keys, line.Substring(k.Length, eq - k.Length));
+                if (index < 0 || !double.TryParse(line.Substring(eq + 1), NumberStyles.Float, CultureInfo.InvariantCulture, out double v)) return;
+                g.values[index] = v; g.seen |= 1 << index;
             }
         }
 
@@ -1399,7 +1531,7 @@ namespace VHSCapture
                         // (per capire se lo schermo è uniforme non serve deinterlacciare). Sempre a piena velocità della sorgente:
                         // un'uscita decimata (es. 2 fps) resta indietro e ffmpeg 7 frena tutte le altre → anteprima a raffiche.
                         graph.Append($"[{i}:v]split=2[cs{k}][an{k}];");
-                        graph.Append($"[an{k}]crop=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT},scale=64:36:flags=area,signalstats," +
+                        graph.Append($"[an{k}]crop=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT},scale=192:108:flags=area,format=yuv444p,signalstats," +
                                      $"metadata=mode=print:direct=1:file={PipeNames.InFilter(anPipe)}[ano{k}];");
                         analysisLabels.Add($"[ano{k}]");
                         i = -1;   // l'ingresso della catena ora è [cs{k}]

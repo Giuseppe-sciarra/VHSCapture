@@ -24,7 +24,7 @@ namespace VHSCapture
         // Audio
         NumericUpDown nAudioBr; CheckBox chkMono; ComboBox cbMonDev;
         // Avanzate
-        CheckBox chkLive, chkPrio, chkDiag;
+        CheckBox chkLive, chkPrio, chkDiag, chkSmooth;
         // Fine cassetta
         CheckBox chkAutoStop, chkTrim, chkAskName; NumericUpDown nAutoSec;
 
@@ -267,6 +267,7 @@ namespace VHSCapture
             var p = Page("Avanzate");
             var a = Section(p, "Prestazioni");
             chkPrio = Check(a, "Priorità alta a ffmpeg", "Come la priorità del processo di OBS: meno frame persi se il PC fa altro.");
+            chkSmooth = Check(a, "Anteprima fluida (tutti i fotogrammi)", "Spenta: sopra i 30 fps l'anteprima mostra un fotogramma sì e uno no (50 → 25), sempre regolare, con meno CPU. La registrazione è sempre completa.");
             chkDiag = Check(a, "Diagnostica dell'anteprima nel Log ogni 5 s", "Serve solo per capire eventuali scatti dell'anteprima.");
             chkLive = Check(a, "Modifiche delle sorgenti al volo (zmq)", FFmpeg.HasZmq ? "Sposta, ritaglia e regola i colori senza riavviare l'anteprima." : "ffmpeg senza zmq: ogni modifica riavvia l'anteprima.");
         }
@@ -317,6 +318,7 @@ namespace VHSCapture
             nAutoSec.Enabled = chkTrim.Enabled = chkAutoStop.Checked;
             chkLive.Checked = s.LiveControl;
             chkDiag.Checked = s.DiagLog;
+            chkSmooth.Checked = s.SmoothPreview;
             UpdateEnabled();
         }
 
@@ -362,6 +364,7 @@ namespace VHSCapture
             s.AskNameAtEnd = chkAskName.Checked;
             s.LiveControl = chkLive.Checked;
             s.DiagLog = chkDiag.Checked;
+            s.SmoothPreview = chkSmooth.Checked;
             s.Save();
             return true;
         }

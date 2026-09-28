@@ -709,7 +709,7 @@ namespace VHSCapture
             inputInfo.Clear(); inputSize.Clear(); inInputSection = false;
 
             PW = Math.Clamp(previewW / 2 * 2, 480, 1280);
-            PreviewRate = double.TryParse(PreviewFps(string.IsNullOrWhiteSpace(s.Fps) ? "25" : s.Fps), NumberStyles.Float, CultureInfo.InvariantCulture, out var pr) && pr > 0 ? pr : 30;
+            PreviewRate = double.TryParse(PreviewFps(string.IsNullOrWhiteSpace(s.Fps) ? "25" : s.Fps, s.SmoothPreview), NumberStyles.Float, CultureInfo.InvariantCulture, out var pr) && pr > 0 ? pr : 30;
             PH = Math.Max(2, (int)Math.Round((double)PW * s.CanvasH / s.CanvasW / 2) * 2);
 
             int n = Interlocked.Increment(ref pipeCounter);
@@ -720,6 +720,7 @@ namespace VHSCapture
             activeIds = new HashSet<string>(s.Sources.Where(x => x.Visible && IsUsable(x)).Select(x => x.Id));
             var audioIds = s.Sources.Where(x => x.Visible && IsUsable(x) && x.HasAudio).Select(x => x.Id).ToList();
             activeAudioIds = new HashSet<string>(audioIds);
+            colorIds = new HashSet<string>(s.Sources.Where(x => x.Visible && x.Type == SourceType.Capture && !x.ColorIsNeutral).Select(x => x.Id));
             bool mon = monitor && audioIds.Count > 0;
             hasMix = audioIds.Count > 0;
 
@@ -748,6 +749,9 @@ namespace VHSCapture
                 kv => Enumerable.Range(0, meterInstances).Select(_ => NewPipe(kv.Value, 256 << 10, meterInstances)).ToList());
 
             string args = BuildArgs(s, PW, PH, zmqPort, names, out inputMap);
+            fastIdRunning = FastPathId;
+            var fs = s.Sources.FirstOrDefault(x => x.Id == fastIdRunning);
+            if (fs != null) { lastFastX = fs.X; lastFastY = fs.Y; lastFastW = fs.W; lastFastH = fs.H; }
             LastCommand = "ffmpeg " + args;
             Log?.Invoke(LastCommand);
 
@@ -898,7 +902,21 @@ namespace VHSCapture
 
         public void ApplyTransform(Source src)
         {
-            if (!LiveControl || !activeIds.Contains(src.Id)) return;
+            if (!activeIds.Contains(src.Id)) return;
+            if (fastIdRunning == src.Id)
+            {
+                // percorso veloce: posizione e dimensione sono fisse nel grafo → basta un riavvio (il ritaglio invece va al volo)
+                if (LiveControl && src.Type == SourceType.Capture)
+                {
+                    zmq.Queue(src.Id + ":cw", $"crop@s{src.Id} w iw-{src.CropL + src.CropR}");
+                    zmq.Queue(src.Id + ":ch", $"crop@s{src.Id} h ih-{src.CropT + src.CropB}");
+                    zmq.Queue(src.Id + ":cx", $"crop@s{src.Id} x {src.CropL}");
+                    zmq.Queue(src.Id + ":cy", $"crop@s{src.Id} y {src.CropT}");
+                }
+                if (src.X != lastFastX || src.Y != lastFastY || src.W != lastFastW || src.H != lastFastH) NeedsRestart?.Invoke();
+                return;
+            }
+            if (!LiveControl) return;
             zmq.Queue(src.Id + ":w", $"scale@s{src.Id} w {src.W}");
             zmq.Queue(src.Id + ":h", $"scale@s{src.Id} h {src.H}");
             zmq.Queue(src.Id + ":x", $"overlay@s{src.Id} x {src.X}");
@@ -912,8 +930,22 @@ namespace VHSCapture
             }
         }
 
+        /// <summary>Scatta quando un cambio colore richiede di riavviare l'anteprima (i filtri colore non erano attivi).</summary>
+        public event Action NeedsRestart;
+        /// <summary>Id della sorgente composta col percorso veloce (pad), o null se si usa la composizione completa.</summary>
+        [ThreadStatic] static string fastPathIdTls;
+        static string FastPathId { get => fastPathIdTls; set => fastPathIdTls = value; }
+        string fastIdRunning;
+        int lastFastX, lastFastY, lastFastW, lastFastH;
+        HashSet<string> colorIds = new HashSet<string>();
+
         public void ApplyColor(Source src)
         {
+            if (src.Type == SourceType.Capture && !colorIds.Contains(src.Id))
+            {
+                if (!src.ColorIsNeutral && activeIds.Contains(src.Id)) NeedsRestart?.Invoke();
+                return;
+            }
             if (!LiveControl || !activeIds.Contains(src.Id)) return;
             var ci = CultureInfo.InvariantCulture;
             if (src.Type == SourceType.Capture)
@@ -1237,10 +1269,16 @@ namespace VHSCapture
 
             sb.Append($"-hide_banner -y -loglevel info -nostats -progress \"{PipeNames.Win(pn.Progress)}\" -stats_period 1 ");
             sb.Append($"-filter_complex_threads {Math.Clamp(Environment.ProcessorCount, 2, 8)} ");
-            sb.Append($"-f lavfi -i color=c=black:s={s.CanvasW}x{s.CanvasH}:r={fps} ");
+            // PERCORSO VELOCE (caso normale: solo il grabber) → niente canvas nero + overlay a ogni fotogramma,
+            // basta aggiungere le bande con pad. Misurato su ffmpeg 7: overlay ≈ 19% di un core, pad ≈ 4%.
+            var usable = visible.Where(x => x.Type != SourceType.Capture || !string.IsNullOrWhiteSpace(x.VideoDevice)).ToList();
+            var only = usable.Count == 1 && usable[0].Type == SourceType.Capture ? usable[0] : null;
+            bool fast = only != null && only.X >= 0 && only.Y >= 0 && only.X + only.W <= s.CanvasW && only.Y + only.H <= s.CanvasH;
+            FastPathId = fast ? only.Id : null;
+            if (!fast) sb.Append($"-f lavfi -i color=c=black:s={s.CanvasW}x{s.CanvasH}:r={fps} ");
 
             var idx = new Dictionary<Source, int>();
-            int n = 1;
+            int n = fast ? 0 : 1;
             foreach (var src in visible)
             {
                 switch (src.Type)
@@ -1274,7 +1312,8 @@ namespace VHSCapture
 
             string cur = "[0:v]";
             // indirizzo con ':' escapati due volte (grafo + opzione) → tcp://127.0.0.1:porta (verificato su ffmpeg)
-            if (zmqPort > 0) { graph.Append($"[0:v]zmq=b=tcp\\\\://127.0.0.1\\\\:{zmqPort}[base];"); cur = "[base]"; }
+            string zmqFilter = zmqPort > 0 ? $"zmq=b=tcp\\\\://127.0.0.1\\\\:{zmqPort}" : null;
+            if (zmqFilter != null && !fast) { graph.Append($"[0:v]{zmqFilter}[base];"); cur = "[base]"; }
 
             int k = 0;
             var analysisLabels = new List<string>();
@@ -1284,24 +1323,26 @@ namespace VHSCapture
                 var chain = new List<string>();
                 if (src.Type == SourceType.Capture)
                 {
+                    if (pn.Analysis.TryGetValue(src.Id, out var anPipe))
+                    {
+                        // ramo di analisi per la fine cassetta PRIMA del deinterlaccio: 25 fotogrammi al secondo invece di 50
+                        // (per capire se lo schermo è blu non serve deinterlacciare). Sempre a piena velocità della sorgente:
+                        // un'uscita decimata (es. 2 fps) resta indietro e ffmpeg 7 frena tutte le altre → anteprima a raffiche.
+                        graph.Append($"[{i}:v]split=2[cs{k}][an{k}];");
+                        graph.Append($"[an{k}]crop=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT},scale=64:36:flags=area,signalstats," +
+                                     $"metadata=mode=print:direct=1:file={PipeNames.InFilter(anPipe)}[ano{k}];");
+                        analysisLabels.Add($"[ano{k}]");
+                        i = -1;   // l'ingresso della catena ora è [cs{k}]
+                    }
                     var d = DeintFilter(src.DeinterlaceMode);
                     if (d != null) chain.Add(d);
                     chain.Add($"crop@s{src.Id}=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT}:exact=1");
-                    if (pn.Analysis.TryGetValue(src.Id, out var anPipe))
+                    // correzione colore solo se serve: con i valori neutri eq e hue lavorano per niente a ogni fotogramma
+                    if (!src.ColorIsNeutral)
                     {
-                        // ramo di analisi per la fine cassetta: 2 fps, 64x36, statistiche del segnale → pipe
-                        graph.Append($"[{i}:v]{string.Join(",", chain)},split=2[cs{k}][an{k}];");
-                        // A PIENA VELOCITÀ: un'uscita a 2 fps resta indietro fino a 500 ms e ffmpeg 7 frena tutte le altre
-                        // per tenerle allineate → anteprima a raffiche (misurato: pause di 498 ms contro 35 ms così).
-                        // Su 64x36 costa pochissimo; il campionamento a 2/s lo fa l'app.
-                        graph.Append($"[an{k}]scale=64:36:flags=area,signalstats,metadata=mode=print:direct=1:file={PipeNames.InFilter(anPipe)}[ano{k}];");
-                        analysisLabels.Add($"[ano{k}]");
-                        chain.Clear();
-                        chain.Add("null");
-                        i = -1;   // l'ingresso della catena ora è [cs{k}]
+                        chain.Add($"eq@s{src.Id}=brightness={F(src.Brightness)}:contrast={F(src.Contrast)}:saturation={F(src.Saturation)}:gamma={F(src.Gamma)}");
+                        chain.Add($"hue@s{src.Id}=h={F(src.Hue, "0.#")}");
                     }
-                    chain.Add($"eq@s{src.Id}=brightness={F(src.Brightness)}:contrast={F(src.Contrast)}:saturation={F(src.Saturation)}:gamma={F(src.Gamma)}");
-                    chain.Add($"hue@s{src.Id}=h={F(src.Hue, "0.#")}");
                 }
                 else
                 {
@@ -1310,14 +1351,29 @@ namespace VHSCapture
                 }
                 chain.Add($"scale@s{src.Id}=w={Math.Max(2, src.W)}:h={Math.Max(2, src.H)}:flags={ScaleFlags(src.ScaleFilter)}:eval=frame");
                 string inLabel = i >= 0 ? $"[{i}:v]" : $"[cs{k}]";
-                graph.Append($"{inLabel}{string.Join(",", chain)}[v{k}];");
-                graph.Append($"{cur}[v{k}]overlay@s{src.Id}=x={src.X}:y={src.Y}:eof_action=pass:format=yuv420[t{k}];");
+                if (fast)
+                {
+                    // bande nere con pad: dimensioni e posizione pari (yuv420)
+                    int w2 = Math.Max(2, src.W) & ~1, h2 = Math.Max(2, src.H) & ~1, x2 = Math.Max(0, src.X) & ~1, y2 = Math.Max(0, src.Y) & ~1;
+                    if (x2 + w2 > s.CanvasW) x2 = (s.CanvasW - w2) & ~1;
+                    if (y2 + h2 > s.CanvasH) y2 = (s.CanvasH - h2) & ~1;
+                    chain[chain.Count - 1] = $"scale@s{src.Id}=w={w2}:h={h2}:flags={ScaleFlags(src.ScaleFilter)}";
+                    if (zmqFilter != null) chain.Insert(0, zmqFilter);   // il controllo live (ritaglio, colore) resta
+                    chain.Add($"pad=w={s.CanvasW}:h={s.CanvasH}:x={x2}:y={y2}:color=black");
+                    chain.Add("format=yuv420p");
+                    graph.Append($"{inLabel}{string.Join(",", chain)}[t{k}];");
+                }
+                else
+                {
+                    graph.Append($"{inLabel}{string.Join(",", chain)}[v{k}];");
+                    graph.Append($"{cur}[v{k}]overlay@s{src.Id}=x={src.X}:y={src.Y}:eof_action=pass:format=yuv420[t{k}];");
+                }
                 cur = $"[t{k}]";
                 k++;
             }
 
             // video: canvas → encoder (sempre) + anteprima
-            string pvFps = PreviewFps(fps);
+            string pvFps = PreviewFps(fps, s.SmoothPreview);
             graph.Append($"{cur}fps={fps},format=yuv420p,split=2[venc][pv];[pv]fps={pvFps},scale={pw}:{ph}:flags=fast_bilinear,format=bgra[pvs];");
 
             // audio: per sorgente → misuratore (pipe propria) + ramo di mix con muto → encoder (+ ascolto)
@@ -1367,10 +1423,16 @@ namespace VHSCapture
             return sb.ToString();
         }
 
-        static string PreviewFps(string fps)
+        /// <summary>
+        /// Anteprima leggera (predefinita): sopra i 30 fps si mostra un fotogramma sì e uno no (50 → 25, 59,94 → 29,97),
+        /// sempre a ritmo regolare. È la parte più pesante di tutta la pipeline e serve solo per guardare.
+        /// </summary>
+        static string PreviewFps(string fps, bool smooth = false)
         {
-            if (double.TryParse(fps, NumberStyles.Float, CultureInfo.InvariantCulture, out double f) && f > 60) return "60";
-            return fps;
+            if (!double.TryParse(fps, NumberStyles.Float, CultureInfo.InvariantCulture, out double f) || f <= 0) return fps;
+            if (f > 60) f = 60;
+            if (!smooth && f > 30) f /= 2;
+            return f.ToString("0.###", CultureInfo.InvariantCulture);
         }
 
         static string EncoderArgs(AppSettings s, string fps)

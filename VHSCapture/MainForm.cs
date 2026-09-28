@@ -74,6 +74,8 @@ namespace VHSCapture
             engine.FrameAvailable += () => canvas?.NotifyFrame();
             engine.AudioLevels += (id, rl, pl, rr, pr) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (mixerRows.TryGetValue(id, out var row)) row.Meter.SetLevels(rl, pl, rr, pr); })); } catch { } };
             engine.Stats += st => lastStats = st;
+            // spostamenti/colore che il grafo attuale non può applicare al volo: riavvio breve dell'anteprima
+            engine.NeedsRestart += () => { if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (!engine.IsRecording) ScheduleRestart(); else AppendLog("La modifica si applica alla fine della registrazione"); })); } catch { } };
             engine.SignalState += (id, blank, kind) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => OnSignal(blank, kind))); } catch { } };
             engine.MonitorData += (d, n) => monitor.Add(d, n);
             engine.Log += l => { lock (runLog) { if (runLog.Length < 20000) runLog.AppendLine(l); } AppendLog(l); };

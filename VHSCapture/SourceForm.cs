@@ -605,9 +605,12 @@ namespace VHSCapture
             foreach (var m in modes) if (!devSizes.Contains(m.Size)) devSizes.Add(m.Size);
             if (lblModes != null)
             {
-                var best = modes.OrderByDescending(m => m.MaxFps).ThenByDescending(m => m.Size.Length).Take(8)
-                                .Select(m => $"{(m.Format == "mjpeg" ? "MJPEG" : m.Format.ToUpperInvariant())} {m.Size}@{m.MaxFps:0.##}");
-                lblModes.Text = modes.Count > 0 ? "Il dispositivo supporta: " + string.Join(" · ", best) : "Modalità del dispositivo non lette (in uso o non dichiarate).";
+                // TUTTE le risoluzioni, dalla più grande (prima ne mostravo 8 ordinate per fps e le 720×576 a 25 fps restavano fuori)
+                int Px(string sz) { var q = sz.Split('x'); return q.Length == 2 && int.TryParse(q[0], out int a) && int.TryParse(q[1], out int b) ? a * b : 0; }
+                var sizes = modes.GroupBy(m => m.Size).OrderByDescending(g => Px(g.Key))
+                                 .Select(g => g.Key.Replace("x", "×") + (g.Any(m => m.Format == "mjpeg") ? " (MJPEG)" : ""));
+                var fmts = string.Join("/", modes.Select(m => m.Format == "mjpeg" ? "MJPEG" : m.Format.ToUpperInvariant()).Distinct());
+                lblModes.Text = modes.Count > 0 ? $"Il dispositivo supporta ({fmts}): " + string.Join(" · ", sizes) : "Modalità del dispositivo non lette (in uso o non dichiarate).";
             }
             var found = new List<string>(devSizes);
             bool deviceKnown = devSizes.Count > 0;

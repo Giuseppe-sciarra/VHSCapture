@@ -173,6 +173,7 @@ namespace VHSCapture
 
         // Video
         public string Encoder { get; set; } = "libx264";       // libx264, h264_nvenc, h264_qsv, h264_amf
+        public bool EncoderUserSet { get; set; } = false;      // false = l'app sceglie da sola l'encoder hardware migliore
         public string RateControl { get; set; } = "CBR";       // CBR, VBR, CRF
         public int VideoBitrate { get; set; } = 12000;         // kbps
         public int Crf { get; set; } = 18;

@@ -98,7 +98,7 @@ namespace VHSCapture
                     MessageBox.Show(this, "ffmpeg.exe non trovato accanto a VHSCapture.exe.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
-                if (settings.Sources.Count == 0) AddSource(SourceType.Capture);
+                if (settings.Sources.Count == 0) AutoAddGrabber();
                 else StartPreview();
                 CheckEncoderAsync();
             };
@@ -971,14 +971,70 @@ namespace VHSCapture
 
         async void CheckEncoderAsync()
         {
-            var list = await Task.Run(() => FFmpeg.ListWorkingH264Encoders());
+            var list = await Task.Run(() => FFmpeg.ListWorkingH264Encoders());   // già ordinato: hardware prima
             AppendLog("Encoder funzionanti su questo PC: " + string.Join(", ", list));
+            string pick = null;
             if (!list.Contains(settings.Encoder))
             {
                 AppendLog($"L'encoder {settings.Encoder} non funziona su questo PC: passo a {list[0]}");
-                settings.Encoder = list[0];
-                settings.Save();
+                pick = list[0];
             }
+            else if (!settings.EncoderUserSet && settings.Encoder == "libx264" && list[0] != "libx264")
+            {
+                // l'encoder è sempre acceso: quello software pesa sulla CPU anche in anteprima. Uso quello della scheda video (come OBS).
+                AppendLog($"Uso l'encoder hardware {EncName(list[0])} invece di x264: molta meno CPU. Si cambia in Impostazioni → Registrazione.");
+                pick = list[0];
+            }
+            if (pick != null)
+            {
+                settings.Encoder = pick;
+                settings.Save();
+                if (engine.IsRunning && !engine.IsRecording) StartPreview();
+            }
+        }
+
+        static string EncName(string e) => e switch { "h264_nvenc" => "NVIDIA NVENC", "h264_qsv" => "Intel QuickSync", "h264_amf" => "AMD AMF", _ => "x264 (CPU)" };
+
+        /// <summary>
+        /// Primo avvio (nessuna sorgente): aggiungo da solo il grabber con lo standard PAL, senza aprire finestre.
+        /// Video: il dispositivo che non sembra una webcam; audio: quello che ha lo stesso nome (es. "USB 2828x").
+        /// </summary>
+        void AutoAddGrabber()
+        {
+            var (videos, audios) = FFmpeg.ListDevices();
+            if (videos.Count == 0)
+            {
+                canvas.Message = "Nessun grabber trovato: collegalo e premi ＋ in Sorgenti";
+                canvas.Invalidate();
+                AppendLog("Nessun dispositivo video trovato");
+                return;
+            }
+            bool LooksLikeCam(string n) => System.Text.RegularExpressions.Regex.IsMatch(n, "camera|webcam|integrated|facetime|ir |obs virtual", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            string video = videos.FirstOrDefault(v => !LooksLikeCam(v)) ?? videos[0];
+
+            // audio: la parola più "caratteristica" del nome video (es. "2828x") presente anche nel nome audio
+            string audio = "";
+            var tokens = System.Text.RegularExpressions.Regex.Split(video, @"[^A-Za-z0-9]+")
+                           .Where(t => t.Length >= 3 && !new[] { "usb", "device", "video", "capture" }.Contains(t.ToLowerInvariant()))
+                           .OrderByDescending(t => t.Any(char.IsDigit)).ToList();
+            foreach (var t in tokens)
+            {
+                var m = audios.FirstOrDefault(a => a.IndexOf(t, StringComparison.OrdinalIgnoreCase) >= 0);
+                if (m != null) { audio = m; break; }
+            }
+
+            var src = new Source { Type = SourceType.Capture, Name = "Grabber USB", VideoDevice = video, AudioDevice = audio };
+            var v = VideoStandard.PAL;
+            src.InputSize = v.Size; src.InputFps = v.InFps; src.DeinterlaceMode = v.Deint; src.CropB = v.CropB;
+            src.Locked = true;
+            settings.CanvasW = 1920; settings.CanvasH = 1080; settings.Fps = v.CanvasFps;
+            canvas.CanvasW = 1920; canvas.CanvasH = 1080;
+            src.FitTo(settings.CanvasW, settings.CanvasH);
+            settings.Sources.Add(src);
+            settings.Save();
+            RefreshSourceList(); RebuildMixer();
+            AppendLog($"Sorgente aggiunta da sola: video \"{video}\", audio \"{(audio == "" ? "nessuno" : audio)}\", standard PAL. Doppio clic sulla sorgente per cambiare.");
+            StartPreview();
         }
 
         /// <summary>Rinomina la registrazione in "Nome cassetta.mp4" (o Nome_000.mp4… se divisa). Mai sovrascrivere: aggiunge (2), (3)…</summary>
@@ -1164,7 +1220,7 @@ namespace VHSCapture
                 }
                 if (st != null && (st.Drop > 0 || st.Dup > 0)) parts.Add($"persi {st.Drop} · duplicati {st.Dup}");
                 parts.Add($"CPU ffmpeg {lastCpu:0}%");
-                if (engine.IsRecording) parts.Add(enc);
+                parts.Add(EncName(settings.Encoder));
             }
             // spazio libero e tempo di registrazione residuo (come le Statistiche di OBS)
             if ((DateTime.Now - lastDiskCheck).TotalSeconds > 5) { lastFree = FreeBytes(settings.ResolvedOutputFolder()); lastDiskCheck = DateTime.Now; }

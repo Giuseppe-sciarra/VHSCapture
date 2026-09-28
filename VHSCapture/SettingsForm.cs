@@ -342,7 +342,9 @@ namespace VHSCapture
             s.SafeRecording = cbFormat.SelectedIndex == 2;
             s.FragmentedMp4 = cbFormat.SelectedIndex == 1;
             s.SplitMinutes = (int)nSplit.Value;
-            s.Encoder = EncFromLabel(cbEncoder.Text);
+            var enc = EncFromLabel(cbEncoder.Text);
+            if (enc != s.Encoder) s.EncoderUserSet = true;   // da qui in poi l'encoder lo decide l'utente
+            s.Encoder = enc;
             s.RateControl = string.IsNullOrEmpty(cbRc.Text) ? "CBR" : cbRc.Text;
             s.VideoBitrate = (int)nBitrate.Value;
             s.Crf = (int)nCrf.Value;

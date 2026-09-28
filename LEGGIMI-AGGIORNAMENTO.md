@@ -2,6 +2,21 @@
 
 Questo pacchetto contiene esclusivamente il progetto, le risorse dell'interfaccia, i test e il workflow GitHub Actions. Non contiene eseguibili, FFmpeg, runtime, SDK o cartelle di compilazione. Caricare il contenuto della cartella VHSCapture-main nella radice del repository, compresa `.github`: il workflow compila Windows e prepara la release.
 
+## Correzione del pacchetto FFmpeg per GTX 745
+
+L'errore `Cannot load cuMemAllocAsync` arriva dal caricamento delle funzioni del driver, prima che NVENC possa codificare. Il driver Windows Update **431.07** segnalato dall'utente è troppo vecchio per la funzione richiesta. Su **GTX 745 e Windows 11**, installare il driver ufficiale NVIDIA **582.66**, quindi riavviare.
+
+C'era anche un problema nella distribuzione: il workflow scaricava sempre l'ultimo FFmpeg. La build 9.0.2 verificata richiede per NVENC il driver **610.00**. Il driver 582.66 della GTX 745 non soddisfa quel requisito.
+
+Il workflow ora usa la build fissa **FFmpeg 8.0.1 essentials**, con requisito NVENC **570.0**, e ne verifica il checksum SHA-256 prima di includerla nella release. Il driver 582.66 soddisfa quel requisito di versione. Aggiornare i sorgenti su GitHub e usare la release appena generata: ricompilare solo l'app lasciando accanto il vecchio FFmpeg 9.0.2 non applica questa correzione.
+
+Dopo aver aggiornato driver e programma, aprire **Impostazioni → Registrazione → Verifica encoder** e scegliere NVIDIA NVENC quando l'esito è pronto. Il file `.github/ffmpeg-windows.json` descrive la dipendenza; la release contiene una sua copia come `ffmpeg-build.json`.
+
+La verifica locale ha controllato archivio, checksum, versione e requisiti del binario Windows. La prova hardware sulla GTX 745 resta da eseguire sul PC interessato. Nessuna modifica ai filtri Intel, ai rilevatori del segnale o al registratore in questa correzione.
+
+- [Driver NVIDIA 582.66: Windows 11 e GTX 745 inclusi](https://www.nvidia.com/Download/driverResults.aspx/272768/en-us/1000/)
+- [Release FFmpeg 8.0.1 usata dal workflow](https://github.com/GyanD/codexffmpeg/releases/tag/8.0.1)
+
 ## Rilevamento NVIDIA e scelta dell'encoder
 
 NVIDIA NVENC ora resta nell'elenco con un esito esplicito: pronto oppure non disponibile. Il riquadro mostra la risposta della prova FFmpeg, oppure segnala che questo FFmpeg non include l'encoder. La presenza nella lista da sola non indica che una scheda NVIDIA sia stata rilevata o sia utilizzabile.

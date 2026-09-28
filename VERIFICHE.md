@@ -1,5 +1,13 @@
 # Verifiche dei sorgenti 1.2.1 — 28 settembre 2026
 
+## Aggiornamento della dipendenza NVIDIA
+
+È cambiato il workflow di confezionamento, non il codice C# verificato nella 1.2.1. La build Windows FFmpeg 8.0.1 essentials è stata scaricata dalla release del fornitore. Controllati: CRC dell'archivio, SHA-256 identico al digest pubblicato da GitHub, presenza di un solo ffmpeg.exe, stringa di versione 8.0.1 e requisito NVIDIA 570.0 nel binario. Il binario contiene i filtri/encoder usati dal progetto: vpp_qsv, overlay_qsv, signalstats, metadata, h264_qsv, h264_nvenc e aac_adtstoasc. La build 9.0.2 precedente contiene invece il requisito 610.00.
+
+SHA-256 del download fissato: `e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673`.
+
+Il workflow controlla hash e versione e poi esegue i test del progetto su Windows. Qui il nuovo eseguibile Windows non è stato avviato: controllare le stringhe e il pacchetto non equivale a una prova NVENC o QSV. Restano da verificare l'esecuzione di GitHub Actions e il test dopo aggiornamento del driver sul PC GTX 745.
+
 ## Esito
 
 Compilazione Release `net8.0-windows` con .NET SDK 8.0.425 su macOS ARM: zero errori. Rimangono due avvisi preesistenti, CS0675 sui timestamp e CS0067 sull'evento FrameReady inutilizzato.

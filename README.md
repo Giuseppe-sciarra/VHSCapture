@@ -18,4 +18,4 @@ dotnet run --project tests/PipelineChecks.csproj -c Release
 dotnet publish VHSCapture/VHSCapture.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 ```
 
-Mettere ffmpeg.exe accanto all'eseguibile. Il workflow GitHub Actions esegue i controlli, pubblica il programma e include FFmpeg Gyan essentials.
+Mettere ffmpeg.exe accanto all'eseguibile. Il workflow GitHub Actions esegue i controlli, pubblica il programma e include FFmpeg Gyan essentials 8.0.1, fissato e verificato tramite SHA-256 in `.github/ffmpeg-windows.json`. Per GTX 745 su Windows 11 aggiornare il driver Windows Update 431.07 al driver NVIDIA ufficiale 582.66. La dipendenza fissa evita il requisito NVIDIA 610 introdotto dalla build FFmpeg più recente.

@@ -175,6 +175,7 @@ namespace VHSCapture
         [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr hdc, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
 
         [DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint ms);
+        [DllImport("winmm.dll")] static extern uint timeEndPeriod(uint ms);
 
         /// <summary>
         /// Presentazione a ritmo fisso (come OBS): ogni 1/fps secondi si prende UN frame dalla coda e lo si mostra.
@@ -198,7 +199,9 @@ namespace VHSCapture
                     double interval = 1.0 / rate;
                     double now = clock.Elapsed.TotalSeconds;
                     bool have = src != null && src.ReadyFrames > 0;
-                    int waitMs = have ? (int)Math.Max(0, Math.Floor((next - now) * 1000)) : 100;
+                    // Ceil evita il busy-wait sotto il millisecondo; senza frame né modifiche non c'è polling.
+                    int waitMs = have ? (int)Math.Max(1, Math.Ceiling((next - now) * 1000)) : Timeout.Infinite;
+                    if (uiDirty) waitMs = 0;
                     if (waitMs > 0 || !have) renderSignal.WaitOne(waitMs);
                     if (renderStop) break;
 
@@ -265,6 +268,7 @@ namespace VHSCapture
             finally
             {
                 if (memDC != IntPtr.Zero) { SelectObject(memDC, oldBmp); DeleteObject(memBmp); DeleteDC(memDC); }
+                try { timeEndPeriod(1); } catch { }
             }
         }
 

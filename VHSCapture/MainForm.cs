@@ -34,7 +34,7 @@ namespace VHSCapture
         EngineStats lastStats; double lastCpu;
         RoundedButton btnMonitor;
         bool finalizing, syncingList;
-        int frames; DateTime lastFrameAt = DateTime.MinValue;
+        int frames; DateTime lastFrameAt = DateTime.MinValue, previewStartedAt;
         readonly System.Text.StringBuilder runLog = new System.Text.StringBuilder();
         bool autoRetried, devicesResolved;
         // diagnostica anteprima
@@ -573,10 +573,14 @@ namespace VHSCapture
         {
             if (!FFmpeg.Exists || engine.IsRecording) return;
             restartTimer.Stop();
-            frames = 0; ResetMeters();
+            frames = 0; ResetMeters(); previewStartedAt = DateTime.UtcNow; lastStats = null;
             lock (runLog) runLog.Clear();
             canvas.Message = settings.Sources.Any(x => x.Visible) ? "Avvio anteprima…" : "Nessuna sorgente: premi ＋ per aggiungere il grabber";
             canvas.SetFrame(null);
+            if (!settings.Sources.Any(x => x.Visible && (x.Type == SourceType.Capture ? !string.IsNullOrWhiteSpace(x.VideoDevice) : x.Type != SourceType.Image || File.Exists(x.ImagePath))))
+            {
+                engine.Stop(); monitor.Stop(); SetButtons(); return;
+            }
             try { engine.Start(settings, PreviewWidth(), settings.AudioMonitor); StartMonitorIfNeeded(); }
             catch (Exception ex) { AppendLog("Errore avvio: " + ex.Message); }
             SetButtons();
@@ -663,15 +667,15 @@ namespace VHSCapture
             else if (final.Contains("%03d")) AppendLog("Salvato in più parti: " + string.Join(", ", RecordedFiles(final).Select(Path.GetFileName)));
             else AppendLog("Salvato: " + final);
 
-            // coda blu/nera: se lo stop è automatico la taglio (senza ricodifica)
+            // coda uniforme: se lo stop è automatico la taglio (senza ricodifica)
             string mainFile = RecordedFiles(final).LastOrDefault();
             if (autoStopped && settings.TrimBlankTail && blankStartRecSec > 0 && mainFile != null && !final.Contains("%03d"))
             {
-                lblRec.Text = "Taglio la coda blu…";
+                lblRec.Text = "Taglio la coda uniforme…";
                 // il file parte dal keyframe precedente al clic: margine = intervallo keyframe + 1 s
                 double cut = blankStartRecSec + Math.Max(1, settings.KeyframeSec) + 1;
                 bool ok = await Task.Run(() => FFmpeg.TrimFile(mainFile, cut, AppendLog));
-                AppendLog(ok ? $"Coda blu tagliata: file lungo {TimeSpan.FromSeconds(cut):hh\\:mm\\:ss}" : "Coda blu non tagliata (il file è comunque salvo)");
+                AppendLog(ok ? $"Coda uniforme tagliata: file lungo {TimeSpan.FromSeconds(cut):hh\\:mm\\:ss}" : "Coda uniforme non tagliata (il file è comunque salvo)");
             }
 
             // nome della cassetta: rinomina il file (niente più rinomina a mano in Esplora file)
@@ -712,6 +716,7 @@ namespace VHSCapture
             var r = f.ShowDialog(this);
             Theme.Apply(this, settings.DarkTheme);
             if (r != DialogResult.OK) return;
+            engine.ResetGpuRetry();
             RefreshSourceList(); RebuildMixer();
             canvas.CanvasW = settings.CanvasW; canvas.CanvasH = settings.CanvasH;
             canvas.Invalidate();
@@ -888,8 +893,10 @@ namespace VHSCapture
         void OnEngineExited(int code)
         {
             if (!IsHandleCreated || IsDisposed) return;
+            int runId = engine.RunId;
             BeginInvoke(new Action(() =>
             {
+                if (runId != engine.RunId || IsDisposed) return;
                 if (code != 0 && code != 255 && !finalizing) AppendLog($"ffmpeg terminato con codice {code}");
                 if (!engine.IsRunning && !finalizing)
                 {
@@ -899,7 +906,12 @@ namespace VHSCapture
                         StopRecording(true);
                         return;
                     }
-                    // l'encoder ora è sempre acceso: se non si apre, passo a x264 e riparto
+                    if (engine.GpuActive && !engine.GpuDisabled)
+                    {
+                        RetryGpuPreview();
+                        return;
+                    }
+                    // Se non si apre nemmeno l'encoder, conserva il fallback software esistente.
                     string lg0; lock (runLog) lg0 = runLog.ToString();
                     // paracadute VU: se la pipe dei livelli non si apre, riparto senza misuratori (anteprima e registrazione prima di tutto)
                     if (lg0.Contains("Could not find") && lg0.Contains("device with name") && !devicesResolved)
@@ -976,7 +988,12 @@ namespace VHSCapture
             var list = await Task.Run(() => FFmpeg.ListWorkingH264Encoders());   // già ordinato: hardware prima
             AppendLog("Encoder funzionanti su questo PC: " + string.Join(", ", list));
             string pick = null;
-            if (!list.Contains(settings.Encoder))
+            if (settings.IntelGpu && settings.Encoder != "h264_qsv" && list.Contains("h264_qsv"))
+            {
+                AppendLog("Uso Intel QuickSync H.264 per mantenere filtri ed encoder sulla stessa GPU");
+                pick = "h264_qsv";
+            }
+            else if (!list.Contains(settings.Encoder))
             {
                 AppendLog($"L'encoder {settings.Encoder} non funziona su questo PC: passo a {list[0]}");
                 pick = list[0];
@@ -993,6 +1010,17 @@ namespace VHSCapture
                 settings.Save();
                 if (engine.IsRunning && !engine.IsRecording) StartPreview();
             }
+        }
+
+        void RetryGpuPreview()
+        {
+            if (engine.TryLegacyGpu()) AppendLog("Intel D3D11 non disponibile: provo QuickSync con DXVA2 per i driver meno recenti");
+            else
+            {
+                engine.GpuDisabled = true;
+                AppendLog("Filtri Intel GPU non disponibili: ritorno automatico ai filtri CPU");
+            }
+            StartPreview();
         }
 
         static string EncName(string e) => e switch { "h264_nvenc" => "NVIDIA NVENC", "h264_qsv" => "Intel QuickSync", "h264_amf" => "AMD AMF", _ => "x264 (CPU)" };
@@ -1124,7 +1152,7 @@ namespace VHSCapture
         DateTime lastDiskCheck = DateTime.MinValue, lastCpuSample = DateTime.MinValue; long lastFree = -1;
 
         /// <summary>
-        /// Fine cassetta: se durante la registrazione arriva schermo blu/nero uniforme per N secondi, si ferma da sola.
+        /// Fine cassetta: se durante la registrazione arriva schermo uniforme di qualsiasi colore per N secondi, si ferma da sola.
         /// Si arma solo dopo almeno 10 s di immagine vera, così se premi Registra prima del Play non si ferma subito.
         /// </summary>
         void OnSignal(bool blank, string kind)
@@ -1169,6 +1197,12 @@ namespace VHSCapture
 
         void UpdateStatus()
         {
+            if (!finalizing && !engine.IsRecording && engine.IsRunning && engine.GpuActive &&
+                frames == 0 && (DateTime.UtcNow - previewStartedAt).TotalSeconds > 15)
+            {
+                RetryGpuPreview();
+                return;
+            }
             FitPendingSource();
             foreach (var r in mixerRows.Values) r.RefreshState(engine.IsRunning);
             string enc = settings.Encoder + " " + (settings.RateControl == "CRF" ? $"CRF {settings.Crf}" : $"{settings.RateControl} {settings.VideoBitrate} kbps");
@@ -1177,6 +1211,7 @@ namespace VHSCapture
             {
                 if ((DateTime.Now - lastCpuSample).TotalSeconds >= 1) { lastCpu = engine.CpuPercent(); lastCpuSample = DateTime.Now; }
                 var st = lastStats;
+                parts.Add(engine.GpuActive ? "filtri Intel GPU" : "filtri CPU");
                 if (st != null) parts.Add($"uscita {st.Fps:0.0} fps");
                 // ogni secondo: ritmo di arrivo da ffmpeg e ritmo di disegno a schermo, con la pausa più lunga
                 if ((DateTime.Now - lastDiagAt).TotalSeconds >= 1)

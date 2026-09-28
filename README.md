@@ -1,21 +1,21 @@
 # VHSCapture
 
-Registratore stile OBS ridotto all'osso per riversaggio VHS/cassette/camere da grabber USB (DirectShow).
-Canvas, sorgenti posizionabili, anteprima fluida, ⏺ → MP4 sulla cartella di rete.
+Registratore per riversaggio VHS/cassette/camere da grabber USB DirectShow, con canvas, sorgenti posizionabili, mixer e registrazione H.264/MP4.
 
-## Dall'OBS
-- **Canvas** a risoluzione/fps di uscita (fino a 4K, 23.976–144 fps)
-- **Sorgenti** (＋): grabber USB, immagine, colore. Trascina/ridimensiona, snap, frecce, **Alt+trascina = ritaglio**
-- **Proprietà sorgente** con anteprima live: dispositivo, risoluzione/fps, **formato video (MJPEG/YUY2/NV12)**,
-  modalità dichiarate dal dispositivo, **ingresso effettivo** letto da ffmpeg, **deinterlacciamento Yadif/Yadif 2x/Bwdif/Bwdif 2x**,
-  **filtro di scala**, ritaglio, luminosità/contrasto/saturazione/gamma/tonalità, volume, **ritardo audio**
-- Pagine di configurazione del **driver** (standard video, ingresso composito/S-Video)
-- **Mixer** con VU **stereo L/R** (RMS + picco + peak hold) e **monitoraggio audio** (🎧 Ascolta)
-- **Statistiche**: fps reali, frame persi/duplicati, CPU di ffmpeg, spazio libero e ore di registrazione residue
-- Encoder **NVENC / AMF / QuickSync / x264** (solo quelli che funzionano su quel PC), CBR/VBR/CRF, keyframe ogni 2 s
-- **MP4 frammentato** anti-crash (opzionale), **divisione automatica** dei file, priorità alta, **F9** registra/stop
+La versione 1.1 aggiunge i filtri Intel QuickSync per deinterlacciamento, ingrandimento e bande nere, mantenendo la pipeline completa sempre attiva e l'anteprima a tutti i fotogrammi. L'auto-stop riconosce uno schermo uniforme di qualsiasi colore, compreso il grigio.
 
-## Motore
-Un solo processo ffmpeg compone il canvas, scrive il file e manda anteprima (BGRA) e audio di ascolto
-su named pipe con buffer grande; l'app disegna con StretchDIBits (GDI). Modifiche di posizione/ritaglio/colore/volume
-al volo via filtro `zmq`. Build automatica via GitHub Actions (ffmpeg full di gyan.dev).
+Sono conservati registrazione senza riapertura del grabber, pre-roll, pausa/ripresa, mixer, VU, ascolto, profili PAL/NTSC, crop, correzioni colore, opzioni MP4/MKV e divisione dei file. Le scene non compatibili con i filtri Intel usano il percorso software esistente.
+
+- [Uso e prova sul laboratorio](LEGGIMI-AGGIORNAMENTO.md)
+- [Verifiche e limiti](VERIFICHE.md)
+
+## Build
+
+.NET SDK 8 su Windows:
+
+```text
+dotnet run --project tests/PipelineChecks.csproj -c Release
+dotnet publish VHSCapture/VHSCapture.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
+```
+
+Mettere ffmpeg.exe accanto all'eseguibile. Il workflow GitHub Actions esegue i controlli, pubblica il programma e include FFmpeg Gyan essentials.

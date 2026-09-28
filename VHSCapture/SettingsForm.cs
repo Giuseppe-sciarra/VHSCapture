@@ -24,7 +24,8 @@ namespace VHSCapture
         // Audio
         NumericUpDown nAudioBr; CheckBox chkMono; ComboBox cbMonDev;
         // Avanzate
-        CheckBox chkLive, chkPrio, chkDiag, chkSmooth;
+        CheckBox chkLive, chkPrio, chkDiag, chkIntel;
+        ComboBox cbIntelField;
         // Fine cassetta
         CheckBox chkAutoStop, chkTrim, chkAskName; NumericUpDown nAutoSec;
 
@@ -212,10 +213,10 @@ namespace VHSCapture
             Row(file, "Dividi file ogni (minuti)", nSplit, "0 = no. Utile per chiavette FAT32 (4 GB)");
 
             var fine = Section(p, "Fine cassetta");
-            chkAutoStop = Check(fine, "Ferma da sola quando la cassetta finisce", "Quando il grabber manda schermo blu o nero uniforme (videoregistratore senza segnale). Si attiva solo dopo 10 s di immagine, così se premi Registra prima del Play non si ferma.");
+            chkAutoStop = Check(fine, "Ferma da sola quando la cassetta finisce", "Quando il grabber manda uno schermo uniforme di qualsiasi colore, anche grigio (videoregistratore senza segnale). Si attiva solo dopo 10 s di immagine, così se premi Registra prima del Play non si ferma.");
             nAutoSec = Num(5, 600, 5);
             Row(fine, "Dopo quanti secondi", nAutoSec, "20–30 vanno bene");
-            chkTrim = Check(fine, "Taglia la parte blu finale dal file", "Senza ricodifica, pochi secondi anche per file lunghi.");
+            chkTrim = Check(fine, "Taglia la parte uniforme finale dal file", "Senza ricodifica, pochi secondi anche per file lunghi.");
             chkAskName = Check(fine, "Chiedi il nome della cassetta alla fine", "Il file viene rinominato \"Nome cassetta.mp4\". Se annulli resta il nome automatico.");
             chkAutoStop.CheckedChanged += (o, e) => { nAutoSec.Enabled = chkTrim.Enabled = chkAutoStop.Checked; };
 
@@ -232,7 +233,7 @@ namespace VHSCapture
             lblPreset = Row(enc, "Preset x264", cbPreset, "veryfast se la CPU arranca");
             nKey = Num(1, 10, 1);
             Row(enc, "Keyframe ogni (secondi)", nKey, "OBS usa 2");
-            Note(enc, "L'encoder resta sempre acceso (come la pipeline di OBS): premendo Registra si inizia a scrivere su file senza fermare niente.");
+            Note(enc, "La pipeline e l'encoder hardware restano attivi: Registra avvia la scrittura senza riaprire il grabber.");
             cbRc.SelectedIndexChanged += (o, e) => UpdateEnabled();
             cbEncoder.SelectedIndexChanged += (o, e) => UpdateEnabled();
         }
@@ -266,8 +267,10 @@ namespace VHSCapture
         {
             var p = Page("Avanzate");
             var a = Section(p, "Prestazioni");
+            chkIntel = Check(a, "Accelerazione GPU (Intel)", "Con encoder Intel QuickSync: deinterlacciamento, scala e bande nere su GPU per un solo grabber. Scene o driver non compatibili usano i filtri CPU. Anteprima e registrazione mantengono il frame rate completo.");
+            cbIntelField = Combo("Superiore prima (TFF)", "Inferiore prima (BFF)");
+            Row(a, "Ordine campi Intel", cbIntelField, "Se il movimento va avanti e indietro, prova l'altro ordine.");
             chkPrio = Check(a, "Priorità alta a ffmpeg", "Come la priorità del processo di OBS: meno frame persi se il PC fa altro.");
-            chkSmooth = Check(a, "Anteprima fluida (tutti i fotogrammi)", "Spenta: sopra i 30 fps l'anteprima mostra un fotogramma sì e uno no (50 → 25), sempre regolare, con meno CPU. La registrazione è sempre completa.");
             chkDiag = Check(a, "Diagnostica dell'anteprima nel Log ogni 5 s", "Serve solo per capire eventuali scatti dell'anteprima.");
             chkLive = Check(a, "Modifiche delle sorgenti al volo (zmq)", FFmpeg.HasZmq ? "Sposta, ritaglia e regola i colori senza riavviare l'anteprima." : "ffmpeg senza zmq: ogni modifica riavvia l'anteprima.");
         }
@@ -318,7 +321,8 @@ namespace VHSCapture
             nAutoSec.Enabled = chkTrim.Enabled = chkAutoStop.Checked;
             chkLive.Checked = s.LiveControl;
             chkDiag.Checked = s.DiagLog;
-            chkSmooth.Checked = s.SmoothPreview;
+            chkIntel.Checked = s.IntelGpu;
+            cbIntelField.SelectedIndex = s.IntelFieldOrder == "bff" ? 1 : 0;
             UpdateEnabled();
         }
 
@@ -364,7 +368,8 @@ namespace VHSCapture
             s.AskNameAtEnd = chkAskName.Checked;
             s.LiveControl = chkLive.Checked;
             s.DiagLog = chkDiag.Checked;
-            s.SmoothPreview = chkSmooth.Checked;
+            s.IntelGpu = chkIntel.Checked;
+            s.IntelFieldOrder = cbIntelField.SelectedIndex == 1 ? "bff" : "tff";
             s.Save();
             return true;
         }

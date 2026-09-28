@@ -173,7 +173,7 @@ namespace VHSCapture
         public List<Source> Sources { get; set; } = new List<Source>();
 
         // Video
-        public string Encoder { get; set; } = "libx264";       // libx264, h264_nvenc, h264_qsv, h264_amf
+        public string Encoder { get; set; } = "h264_qsv";       // libx264, h264_nvenc, h264_qsv, h264_amf
         public bool EncoderUserSet { get; set; } = false;      // false = l'app sceglie da sola l'encoder hardware migliore
         public string RateControl { get; set; } = "CBR";       // CBR, VBR, CRF
         public int VideoBitrate { get; set; } = 12000;         // kbps
@@ -198,13 +198,14 @@ namespace VHSCapture
         public int KeyframeSec { get; set; } = 2;              // intervallo keyframe (OBS: 2 s)
 
         // Fine cassetta
-        public bool AutoStopOnBlank { get; set; } = true;      // ferma quando il grabber manda schermo blu/nero uniforme
+        public bool AutoStopOnBlank { get; set; } = true;      // ferma quando il grabber manda schermo uniforme di qualsiasi colore
         public int AutoStopSeconds { get; set; } = 30;
-        public bool TrimBlankTail { get; set; } = true;        // taglia la coda blu/nera dal file
+        public bool TrimBlankTail { get; set; } = true;        // taglia la coda uniforme dal file
         public bool AskNameAtEnd { get; set; } = true;         // a fine registrazione chiede il nome della cassetta e rinomina
         public string Profile { get; set; } = "";              // ultimo profilo applicato (solo per l'etichetta)
         public bool DiagLog { get; set; } = false;             // riga di diagnostica anteprima nel Log ogni 5 s
-        public bool SmoothPreview { get; set; } = false;       // false = anteprima leggera (metà fotogrammi sopra i 30 fps)
+        public bool IntelGpu { get; set; } = true;            // filtri QSV con encoder Intel e sorgente compatibile
+        public string IntelFieldOrder { get; set; } = "tff"; // i grabber raw spesso non dichiarano l'ordine dei campi
 
         // Controllo live (zmq)
         public bool LiveControl { get; set; } = true;

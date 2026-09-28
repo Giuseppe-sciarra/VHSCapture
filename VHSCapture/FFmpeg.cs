@@ -124,7 +124,7 @@ namespace VHSCapture
                 var ok = new ConcurrentBag<string>();
                 System.Threading.Tasks.Parallel.ForEach(compiled, e => { if (e == "libx264" || TestEncoder(e)) ok.Add(e); });
                 // preferenza: hardware prima (come OBS)
-                var order = new[] { "h264_nvenc", "h264_amf", "h264_qsv", "libx264" };
+                var order = new[] { "h264_qsv", "h264_nvenc", "h264_amf", "libx264" };
                 workingCache = order.Where(ok.Contains).ToList();
                 if (workingCache.Count == 0) workingCache.Add("libx264");
                 return new List<string>(workingCache);
@@ -184,7 +184,7 @@ namespace VHSCapture
             catch { return (false, -91, -91); }
         }
 
-        /// <summary>Taglia il file a 'seconds' secondi senza ricodificare (per togliere la coda blu). Rimpiazza il file originale.</summary>
+        /// <summary>Taglia il file a 'seconds' secondi senza ricodificare (per togliere la coda uniforme). Rimpiazza il file originale.</summary>
         public static bool TrimFile(string file, double seconds, Action<string> log)
         {
             try
@@ -650,12 +650,26 @@ namespace VHSCapture
             return ok;
         }
 
+        public bool HasBufferedKeyFrame { get { lock (this) return haveKey && pat != null && pmt != null && gop.Count > 0; } }
+
+        // Il pre-roll appartiene a UNA sola istanza ffmpeg: mai riusare PAT/PMT o GOP dopo un riavvio.
+        public void ResetStream()
+        {
+            lock (this)
+            {
+                pat = pmt = null; pmtPid = videoPid = -1;
+                gop.Clear(); gopBytes = 0; haveKey = false; carryLen = 0;
+                lastRawVideoDts = lastAdjVideoDts = lastAdjAudioPts = -1;
+                frameDur90k = 3600; offset90k = 0; dropPes.Clear(); ccOut.Clear();
+            }
+        }
+
         public bool MuxAlive => mux != null && !mux.HasExited;
     }
 
     // =====================================================================================
     //  Motore di cattura: UN processo ffmpeg sempre acceso (come la pipeline di OBS).
-    //  Compone il canvas, codifica SEMPRE (encoder hardware), manda:
+    //  Canvas completo, filtri QSV quando disponibili, encoder sempre acceso:
     //   - anteprima BGRA  → named pipe
     //   - MPEG-TS codificato → named pipe → TsRecorder (registra senza fermare niente)
     //   - livelli audio   → una named pipe per sorgente
@@ -672,12 +686,24 @@ namespace VHSCapture
         public event Action<string, double, double, double, double> AudioLevels;
         public event Action<byte[], int> MonitorData;
         public event Action<EngineStats> Stats;
-        /// <summary>Stato del segnale della sorgente analizzata (2 volte al secondo): vuoto = schermo blu o nero uniforme.</summary>
-        public event Action<string, bool, string> SignalState;   // id, vuoto, "blu"/"nero"/""
+        /// <summary>Stato del segnale della sorgente analizzata (2 volte al secondo): vuoto = schermo uniforme di qualsiasi colore.</summary>
+        public event Action<string, bool, string> SignalState;   // id, vuoto, "uniforme"/""
         public event Action<string> Log;
         public event Action<int> Exited;
 
         public bool IsRunning => proc != null && !proc.HasExited;
+        public bool GpuActive { get; private set; }
+        public bool GpuDisabled { get; set; } // solo sessione; non modifica le preferenze salvate
+        public int RunId { get; private set; }
+        public string QsvBackend { get; private set; } = "d3d11va";
+        public void ResetGpuRetry() { GpuDisabled = false; QsvBackend = "d3d11va"; }
+        public bool TryLegacyGpu()
+        {
+            if (!GpuActive || GpuDisabled || QsvBackend == "dxva2") return false;
+            QsvBackend = "dxva2";
+            return true;
+        }
+        Dictionary<string, Source> runningSources = new Dictionary<string, Source>();
         public bool IsRecording => recorder.IsRecording;
         public bool LiveControl => zmq != null && zmq.Enabled;
         public string LastCommand { get; private set; }
@@ -706,13 +732,16 @@ namespace VHSCapture
         {
             Stop();
             stopping = false;
-            inputInfo.Clear(); inputSize.Clear(); inInputSection = false;
+            runningSources = s.Sources.ToDictionary(x => x.Id, x => x.Clone());
+            GpuActive = !GpuDisabled && CanUseQsv(s);
+            inputInfo.Clear(); inputSize.Clear(); sig.Clear(); inInputSection = false;
 
             PW = Math.Clamp(previewW / 2 * 2, 480, 1280);
-            PreviewRate = double.TryParse(PreviewFps(string.IsNullOrWhiteSpace(s.Fps) ? "25" : s.Fps, s.SmoothPreview), NumberStyles.Float, CultureInfo.InvariantCulture, out var pr) && pr > 0 ? pr : 30;
+            PreviewRate = double.TryParse(PreviewFps(string.IsNullOrWhiteSpace(s.Fps) ? "25" : s.Fps), NumberStyles.Float, CultureInfo.InvariantCulture, out var pr) && pr > 0 ? pr : 30;
             PH = Math.Max(2, (int)Math.Round((double)PW * s.CanvasH / s.CanvasW / 2) * 2);
 
             int n = Interlocked.Increment(ref pipeCounter);
+            RunId = n;
             string tag = $"{Environment.ProcessId}_{n}";
             bool live = s.LiveControl && FFmpeg.HasZmq;
             // porta libera scelta ora: col 5555 fisso, riavviando in fretta la vecchia pipeline la teneva ancora occupata
@@ -748,17 +777,24 @@ namespace VHSCapture
             var mePipes = names.Meters.ToDictionary(kv => kv.Key,
                 kv => Enumerable.Range(0, meterInstances).Select(_ => NewPipe(kv.Value, 256 << 10, meterInstances)).ToList());
 
-            string args = BuildArgs(s, PW, PH, zmqPort, names, out inputMap);
+            string args = BuildArgs(s, PW, PH, zmqPort, names, out inputMap, GpuActive, QsvBackend);
             fastIdRunning = FastPathId;
             var fs = s.Sources.FirstOrDefault(x => x.Id == fastIdRunning);
             if (fs != null) { lastFastX = fs.X; lastFastY = fs.Y; lastFastW = fs.W; lastFastH = fs.H; }
             LastCommand = "ffmpeg " + args;
+            Log?.Invoke("Pipeline completa: encoder attivo e anteprima a tutti i fotogrammi");
+            Log?.Invoke(GpuActive ? "Filtri Intel GPU attivi: VPP + composizione QSV (" + QsvBackend + ")" : "Filtri video CPU" + (s.IntelGpu ? " (GPU disattivata, encoder diverso o scena non compatibile)" : ""));
             Log?.Invoke(LastCommand);
 
             proc = new Process { StartInfo = FFmpeg.Psi(args), EnableRaisingEvents = true };
             proc.ErrorDataReceived += OnErr;
             proc.OutputDataReceived += (o, e) => { };
-            proc.Exited += (o, e) => { try { Exited?.Invoke(((Process)o).ExitCode); } catch { } };
+            proc.Exited += (o, e) =>
+            {
+                // Ignora le uscite volontarie e quelle appartenenti a una vecchia pipeline.
+                if (stopping || !ReferenceEquals(proc, o)) return;
+                try { Exited?.Invoke(((Process)o).ExitCode); } catch { }
+            };
             proc.Start();
             proc.BeginErrorReadLine(); proc.BeginOutputReadLine();
             if (s.HighPriority) { try { proc.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { } }
@@ -842,11 +878,13 @@ namespace VHSCapture
             pipes.Clear();
             foreach (var t in threads) { try { t.Join(1000); } catch { } }
             threads.Clear();
+            while (readyFrames.TryDequeue(out var fb)) ReturnFrame(fb);
+            recorder.ResetStream();
         }
 
         public void Dispose() => Stop();
 
-        // ---------- registrazione (la pipeline NON si ferma) ----------
+        // ---------- registrazione (il muxer si aggancia dopo che la pipeline completa è pronta) ----------
 
         public void StartRecording(AppSettings s, string outputFile)
         {
@@ -903,6 +941,15 @@ namespace VHSCapture
         public void ApplyTransform(Source src)
         {
             if (!activeIds.Contains(src.Id)) return;
+            // I filtri QSV non espongono i comandi ZMQ per ritaglio e trasformazioni.
+            if (GpuActive)
+            {
+                if (runningSources.TryGetValue(src.Id, out var old) &&
+                    (src.X != old.X || src.Y != old.Y || src.W != old.W || src.H != old.H ||
+                     src.CropL != old.CropL || src.CropT != old.CropT || src.CropR != old.CropR || src.CropB != old.CropB))
+                    NeedsRestart?.Invoke();
+                return;
+            }
             if (fastIdRunning == src.Id)
             {
                 // percorso veloce: posizione e dimensione sono fisse nel grafo → basta un riavvio (il ritaglio invece va al volo)
@@ -941,6 +988,7 @@ namespace VHSCapture
 
         public void ApplyColor(Source src)
         {
+            if (GpuActive) { if (!src.ColorIsNeutral) NeedsRestart?.Invoke(); return; }
             if (src.Type == SourceType.Capture && !colorIds.Contains(src.Id))
             {
                 if (!src.ColorIsNeutral && activeIds.Contains(src.Id)) NeedsRestart?.Invoke();
@@ -1129,25 +1177,30 @@ namespace VHSCapture
             }
         }
 
-        class SigState { public double yl, yh, ya, ul, uh, ua, vl, vh; public bool any; public DateTime lastEmit; }
+        class SigState { public double yl, yh, ul, uh, vl, vh; public int seen; public DateTime lastEmit; }
         readonly ConcurrentDictionary<string, SigState> sig = new ConcurrentDictionary<string, SigState>();
+
+        // Misura la variazione spaziale delle tre componenti, senza vincoli sul colore medio.
+        public static bool IsUniformSignal(double yl, double yh, double ul, double uh, double vl, double vh) =>
+            double.IsFinite(yl) && double.IsFinite(yh) && double.IsFinite(ul) && double.IsFinite(uh) &&
+            double.IsFinite(vl) && double.IsFinite(vh) &&
+            yh >= yl && yh - yl <= 12 && uh >= ul && uh - ul <= 10 && vh >= vl && vh - vl <= 10;
 
         void OnAnalysisLine(string id, string line)
         {
             var g = sig.GetOrAdd(id, _ => new SigState());
             if (line.StartsWith("frame:"))
             {
-                OnFrameLine(line);   // fps reali della sorgente
+                OnFrameLine(line);
                 bool due = (DateTime.Now - g.lastEmit).TotalMilliseconds >= 500;
-                if (g.any && due)
+                if (g.seen != 0 && due)
                 {
-                    // uniforme = immagine piatta (il rumore del nastro sparisce nel rimpicciolimento a 64x36)
-                    bool uniform = g.yh - g.yl <= 12 && g.uh - g.ul <= 10 && g.vh - g.vl <= 10;
-                    string kind = !uniform ? "" : g.ua >= 160 ? "blu" : g.ya <= 40 ? "nero" : "";
-                    SignalState?.Invoke(id, kind != "", kind);
+                    // Tutti i sei valori devono appartenere allo stesso frame: niente dati vecchi o incompleti.
+                    bool uniform = g.seen == 63 && IsUniformSignal(g.yl, g.yh, g.ul, g.uh, g.vl, g.vh);
+                    SignalState?.Invoke(id, uniform, uniform ? "uniforme" : "");
                     g.lastEmit = DateTime.Now;
                 }
-                g.any = false;
+                g.seen = 0;
                 return;
             }
             const string k = "lavfi.signalstats.";
@@ -1156,14 +1209,12 @@ namespace VHSCapture
             if (!double.TryParse(line.Substring(eq + 1), NumberStyles.Float, CultureInfo.InvariantCulture, out double v)) return;
             switch (line.Substring(k.Length, eq - k.Length))
             {
-                case "YLOW": g.yl = v; g.any = true; break;
-                case "YHIGH": g.yh = v; break;
-                case "YAVG": g.ya = v; break;
-                case "ULOW": g.ul = v; break;
-                case "UHIGH": g.uh = v; break;
-                case "UAVG": g.ua = v; break;
-                case "VLOW": g.vl = v; break;
-                case "VHIGH": g.vh = v; break;
+                case "YLOW": g.yl = v; g.seen |= 1; break;
+                case "YHIGH": g.yh = v; g.seen |= 2; break;
+                case "ULOW": g.ul = v; g.seen |= 4; break;
+                case "UHIGH": g.uh = v; g.seen |= 8; break;
+                case "VLOW": g.vl = v; g.seen |= 16; break;
+                case "VHIGH": g.vh = v; g.seen |= 32; break;
             }
         }
 
@@ -1259,23 +1310,42 @@ namespace VHSCapture
             "bilinear" => "bilinear", "lanczos" => "lanczos", "area" => "area", "fast_bilinear" => "fast_bilinear", _ => "bicubic",
         };
 
-        public static string BuildArgs(AppSettings s, int pw, int ph, int zmqPort, PipeNames pn, out Dictionary<int, string> map)
+        public static bool CanUseQsv(AppSettings s)
         {
+            if (!s.IntelGpu || s.Encoder != "h264_qsv") return false;
+            var visible = s.Sources.Where(x => x.Visible && IsUsable(x)).ToList();
+            if (visible.Count != 1) return false;
+            var src = visible[0];
+            // Mantiene intatti correzioni colore e ritagli non allineati: per questi usa la pipeline CPU.
+            return src.Type == SourceType.Capture && src.ColorIsNeutral &&
+                src.W >= 2 && src.H >= 2 && src.X >= 0 && src.Y >= 0 &&
+                (long)src.X + src.W <= s.CanvasW && (long)src.Y + src.H <= s.CanvasH &&
+                s.CanvasW % 2 == 0 && s.CanvasH % 2 == 0 &&
+                new[] { src.CropL, src.CropT, src.CropR, src.CropB }.All(v => v >= 0 && v % 2 == 0);
+        }
+
+        public static string BuildArgs(AppSettings s, int pw, int ph, int zmqPort, PipeNames pn,
+            out Dictionary<int, string> map, bool useQsv = false, string qsvBackend = "d3d11va")
+        {
+            useQsv = useQsv && CanUseQsv(s);
             map = new Dictionary<int, string>();
             var sb = new StringBuilder();
             var graph = new StringBuilder();
             string fps = string.IsNullOrWhiteSpace(s.Fps) ? "25" : s.Fps;
-            var visible = s.Sources.Where(x => x.Visible).ToList();
+            var visible = s.Sources.Where(x => x.Visible && IsUsable(x)).ToList();
 
             sb.Append($"-hide_banner -y -loglevel info -nostats -progress \"{PipeNames.Win(pn.Progress)}\" -stats_period 1 ");
             sb.Append($"-filter_complex_threads {Math.Clamp(Environment.ProcessorCount, 2, 8)} ");
+            if (useQsv) sb.Append(qsvBackend == "dxva2"
+                ? "-init_hw_device qsv=hw:hw,child_device_type=dxva2 -filter_hw_device hw "
+                : "-init_hw_device d3d11va=igpu:,vendor_id=0x8086 -init_hw_device qsv=hw@igpu -filter_hw_device hw ");
             // PERCORSO VELOCE (caso normale: solo il grabber) → niente canvas nero + overlay a ogni fotogramma,
             // basta aggiungere le bande con pad. Misurato su ffmpeg 7: overlay ≈ 19% di un core, pad ≈ 4%.
             var usable = visible.Where(x => x.Type != SourceType.Capture || !string.IsNullOrWhiteSpace(x.VideoDevice)).ToList();
             var only = usable.Count == 1 && usable[0].Type == SourceType.Capture ? usable[0] : null;
             bool fast = only != null && only.X >= 0 && only.Y >= 0 && only.X + only.W <= s.CanvasW && only.Y + only.H <= s.CanvasH;
             FastPathId = fast ? only.Id : null;
-            if (!fast) sb.Append($"-f lavfi -i color=c=black:s={s.CanvasW}x{s.CanvasH}:r={fps} ");
+            if (!fast) sb.Append($"-re -f lavfi -i color=c=black:s={s.CanvasW}x{s.CanvasH}:r={fps} ");
 
             var idx = new Dictionary<Source, int>();
             int n = fast ? 0 : 1;
@@ -1300,10 +1370,10 @@ namespace VHSCapture
                         break;
                     case SourceType.Image:
                         if (!File.Exists(src.ImagePath)) continue;
-                        sb.Append($"-loop 1 -framerate {fps} -i \"{src.ImagePath}\" ");
+                        sb.Append($"-re -loop 1 -framerate {fps} -i \"{src.ImagePath}\" ");
                         break;
                     case SourceType.Color:
-                        sb.Append($"-f lavfi -i color=c={src.Color.Replace("#", "0x")}:s={Math.Max(2, src.W)}x{Math.Max(2, src.H)}:r={fps} ");
+                        sb.Append($"-re -f lavfi -i color=c={src.Color.Replace("#", "0x")}:s={Math.Max(2, src.W)}x{Math.Max(2, src.H)}:r={fps} ");
                         break;
                 }
                 idx[src] = n; map[n] = src.Id;
@@ -1326,7 +1396,7 @@ namespace VHSCapture
                     if (pn.Analysis.TryGetValue(src.Id, out var anPipe))
                     {
                         // ramo di analisi per la fine cassetta PRIMA del deinterlaccio: 25 fotogrammi al secondo invece di 50
-                        // (per capire se lo schermo è blu non serve deinterlacciare). Sempre a piena velocità della sorgente:
+                        // (per capire se lo schermo è uniforme non serve deinterlacciare). Sempre a piena velocità della sorgente:
                         // un'uscita decimata (es. 2 fps) resta indietro e ffmpeg 7 frena tutte le altre → anteprima a raffiche.
                         graph.Append($"[{i}:v]split=2[cs{k}][an{k}];");
                         graph.Append($"[an{k}]crop=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT},scale=64:36:flags=area,signalstats," +
@@ -1335,8 +1405,8 @@ namespace VHSCapture
                         i = -1;   // l'ingresso della catena ora è [cs{k}]
                     }
                     var d = DeintFilter(src.DeinterlaceMode);
-                    if (d != null) chain.Add(d);
-                    chain.Add($"crop@s{src.Id}=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT}:exact=1");
+                    if (d != null && !useQsv) chain.Add(d);
+                    if (!useQsv) chain.Add($"crop@s{src.Id}=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT}:exact=1");
                     // correzione colore solo se serve: con i valori neutri eq e hue lavorano per niente a ogni fotogramma
                     if (!src.ColorIsNeutral)
                     {
@@ -1351,7 +1421,34 @@ namespace VHSCapture
                 }
                 chain.Add($"scale@s{src.Id}=w={Math.Max(2, src.W)}:h={Math.Max(2, src.H)}:flags={ScaleFlags(src.ScaleFilter)}:eval=frame");
                 string inLabel = i >= 0 ? $"[{i}:v]" : $"[cs{k}]";
-                if (fast)
+                if (useQsv)
+                {
+                    chain.Clear();
+                    if (zmqFilter != null) chain.Add(zmqFilter);
+                    // I grabber analogici spesso marcano progressivi i frame interlacciati.
+                    // Come l'automatico Yadif senza metadati, si assume prima il campo superiore.
+                    if (DeintFilter(src.DeinterlaceMode) != null) chain.Add("setfield=" + (s.IntelFieldOrder == "bff" ? "bff" : "tff"));
+                    chain.Add("format=nv12");
+                    chain.Add("hwupload=extra_hw_frames=64");
+                    string deint = DeintFilter(src.DeinterlaceMode) != null
+                        ? $"deinterlace=advanced:rate={(src.DeinterlaceMode.EndsWith("2x") ? "field" : "frame")}:" : "";
+                    int qw = Math.Max(2, src.W & ~1), qh = Math.Max(2, src.H & ~1);
+                    int qx = src.X & ~1, qy = src.Y & ~1;
+                    chain.Add($"vpp_qsv={deint}cw=iw-{src.CropL + src.CropR}:ch=ih-{src.CropT + src.CropB}:cx={src.CropL}:cy={src.CropT}:w={qw}:h={qh}:format=nv12");
+                    // NV12 è il formato della superficie; QSV forza la permanenza in memoria GPU.
+                    chain.Add("format=qsv");
+                    chain.Add("setsar=1");
+                    graph.Append($"{inLabel}{string.Join(",", chain)},fps={fps}[qsrc];");
+                    if (qw == s.CanvasW && qh == s.CanvasH && qx == 0 && qy == 0)
+                        graph.Append($"[qsrc]null[t{k}];");
+                    else
+                    {
+                        // Un solo fondo nero caricato in GPU e riutilizzato: niente upload del canvas a ogni frame.
+                        graph.Append($"color=c=black:s={s.CanvasW}x{s.CanvasH}:r={fps},format=nv12,hwupload=extra_hw_frames=8,loop=loop=-1:size=1:start=0[qbg];");
+                        graph.Append($"[qbg][qsrc]overlay_qsv=x={qx}:y={qy}:w={qw}:h={qh}:shortest=1,format=qsv,setsar=1[t{k}];");
+                    }
+                }
+                else if (fast)
                 {
                     // bande nere con pad: dimensioni e posizione pari (yuv420)
                     int w2 = Math.Max(2, src.W) & ~1, h2 = Math.Max(2, src.H) & ~1, x2 = Math.Max(0, src.X) & ~1, y2 = Math.Max(0, src.Y) & ~1;
@@ -1372,9 +1469,15 @@ namespace VHSCapture
                 k++;
             }
 
-            // video: canvas → encoder (sempre) + anteprima
-            string pvFps = PreviewFps(fps, s.SmoothPreview);
-            graph.Append($"{cur}fps={fps},format=yuv420p,split=2[venc][pv];[pv]fps={pvFps},scale={pw}:{ph}:flags=fast_bilinear,format=bgra[pvs];");
+            // La pipeline rimane completa anche senza registrare: nessuna decimazione dell'anteprima.
+            string pvFps = PreviewFps(fps);
+            if (useQsv)
+            {
+                graph.Append($"{cur}split=2[venc][pv];");
+                // Download SOLO del ramo di anteprima, già adattato al riquadro; encoder su QSV.
+                graph.Append($"[pv]vpp_qsv=w={pw}:h={ph}:format=nv12,format=qsv,hwdownload,format=nv12,format=bgra[pvs];");
+            }
+            else graph.Append($"{cur}fps={fps},format=yuv420p,split=2[venc][pv];[pv]fps={pvFps},scale={pw}:{ph}:flags=fast_bilinear,format=bgra[pvs];");
 
             // audio: per sorgente → misuratore (pipe propria) + ramo di mix con muto → encoder (+ ascolto)
             var audioSrcs = idx.Keys.Where(x => x.HasAudio).ToList();
@@ -1399,7 +1502,7 @@ namespace VHSCapture
                 string amix;
                 if (mixLabels.Count == 1) amix = mixLabels[0];
                 else { graph.Append($"{string.Join("", mixLabels)}amix=inputs={mixLabels.Count}:duration=longest:normalize=0[amix];"); amix = "[amix]"; }
-                if (mon) { graph.Append($"{amix}asplit=2[aenc][amon];[amon]aformat=sample_fmts=s16:channel_layouts=stereo[amons];"); }
+                if (mon) graph.Append($"{amix}asplit=2[aenc][amon];[amon]aformat=sample_fmts=s16:channel_layouts=stereo[amons];");
                 else graph.Append($"{amix}anull[aenc];");
             }
 
@@ -1409,6 +1512,7 @@ namespace VHSCapture
             sb.Append("-map \"[venc]\" ");
             if (hasAudio) sb.Append("-map \"[aenc]\" ");
             sb.Append(EncoderArgs(s, fps));
+            if (useQsv) sb.Append("-pix_fmt qsv ");
             if (hasAudio)
             {
                 sb.Append($"-c:a aac -b:a {s.AudioBitrate}k ");
@@ -1423,17 +1527,8 @@ namespace VHSCapture
             return sb.ToString();
         }
 
-        /// <summary>
-        /// Anteprima leggera (predefinita): sopra i 30 fps si mostra un fotogramma sì e uno no (50 → 25, 59,94 → 29,97),
-        /// sempre a ritmo regolare. È la parte più pesante di tutta la pipeline e serve solo per guardare.
-        /// </summary>
-        static string PreviewFps(string fps, bool smooth = false)
-        {
-            if (!double.TryParse(fps, NumberStyles.Float, CultureInfo.InvariantCulture, out double f) || f <= 0) return fps;
-            if (f > 60) f = 60;
-            if (!smooth && f > 30) f /= 2;
-            return f.ToString("0.###", CultureInfo.InvariantCulture);
-        }
+        /// <summary>Anteprima alla frequenza completa del canvas, anche con vecchie impostazioni salvate.</summary>
+        static string PreviewFps(string fps) => string.IsNullOrWhiteSpace(fps) ? "25" : fps;
 
         static string EncoderArgs(AppSettings s, string fps)
         {

@@ -146,6 +146,25 @@ namespace VHSCapture
             }
         }
 
+        /// <summary>Identifica ffmpeg.exe (data + dimensione): la verifica encoder salvata vale finché non cambia.</summary>
+        public static string BinaryStamp()
+        {
+            try { var fi = new FileInfo(ExePath); return fi.Exists ? fi.LastWriteTimeUtc.Ticks + ":" + fi.Length : ""; }
+            catch { return ""; }
+        }
+
+        /// <summary>Motivo in una riga, invece del muro di errori di ffmpeg.</summary>
+        public static string ShortReason(EncoderProbeResult r)
+        {
+            string d = r.Detail ?? "";
+            if (d.Contains("minimum required Nvidia driver") || d.Contains("nvenc API version")) return "driver NVIDIA troppo vecchio (serve 610 o più recente)";
+            if (d.Contains("nvcuda") || d.Contains("No capable devices found") || d.Contains("Cannot load")) return "nessuna scheda NVIDIA utilizzabile";
+            if (d.Contains("amfrt64.dll")) return "nessuna scheda AMD";
+            if (d.Contains("MFX") || d.Contains("mfx")) return "QuickSync non disponibile";
+            if (!r.Included) return "non incluso in questo ffmpeg";
+            return "non funziona su questo PC";
+        }
+
         public static List<string> ListWorkingH264Encoders()
         {
             var working = ProbeH264Encoders().Where(x => x.Works).Select(x => x.Encoder).ToList();
@@ -821,7 +840,8 @@ namespace VHSCapture
         public bool GpuDisabled { get; set; } // solo sessione; non modifica le preferenze salvate
         public int RunId { get; private set; }
         public string QsvBackend { get; private set; } = "d3d11va";
-        public void ResetGpuRetry() { GpuDisabled = false; QsvBackend = "d3d11va"; }
+        /// <summary>Riparte dal backend ricordato per questo PC: se D3D11 era già fallito si va dritti su DXVA2.</summary>
+        public void ResetGpuRetry(string remembered = null) { GpuDisabled = false; QsvBackend = remembered == "dxva2" ? "dxva2" : "d3d11va"; }
         public bool TryLegacyGpu()
         {
             if (!GpuActive || GpuDisabled || QsvBackend == "dxva2") return false;

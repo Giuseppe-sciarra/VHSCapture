@@ -207,6 +207,9 @@ namespace VHSCapture
         public string Profile { get; set; } = "";              // ultimo profilo applicato (solo per l'etichetta)
         public bool DiagLog { get; set; } = false;             // riga di diagnostica anteprima nel Log ogni 5 s
         public bool IntelGpu { get; set; } = true;            // filtri QSV con encoder Intel e sorgente compatibile
+        public string QsvBackend { get; set; } = "";           // "dxva2" = su questo PC D3D11 non va (GPU Intel vecchie): si parte subito con DXVA2
+        public List<string> EncodersWorking { get; set; }      // esito della verifica encoder su questo PC (si rifà solo se cambia ffmpeg o la chiedi)
+        public string EncodersStamp { get; set; } = "";        // ffmpeg.exe a cui si riferisce la verifica salvata
         public string IntelFieldOrder { get; set; } = "tff"; // i grabber raw spesso non dichiarano l'ordine dei campi
 
         // Controllo live (zmq)

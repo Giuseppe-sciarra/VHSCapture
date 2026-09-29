@@ -291,7 +291,8 @@ namespace VHSCapture
                 // quasi 1:1 (l'anteprima è già grande come il riquadro): COLORONCOLOR, velocissimo.
                 // Solo se si rimpicciolisce molto uso HALFTONE (più bello ma molto più lento).
                 double ratio = (double)dr.Width / fb.W;
-                SetStretchBltMode(hdc, ratio < 0.8 ? 4 : 3);
+                // sempre COLORONCOLOR: HALFTONE rimpicciolendo costava ~27 ms a fotogramma (misurato: 93 fotogrammi scartati in 5 s)
+                SetStretchBltMode(hdc, 3);
                 SetBrushOrgEx(hdc, 0, 0, IntPtr.Zero);
                 StretchDIBits(hdc, dr.X, dr.Y, dr.Width, dr.Height, 0, 0, fb.W, fb.H, fb.Data, ref bmi, 0, 0x00CC0020);
             }

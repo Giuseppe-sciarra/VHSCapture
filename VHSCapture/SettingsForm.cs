@@ -444,6 +444,13 @@ namespace VHSCapture
             {
                 var results = await Task.Run(() => FFmpeg.ProbeH264Encoders(refresh));
                 if (IsDisposed) return;
+                if (refresh)
+                {
+                    // verifica chiesta a mano: si aggiorna quella salvata e al prossimo avvio si riprova anche la GPU Intel via D3D11
+                    var ok = results.Where(x => x.Works).Select(x => x.Encoder).ToList();
+                    if (ok.Count > 0) { s.EncodersWorking = ok; s.EncodersStamp = FFmpeg.BinaryStamp(); }
+                    s.QsvBackend = "";
+                }
                 string selected = EncFromLabel(cbEncoder.Text);
                 encoderResults.Clear(); cbEncoder.Items.Clear();
                 foreach (var result in results)

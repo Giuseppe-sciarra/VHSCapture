@@ -110,6 +110,7 @@ namespace VHSCapture
                     MessageBox.Show(this, "ffmpeg.exe non trovato accanto a VHSCapture.exe.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
+                engine.ResetGpuRetry(settings.QsvBackend);
                 if (settings.Sources.Count == 0) AutoAddGrabber();
                 else StartPreview();
                 CheckEncoderAsync();
@@ -942,7 +943,7 @@ namespace VHSCapture
             var r = f.ShowDialog(this);
             Theme.Apply(this, settings.DarkTheme);
             if (r != DialogResult.OK) return;
-            engine.ResetGpuRetry();
+            engine.ResetGpuRetry(settings.QsvBackend);
             RefreshSourceList(); RebuildMixer();
             canvas.CanvasW = settings.CanvasW; canvas.CanvasH = settings.CanvasH;
             canvas.Invalidate();
@@ -1212,13 +1213,26 @@ namespace VHSCapture
 
         async void CheckEncoderAsync()
         {
-            var results = await Task.Run(() => FFmpeg.ProbeH264Encoders());
-            var list = results.Where(x => x.Works).Select(x => x.Encoder).ToList();
+            // verifica salvata e ffmpeg.exe uguale: niente prove all'avvio (le prove aprono sessioni GPU e rallentano la partenza)
+            string stamp = FFmpeg.BinaryStamp();
+            List<string> list;
+            if (settings.EncodersWorking != null && settings.EncodersWorking.Count > 0 && stamp != "" && settings.EncodersStamp == stamp)
+            {
+                list = new List<string>(settings.EncodersWorking);
+                AppendLog("Encoder su questo PC: " + string.Join(", ", list) + " (verifica salvata; per rifarla: Impostazioni → Verifica encoder)");
+            }
+            else
+            {
+                var results = await Task.Run(() => FFmpeg.ProbeH264Encoders());
+                list = results.Where(x => x.Works).Select(x => x.Encoder).ToList();
+                if (IsDisposed || closingApp) return;
+                AppendLog("Encoder funzionanti su questo PC: " + string.Join(", ", list));
+                var missing = results.Where(x => !x.Works).Select(x => $"{x.Encoder} ({FFmpeg.ShortReason(x)})").ToList();
+                if (missing.Count > 0) AppendLog("Non disponibili: " + string.Join(", ", missing));
+                if (list.Count > 0) { settings.EncodersWorking = list; settings.EncodersStamp = stamp; settings.Save(); }
+            }
             if (IsDisposed || closingApp) return;
-            AppendLog("Encoder funzionanti su questo PC: " + string.Join(", ", list));
             if (CaptureBusy) return;
-            foreach (var result in results)
-                if (!result.Works) AppendLog("Verifica " + result.Encoder + ": " + result.Detail);
             string chosen = FFmpeg.ChooseEncoder(settings, list);
             string pick = chosen != settings.Encoder ? chosen : null;
             if (settings.EncoderUserSet && !list.Contains(settings.Encoder))
@@ -1233,7 +1247,12 @@ namespace VHSCapture
 
         void RetryGpuPreview()
         {
-            if (engine.TryLegacyGpu()) AppendLog("Intel D3D11 non disponibile: provo QuickSync con DXVA2 per i driver meno recenti");
+            if (engine.TryLegacyGpu())
+            {
+                AppendLog("Intel D3D11 non disponibile: uso QuickSync con DXVA2 e me lo ricordo per questo PC (niente più attesa all'avvio)");
+                settings.QsvBackend = "dxva2";
+                settings.Save();
+            }
             else
             {
                 engine.GpuDisabled = true;

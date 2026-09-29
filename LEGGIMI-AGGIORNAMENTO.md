@@ -1,3 +1,9 @@
+# VHSCapture 1.2.8 — avvio veloce e anteprima fluida
+
+- **GPU Intel vecchie (es. HD Graphics 4600)**: se QuickSync via D3D11 fallisce ("Error creating a MFX session: -9"), l'app usa DXVA2 e **se lo ricorda** per quel PC. Prima riprovava D3D11 a ogni avvio e a ogni chiusura delle Impostazioni, perdendo circa 6 s ogni volta. "Verifica encoder" nelle Impostazioni fa riprovare D3D11 al prossimo avvio (utile dopo un aggiornamento dei driver).
+- **Verifica encoder una volta per PC**: l'esito viene salvato e rifatto solo se cambia ffmpeg.exe o se la chiedi. Nel Log, gli encoder mancanti occupano una riga corta con il motivo (es. "driver NVIDIA troppo vecchio", "nessuna scheda AMD").
+- **Anteprima**: disegno sempre col metodo rapido. Quando l'anteprima era più grande del riquadro, il metodo "bello" di Windows costava circa 27 ms a fotogramma: dal Log, 93 fotogrammi scartati in 5 s. Ora costa circa 3 ms. Il file registrato non cambia.
+
 # VHSCapture 1.2.7 — testi che stanno nella finestra
 
 - **Impostazioni** e **Proprietà sorgente**: note, suggerimenti e caselle di spunta vanno a capo secondo la larghezza reale della finestra, e si riadattano quando la ridimensioni. I suggerimenti stanno sotto il campo invece che in una terza colonna, i menu a tendina si aprono larghi quanto la voce più lunga, e le voci del Formato sono tornate corte.

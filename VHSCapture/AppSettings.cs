@@ -190,7 +190,7 @@ namespace VHSCapture
         public bool SafeRecording { get; set; } = false;       // opzionale: MKV + remux MP4 a fine
         public int MaxMinutes { get; set; } = 0;
 
-        public bool FragmentedMp4 { get; set; } = true;        // come "MP4 ibrido" di OBS: scritto a pezzi, niente attese allo stop, leggibile dopo un crash
+        public bool FragmentedMp4 { get; set; } = false;       // false = MP4 normale come OBS (indice unico: i lettori lo aprono subito)
         public int FormatVersion { get; set; } = 0;            // migrazioni una tantum delle impostazioni
         public int SplitMinutes { get; set; } = 0;             // come "Divisione automatica dei file" di OBS (0 = off)
         public bool HighPriority { get; set; } = true;         // come "Priorità del processo" di OBS
@@ -252,6 +252,8 @@ namespace VHSCapture
             if (s.FormatVersion < 3) { s.RecordLocalFirst = false; s.FormatVersion = 3; }
             // 1.2.5: allo stop si salva e basta: niente taglio della coda di default
             if (s.FormatVersion < 4) { s.TrimBlankTail = false; s.FormatVersion = 4; }
+            // 1.2.6: MP4 normale come OBS (il frammentato si apre lentamente nei lettori). Chi usa MKV resta su MKV.
+            if (s.FormatVersion < 5) { s.FragmentedMp4 = false; s.FormatVersion = 5; }
             if (!string.IsNullOrEmpty(s.Profile) && s.Profile != "PAL" && s.Profile != "NTSC")
                 s.Profile = s.Profile.Contains("NTSC") ? "NTSC" : (s.Profile.Contains("PAL") ? "PAL" : "");
             foreach (var src in s.Sources)

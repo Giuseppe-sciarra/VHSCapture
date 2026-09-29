@@ -52,7 +52,8 @@ namespace VHSCapture
             LoadValues();
             Theme.Apply(this, s.DarkTheme);
             StyleNav();
-            Shown += async (o, e) => await RefreshEncoders(false);
+            Shown += async (o, e) => { FitText(); await RefreshEncoders(false); };
+            Resize += (o, e) => FitText();
         }
 
         // ================= struttura =================
@@ -138,6 +139,37 @@ namespace VHSCapture
 
         static TableLayoutPanel T(Card c) => (TableLayoutPanel)c.Tag;
 
+        /// <summary>
+        /// Adatta i testi alla larghezza REALE della finestra: note, suggerimenti e caselle di spunta vanno a capo
+        /// invece di uscire; i menu a tendina si aprono larghi quanto la voce più lunga.
+        /// </summary>
+        void FitText()
+        {
+            foreach (var page in pages.Values)
+            {
+                int avail = Math.Max(300, page.ClientSize.Width - 32 - 24 - SystemInformation.VerticalScrollBarWidth);
+                void Walk(Control parent)
+                {
+                    foreach (Control c in parent.Controls)
+                    {
+                        if (c is Label lb && lb.Name == "note") lb.MaximumSize = new Size(avail, 0);
+                        else if (c is Label hb && hb.Name == "hint") hb.MaximumSize = new Size(Math.Max(200, avail - LabelW), 0);
+                        else if (c is CheckBox cb && cb.Name == "chk") cb.MaximumSize = new Size(avail, 0);
+                        else if (c is ComboBox co) FitDropDown(co);
+                        if (c.HasChildren) Walk(c);
+                    }
+                }
+                page.SuspendLayout(); Walk(page); page.ResumeLayout(true);
+            }
+        }
+
+        static void FitDropDown(ComboBox co)
+        {
+            int w = co.Width;
+            foreach (var it in co.Items) w = Math.Max(w, TextRenderer.MeasureText(it?.ToString() ?? "", co.Font).Width + 30);
+            co.DropDownWidth = Math.Min(w, 900);
+        }
+
         static Label Row(Card c, string label, Control field, string hint = null)
         {
             var t = T(c);
@@ -148,12 +180,15 @@ namespace VHSCapture
             field.Margin = new Padding(0, (RowH - field.Height) / 2, 8, 0);
             if (field is ComboBox || field is NumericUpDown || field is TextBox) field.Width = FieldW;
             t.Controls.Add(field, 1, r);
+            t.RowCount = r + 1;
             if (hint != null)
             {
-                var h = new Label { Text = hint, AutoSize = true, Tag = "muted", Margin = new Padding(0, 10, 0, 0), MaximumSize = new Size(320, 0) };
-                t.Controls.Add(h, 2, r);
+                // sotto il campo, a capo secondo la larghezza della finestra (vedi FitText)
+                var h = new Label { Text = hint, AutoSize = true, Tag = "muted", Name = "hint", Margin = new Padding(0, 0, 0, 6), MaximumSize = new Size(FieldW + 200, 0) };
+                t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                t.Controls.Add(h, 1, r + 1); t.SetColumnSpan(h, 2);
+                t.RowCount = r + 2;
             }
-            t.RowCount = r + 1;
             return l;
         }
 
@@ -162,7 +197,7 @@ namespace VHSCapture
             var t = T(c);
             int r = t.RowCount;
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            var l = new Label { Text = text, AutoSize = true, Tag = "muted", MaximumSize = new Size(LabelW + FieldW + 300, 0), Margin = new Padding(0, 2, 0, 8) };
+            var l = new Label { Text = text, AutoSize = true, Tag = "muted", Name = "note", MaximumSize = new Size(LabelW + FieldW + 100, 0), Margin = new Padding(0, 2, 0, 8) };
             t.Controls.Add(l, 0, r); t.SetColumnSpan(l, 3);
             t.RowCount = r + 1;
         }
@@ -171,8 +206,8 @@ namespace VHSCapture
         {
             var t = T(c);
             int r = t.RowCount;
-            t.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-            var ch = new CheckBox { Text = text, AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+            t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var ch = new CheckBox { Text = text, AutoSize = true, Name = "chk", Margin = new Padding(0, 6, 0, 4), MaximumSize = new Size(LabelW + FieldW + 100, 0) };
             t.Controls.Add(ch, 0, r); t.SetColumnSpan(ch, 3);
             t.RowCount = r + 1;
             if (description != null) Note(c, "      " + description);
@@ -215,9 +250,9 @@ namespace VHSCapture
         {
             var p = Page("Registrazione");
             var file = Section(p, "File");
-            cbFormat = Combo("MP4 normale (allo stop il taglio coda riscrive il file)", "MP4 frammentato, come OBS (consigliato: stop istantaneo)", "MKV sicuro → MP4 alla fine (lento: riscrive tutto)");
+            cbFormat = Combo("MP4 normale (come OBS)", "MP4 frammentato", "MKV → MP4 alla fine");
             Row(file, "Formato", cbFormat);
-            Note(file, "MP4 frammentato: scritto a pezzi mentre registri, come l'MP4 ibrido di OBS. Allo stop non c'è niente da convertire, il taglio della coda è istantaneo e il file resta leggibile anche se salta la corrente. Se un TV molto vecchio non lo legge, scegli MP4 normale.");
+            Note(file, "MP4 normale: come OBS con \"MPEG-4 (.mp4)\", un indice unico scritto alla chiusura, i lettori lo aprono subito. Se salta la corrente durante la registrazione il file non è recuperabile. MP4 frammentato: resta leggibile anche dopo un crash, ma lettori come MPC-HC ci mettono di più ad aprirlo.");
             nSplit = Num(0, 600, 5);
             Row(file, "Dividi file ogni (minuti)", nSplit, "0 = no. Utile per chiavette FAT32 (4 GB)");
 

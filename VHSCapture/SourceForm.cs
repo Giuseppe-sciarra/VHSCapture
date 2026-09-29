@@ -56,6 +56,10 @@ namespace VHSCapture
             StartPosition = FormStartPosition.CenterParent;
             Font = new Font("Segoe UI", 9.5f);
             ClientSize = new Size(760, 860); MinimumSize = new Size(520, 420);
+            // all'apertura e a ogni ridimensionamento: testi a capo entro la finestra (niente più finestra da allargare)
+            void FitAll(Control parent) { foreach (Control c in parent.Controls) { if (c is TableLayoutPanel tl && Equals(tl.Tag, "panel")) FitGrid(tl); if (c.HasChildren) FitAll(c); } }
+            Shown += (o, e) => FitAll(this);
+            Resize += (o, e) => FitAll(this);
             Build();
             LoadValues();
             loading = false;
@@ -371,7 +375,8 @@ namespace VHSCapture
             t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             g.Controls.Add(t);
             t.Width = Math.Max(300, g.ClientSize.Width - g.Padding.Horizontal);
-            g.Resize += (o, e) => { t.Width = Math.Max(300, g.ClientSize.Width - g.Padding.Horizontal); };
+            g.Resize += (o, e) => { t.Width = Math.Max(300, g.ClientSize.Width - g.Padding.Horizontal); FitGrid(t); };
+            t.ControlAdded += (o, e) => { if (e.Control is ComboBox co) co.DropDown += (s2, e2) => FitDropDown(co); };
             t.SizeChanged += (o, e) => g.PerformLayout();
             return t;
         }
@@ -389,8 +394,16 @@ namespace VHSCapture
             else if (c is TrackBar) c.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             else c.Anchor = AnchorStyles.Left;
             t.Controls.Add(c, 1, r);
-            if (extra != null) { extra.Anchor = AnchorStyles.Left; extra.Margin = new Padding(0, 4, 0, 4); t.Controls.Add(extra, 2, r); }
             t.RowCount = r + 1;
+            if (extra is Label hint)
+            {
+                // testo di aiuto sotto il campo: niente terza colonna che allarga la finestra
+                hint.Margin = new Padding(0, 0, 0, 6); hint.Anchor = AnchorStyles.Left;
+                t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                t.Controls.Add(hint, 1, r + 1); t.SetColumnSpan(hint, 2);
+                t.RowCount = r + 2;
+            }
+            else if (extra != null) { extra.Anchor = AnchorStyles.Left; extra.Margin = new Padding(0, 4, 0, 4); t.Controls.Add(extra, 2, r); }
         }
 
         static void Full(TableLayoutPanel t, Control c)
@@ -429,6 +442,27 @@ namespace VHSCapture
 
         static ComboBox Combo() => new SafeCombo { DropDownStyle = ComboBoxStyle.DropDownList };
         static NumericUpDown Num(int min, int max, int step) => new SafeNumeric { Minimum = min, Maximum = max, Increment = step };
+        /// <summary>Testi a capo entro la larghezza della colonna dei campi; riepilogo standard e menu non escono dalla finestra.</summary>
+        static void FitGrid(TableLayoutPanel t)
+        {
+            int avail = Math.Max(220, t.Width - 170 - 16);
+            t.SuspendLayout();
+            foreach (Control c in t.Controls)
+            {
+                if (t.GetColumn(c) < 1) continue;
+                if (c is Label lb && lb.AutoSize && (Equals(lb.Tag, "muted") || Equals(lb.Tag, "keep"))) lb.MaximumSize = new Size(avail, 0);
+                else if (c is ComboBox co && co.Width > avail) co.Width = avail;
+            }
+            t.ResumeLayout(true);
+        }
+
+        static void FitDropDown(ComboBox co)
+        {
+            int w = co.Width;
+            foreach (var it in co.Items) w = Math.Max(w, TextRenderer.MeasureText(it?.ToString() ?? "", co.Font).Width + 30);
+            co.DropDownWidth = Math.Min(w, 900);
+        }
+
         static Label Muted(string t, int maxW = 0) => new Label { Text = t, AutoSize = true, Tag = "muted", Margin = new Padding(0, 8, 0, 0), MaximumSize = new Size(maxW, 0) };
         static void Sel(ComboBox cb, string v)
         {

@@ -1,3 +1,11 @@
+# VHSCapture 1.2.7 — testi che stanno nella finestra
+
+- **Impostazioni** e **Proprietà sorgente**: note, suggerimenti e caselle di spunta vanno a capo secondo la larghezza reale della finestra, e si riadattano quando la ridimensioni. I suggerimenti stanno sotto il campo invece che in una terza colonna, i menu a tendina si aprono larghi quanto la voce più lunga, e le voci del Formato sono tornate corte.
+
+# VHSCapture 1.2.6 — MP4 normale come OBS
+
+- Formato predefinito tornato a **MP4 normale**, come OBS con "MPEG-4 (.mp4)": un indice unico scritto alla chiusura, quindi MPC-HC e gli altri lettori lo aprono subito. Al primo avvio viene impostato anche dove c'era il frammentato. Chi usa MKV resta su MKV. Il frammentato resta selezionabile in Impostazioni.
+
 # VHSCapture 1.2.5 — allo stop si salva e basta
 
 - **Il controllo audio non rilegge più il file**: la media e il picco vengono calcolati dal VU durante la registrazione. Prima, su un MP4 frammentato in rete, ffmpeg faceva circa un salto per ogni keyframe: 319 salti per 10 minuti, circa 5.700 per una cassetta di 3 ore, cioè minuti di attesa sul NAS.

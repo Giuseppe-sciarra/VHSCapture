@@ -370,7 +370,7 @@ namespace VHSCapture
             var opz = Section(p, "Questo PC");
             Note(opz, "Valgono solo per questo PC e si vedono anche nel CRM (Controllo PC → 🎬 VHSCapture): vince l'ultima modifica. Le opzioni spente restano salvate.");
             chkCrmCliente = Check(opz, "Chiedi il cliente quando parte la registrazione",
-                "Solo se non c'è un cliente in corso: la prima volta e quando hai finito le sue videocassette. Le cassette dello stesso cliente partono senza domande. «Nessun cliente» vale finché non scegli un cliente dal pulsante 👤.");
+                "La registrazione parte SUBITO; la domanda arriva mentre registra, solo se non c'è un cliente in corso (la prima volta e quando hai finito le sue videocassette). Scelto il cliente, a fine registrazione il file viene spostato nella sua cartella. Senza scelta entro 60 secondi la finestra si chiude e si resta nella cartella predefinita.");
             chkCrmCartella = Check(opz, "Salva nella cartella del cliente", "«Nome Cognome» dentro la cartella di salvataggio del PC (Generale), creata se non c'è.");
             chkCrmFine = Check(opz, "A fine cassetta chiedi com'è andata", "✅ Completata (si conta) · 🗑 Scarta (vuota: il totale scende) · 🔄 Rifai (partenza sbagliata). Scarta e Rifai cancellano il file.");
             chkCrmMinima = Check(opz, "Durata minima per contare una cassetta", "Sotto questa durata la cassetta non si conta mai.");

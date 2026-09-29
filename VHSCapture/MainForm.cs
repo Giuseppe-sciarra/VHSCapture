@@ -35,6 +35,8 @@ namespace VHSCapture
         System.Windows.Forms.Timer crmTimer;
         bool crmOccupato;
         bool nessunCliente;                       // scelto «Nessun cliente»: non si chiede più finché non scegli un cliente dal pulsante 👤
+        ClienteForm sceltaAperta;                 // «Di chi è questa cassetta?» aperta mentre si registra (non blocca niente)
+        bool daSpostare;                          // cliente scelto a registrazione già partita: a fine registrazione i file si SPOSTANO nella sua cartella
         ProgressoCliente prog; Panel progWrap;    // fascia dell'avanzamento del cliente in corso
         List<CrmPostazione> postazioni = new List<CrmPostazione>();
         bool CrmAttivo => crm != null && crm.Configurato;
@@ -558,6 +560,72 @@ namespace VHSCapture
             AggiornaCliente();
         }
 
+        /// <summary>
+        /// «Di chi è questa cassetta?» aperta A REGISTRAZIONE GIÀ PARTITA, senza bloccare niente (si può anche fermare).
+        /// Se entro 60 s non si sceglie, si chiude da sola e la registrazione continua nella cartella predefinita.
+        /// </summary>
+        void ChiediClienteDurante()
+        {
+            if (sceltaAperta != null) return;
+            var f = new ClienteForm(settings.DarkTheme, () => crm.Lavori(), () => crm.UltimoErrore, true, "Di chi è questa cassetta?", 60);
+            f.FormClosed += (o, e) =>
+            {
+                if (sceltaAperta == f) sceltaAperta = null;
+                bool scelta = f.DialogResult == DialogResult.OK;
+                var scelto = f.Scelto;
+                BeginInvoke(new Action(() => f.Dispose()));
+                if (!scelta) { AppendLog("Cliente non scelto: la registrazione continua nella cartella predefinita"); return; }
+                if (scelto == null)
+                {
+                    nessunCliente = true;
+                    AppendLog("Nessun cliente: si registra senza CRM finché non scegli un cliente dal pulsante 👤");
+                    AggiornaCliente();
+                    return;
+                }
+                lavoro = scelto;
+                if (!engine.IsRecording || finalizing) { AggiornaCliente(); return; }   // fermata nel frattempo: vale dalla prossima cassetta
+                daSpostare = true;
+                cassettaInCorso = Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali));
+                AppendLog($"Cliente {lavoro.cliente}: cassetta {cassettaInCorso} di {lavoro.nastri_totali} — a fine registrazione il file va nella cartella «{lavoro.cartella}»");
+                _ = crm.Manda("inizio", new Dictionary<string, object> { ["vhs_id"] = lavoro.id, ["cassetta_n"] = cassettaInCorso, ["file"] = Path.GetFileName((recFile ?? "").Replace("%03d", "000")), ["versione"] = crm.Versione });
+                AggiornaCliente();
+                CrmBattito();
+            };
+            // F9 (ferma) e F10 (pausa) funzionano anche mentre questa finestra ha la tastiera
+            f.KeyPreview = true;
+            f.KeyDown += (o, e) =>
+            {
+                if (e.KeyCode == Keys.F9) { e.Handled = true; ToggleRecording(); }
+                else if (e.KeyCode == Keys.F10) { e.Handled = true; TogglePause(); }
+            };
+            sceltaAperta = f;
+            f.StartPosition = FormStartPosition.Manual;
+            f.Location = new Point(Left + Math.Max(0, (Width - f.Width) / 2), Top + Math.Max(0, (Height - f.Height) / 2));
+            f.Show(this);
+        }
+
+        /// <summary>Sposta (taglia e incolla, non copia) i file della registrazione nella cartella del cliente dentro la cartella predefinita.</summary>
+        async Task SpostaNellaCartellaCliente(string final, string cartellaRete, string cartellaCliente)
+        {
+            string dir = cartellaRete ?? Path.GetDirectoryName(final);
+            string dest = Path.Combine(dir, cartellaCliente);
+            try { Directory.CreateDirectory(dest); }
+            catch (Exception ex) { AppendLog("⚠ Cartella del cliente non creata (" + ex.Message + "): il file resta nella cartella predefinita"); return; }
+            foreach (var f in RecordedFiles(Path.Combine(dir, Path.GetFileName(final))).ToList())
+            {
+                string target = Path.Combine(dest, Path.GetFileName(f));
+                for (int k = 1; File.Exists(target); k++)
+                    target = Path.Combine(dest, Path.GetFileNameWithoutExtension(f) + "_" + k + Path.GetExtension(f));
+                try
+                {
+                    lblRec.Text = "Sposto nella cartella del cliente…";
+                    await Task.Run(() => File.Move(f, target));   // stessa unità = istantaneo; unità diversa = copia e cancella l'originale
+                    AppendLog("Spostato in «" + cartellaCliente + "»: " + Path.GetFileName(target));
+                }
+                catch (Exception ex) { AppendLog("⚠ Non spostato (" + ex.Message + "): resta in " + f); }
+            }
+        }
+
         string Prompt(string title, string label, string value)
         {
             using var f = new Form { Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(480, 150), MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = true, TopMost = true, Font = Font };
@@ -844,19 +912,7 @@ namespace VHSCapture
             if (CaptureBusy) return;
             if (!settings.Sources.Any(x => x.Visible)) { MessageBox.Show(this, "Aggiungi almeno una sorgente.", "VHSCapture"); return; }
 
-            // CRM: il cliente si chiede SOLO se non ce n'è uno in corso (prima registrazione, o videocassette del cliente
-            // finite). Le cassette dello stesso cliente partono senza domande.
-            if (CrmAttivo && settings.CrmChiediCliente && lavoro == null && !nessunCliente)
-            {
-                using var fc = new ClienteForm(settings.DarkTheme, () => crm.Lavori(), () => crm.UltimoErrore, true, "Di chi è questa cassetta?");
-                if (fc.ShowDialog(this) != DialogResult.OK) { AppendLog("Registrazione non avviata: nessun cliente scelto"); return; }
-                lavoro = fc.Scelto;
-                nessunCliente = lavoro == null;
-                AppendLog(lavoro == null ? "Nessun cliente: si registra senza CRM finché non scegli un cliente dal pulsante 👤"
-                                         : $"Cliente: {lavoro.cliente} — {lavoro.dettaglio}");
-                AggiornaCliente();
-            }
-
+            daSpostare = false;
             string destFolder = settings.ResolvedOutputFolder();
             if (lavoro != null && settings.CrmCartellaCliente && !string.IsNullOrWhiteSpace(lavoro.cartella))
             {
@@ -924,6 +980,8 @@ namespace VHSCapture
                     _ = crm.Manda("inizio", new Dictionary<string, object> { ["vhs_id"] = lavoro.id, ["cassetta_n"] = cassettaInCorso, ["file"] = Path.GetFileName(recFile.Replace("%03d", "000")), ["versione"] = crm.Versione });
                     CrmBattito();
                 }
+                else if (CrmAttivo && settings.CrmChiediCliente && !nessunCliente)
+                    ChiediClienteDurante();   // la registrazione è già partita: la domanda arriva adesso, senza bloccare
             }
             catch (Exception ex)
             {
@@ -981,6 +1039,7 @@ namespace VHSCapture
         {
             if (!engine.IsRecording || finalizing || startingRecording) return;
             durataStop = DurataRegistrazione();
+            if (sceltaAperta != null) { var fa = sceltaAperta; sceltaAperta = null; fa.Close(); }   // fermata prima di scegliere: resta senza cliente
             finalizing = true;
             SetButtons();
             lblRec.Text = "Chiusura file…"; lblRec.Fill = Color.Transparent; lblRec.ForeColor = Theme.Fore;
@@ -1034,6 +1093,9 @@ namespace VHSCapture
                 AppendLog(ok ? $"Coda uniforme tagliata: file lungo {TimeSpan.FromSeconds(cut):hh\\:mm\\:ss}" : "Coda uniforme non tagliata (il file è comunque salvo)");
             }
 
+            // cliente scelto a registrazione già partita: a fine chiusura i file si SPOSTANO nella sua cartella
+            string cartellaDaSpostare = (daSpostare && lavoro != null && settings.CrmCartellaCliente && !string.IsNullOrWhiteSpace(lavoro.cartella)) ? lavoro.cartella : null;
+
             // cliente del CRM: com'è andata la cassetta. Scarta / Rifai cancellano il file appena registrato.
             if (lavoro != null)
             {
@@ -1048,6 +1110,7 @@ namespace VHSCapture
                     esito = ff.Esito;
                     if (esito != "completata")
                     {
+                        cartellaDaSpostare = null;   // file cancellato: niente da spostare
                         if (moveTo != null) { mirror?.Abort(); mirror = null; }
                         foreach (var fdel in RecordedFiles(final).Concat(RecordedFiles(written)).Distinct(StringComparer.OrdinalIgnoreCase).ToList())
                         {
@@ -1097,6 +1160,10 @@ namespace VHSCapture
                 else m?.Abort();
                 if (files.Count > 0) await MoveToNetwork(files, moveTo);
             }
+
+            // cliente scelto durante la registrazione: sposta (taglia e incolla) i file nella cartella del cliente
+            if (cartellaDaSpostare != null && muxOk) await SpostaNellaCartellaCliente(final, moveTo, cartellaDaSpostare);
+            daSpostare = false;
 
             }
             catch (Exception ex)

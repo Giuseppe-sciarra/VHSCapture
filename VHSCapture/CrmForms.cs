@@ -277,7 +277,12 @@ namespace VHSCapture
         const int W = 640;
         public CrmLavoro Scelto { get; private set; }
 
-        public ClienteForm(bool dark, Func<Task<List<CrmLavoro>>> caricaLavori, Func<string> ultimoErrore, bool soloLista, string titolo = null)
+        readonly Label lblTempo;
+        System.Windows.Forms.Timer tempo;
+        int restano;
+
+        /// <param name="chiudiDopo">secondi dopo cui la finestra si chiude da sola senza scelta (0 = mai): usato mentre si registra</param>
+        public ClienteForm(bool dark, Func<Task<List<CrmLavoro>>> caricaLavori, Func<string> ultimoErrore, bool soloLista, string titolo = null, int chiudiDopo = 0)
         {
             Theme.Apply(this, dark);   // i colori servono già per costruire i riquadri
             carica = caricaLavori; errore = ultimoErrore;
@@ -310,8 +315,10 @@ namespace VHSCapture
             // ── passo 2: lista dei clienti in coda ──
             passo2 = new Panel { Dock = DockStyle.Fill, Padding = new Padding(24, 16, 24, 16), Visible = false };
             var t2 = new Label { Text = titolo ?? "Quale cliente?", Dock = DockStyle.Top, Height = 40, Font = new Font("Segoe UI Semibold", 15f) };
-            var info2 = new InfoBox("ℹ️",
-                "Clicca sul cliente di questa cassetta: la registrazione parte subito. Le prossime cassette dello stesso cliente partono senza chiedere, finché non hai finito le sue videocassette.\n" +
+            var info2 = new InfoBox(chiudiDopo > 0 ? "🔴" : "ℹ️",
+                (chiudiDopo > 0
+                    ? "La registrazione è GIÀ PARTITA, non stai perdendo niente. Clicca sul cliente di questa cassetta: a fine registrazione il file viene spostato nella sua cartella. Le prossime cassette dello stesso cliente non chiedono più niente, finché non hai finito le sue videocassette.\n"
+                    : "Clicca sul cliente di questa cassetta. Le prossime cassette dello stesso cliente partono senza chiedere, finché non hai finito le sue videocassette.\n") +
                 "«cassetta 3 di 4» = stai per registrare la 3ª delle 4 videocassette della scheda (VHS, S-VHS, VHS-C, 8mm, Hi8, Digital8, MiniDV).\n" +
                 "La riga sotto elenca tutti i supporti del cliente (anche DVD, CD, musicassette… che si lavorano a parte).\n" +
                 "🔴 = un altro PC sta già registrando questo cliente.",
@@ -320,7 +327,7 @@ namespace VHSCapture
             // ricerca: con tanti clienti in coda si trova il nome in un attimo (Invio = il primo della lista)
             var rigaCerca = new Panel { Dock = DockStyle.Top, Height = 40, Padding = new Padding(0, 2, 0, 6) };
             cerca = new TextBox { Dock = DockStyle.Fill, Font = new Font("Segoe UI", 11f), PlaceholderText = "🔎  Cerca il cliente per nome…", BorderStyle = BorderStyle.FixedSingle };
-            cerca.TextChanged += (o, e) => Filtra();
+            cerca.TextChanged += (o, e) => { Filtra(); restano = Math.Max(restano, 60); };   // stai cercando: il conto alla rovescia riparte
             cerca.KeyDown += (o, e) =>
             {
                 if (e.KeyCode != Keys.Enter) return;
@@ -336,10 +343,27 @@ namespace VHSCapture
             var bNessuno2 = Ui.Btn("🚫  Nessun cliente (registra senza CRM)", "ghost", (o, e) => { Scelto = null; DialogResult = DialogResult.OK; Close(); }, 250);
             var bAggiorna = Ui.Btn("↻  Aggiorna la lista", "ghost", async (o, e) => await Carica(), 150);
             giu.Controls.Add(bNessuno2); giu.Controls.Add(bAggiorna);
-            passo2.Controls.Add(elenco); passo2.Controls.Add(lblStato); passo2.Controls.Add(rigaCerca); passo2.Controls.Add(spazio); passo2.Controls.Add(info2); passo2.Controls.Add(t2); passo2.Controls.Add(giu);
+            // conto alla rovescia: senza scelta la finestra si chiude e la registrazione continua nella cartella predefinita
+            lblTempo = new Label { Dock = DockStyle.Bottom, Height = 26, Tag = "keep", Font = new Font("Segoe UI Semibold", 9.5f), TextAlign = ContentAlignment.MiddleLeft, Visible = chiudiDopo > 0 };
+            if (chiudiDopo > 0)
+            {
+                restano = chiudiDopo;
+                tempo = new System.Windows.Forms.Timer { Interval = 1000 };
+                tempo.Tick += (o, e) =>
+                {
+                    restano--;
+                    lblTempo.Text = $"⏱  Si chiude da sola tra {restano} s: la registrazione continua nella cartella predefinita, senza cliente.";
+                    lblTempo.ForeColor = restano <= 10 ? Theme.Rec : Theme.Muted;
+                    if (restano <= 0) { tempo.Stop(); Close(); }
+                };
+                lblTempo.Text = $"⏱  Si chiude da sola tra {restano} s: la registrazione continua nella cartella predefinita, senza cliente.";
+                Shown += (o, e) => tempo.Start();
+                FormClosed += (o, e) => { tempo.Stop(); tempo.Dispose(); };
+            }
+            passo2.Controls.Add(elenco); passo2.Controls.Add(lblStato); passo2.Controls.Add(rigaCerca); passo2.Controls.Add(spazio); passo2.Controls.Add(info2); passo2.Controls.Add(t2); passo2.Controls.Add(lblTempo); passo2.Controls.Add(giu);
 
             Controls.Add(passo2); Controls.Add(passo1);
-            ClientSize = new Size(W, soloLista ? 600 : altezzaPasso1);
+            ClientSize = new Size(W, soloLista ? 640 : altezzaPasso1);
             Theme.Apply(this, dark);
             foreach (Control c in passo1.Controls) if (c is SceltaCard sc) sc.Colori();
             elenco.BackColor = Theme.Back;

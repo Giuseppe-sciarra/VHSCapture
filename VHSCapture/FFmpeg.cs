@@ -1015,7 +1015,7 @@ namespace VHSCapture
         public void StartRecording(AppSettings s, string outputFile)
         {
             if (!IsRunning) throw new InvalidOperationException("Pipeline non avviata");
-            if (!recorder.HasBufferedKeyFrame) throw new InvalidOperationException("Il grabber non ha ancora fornito un fotogramma completo. Attendi l'anteprima e riprova.");
+            // niente attese: se il pre-roll ha già un keyframe si scrive subito da lì, altrimenti si parte al prossimo
             recorder.Start(MuxArgs(s, outputFile));
         }
 

@@ -645,41 +645,22 @@ namespace VHSCapture
                 recFile = settings.SafeRecording ? Path.Combine(folder, baseName + ".mkv") : finalFile;
 
             restartTimer.Stop();
-            startingRecording = true; SetButtons();
-            lblRec.Text = "Preparazione registrazione…";
             bool muxStarted = false;
             try
             {
-                // Verifica la cartella prima di agganciare il muxer, senza toccare file esistenti.
+                // cartella scrivibile: controllo istantaneo, senza toccare file esistenti
                 string probe = Path.Combine(folder, ".vhscapture-" + Guid.NewGuid().ToString("N") + ".tmp");
                 using (var writable = new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) writable.WriteByte(0);
                 if (!engine.IsRunning) StartPreview();
-                var ready = Stopwatch.StartNew();
-                while (!engine.Recorder.HasBufferedKeyFrame)
-                {
-                    if (closingApp || IsDisposed) return;
-                    if (ready.Elapsed.TotalSeconds > 25)
-                        throw new IOException("Il grabber non ha fornito un fotogramma completo. Controlla l'anteprima e riprova.");
-                    await Task.Delay(100);
-                }
-                if (closingApp || IsDisposed) return;
-                // La pipeline GPU resta accesa: il muxer si aggancia al pre-roll già pronto.
+                // PARTE SUBITO (come prima): il registratore scrive dal keyframe già in memoria, o dal prossimo se non c'è ancora.
                 engine.StartRecording(settings, recFile); muxStarted = true;
                 recStart = DateTime.Now;
                 pausedSince = null; pausedTotal = TimeSpan.Zero;
-                ready.Restart();
-                while (!engine.Recorder.OutputStarted || RecordedBytes(recFile) == 0)
-                {
-                    if (closingApp || IsDisposed) return;
-                    if (engine.Recorder.LastError != null) throw new IOException(engine.Recorder.LastError);
-                    if (!engine.IsRunning || !engine.Recorder.MuxAlive) throw new IOException("Il dispositivo o il processo di registrazione si è fermato durante l'avvio.");
-                    if (ready.Elapsed.TotalSeconds > 15) throw new IOException("Il file non ha iniziato a ricevere video entro il tempo previsto. Controlla la destinazione e riprova.");
-                    await Task.Delay(100);
-                }
-                if (engine.Recorder.LastError != null) throw new IOException(engine.Recorder.LastError);
                 blankSince = null; blankStartRecSec = -1; contentSamples = 0; autoStopped = false;
                 lastSignalAt = DateTime.MinValue; blankFloor = DateTime.UtcNow; stallWarned = false;
                 AppendLog("Registrazione avviata: " + Path.GetFileName(recFile) + (moveTo != null ? $" (sul PC, poi in {moveTo})" : ""));
+                SetButtons();
+                VerifyRecordingStarted(recFile, ++recSession);   // controllo dietro le quinte, non blocca
             }
             catch (Exception ex)
             {
@@ -687,12 +668,33 @@ namespace VHSCapture
                 string partial = RecordedBytes(recFile) > 0 ? "\nIl file parziale è conservato: " + recFile : "";
                 AppendLog("Registrazione non avviata: " + ex.Message + partial);
                 if (!closingApp && !IsDisposed) MessageBox.Show(this, "Registrazione non avviata.\n" + ex.Message + partial, "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                SetButtons();
             }
-            finally
+        }
+
+        int recSession;
+
+        /// <summary>
+        /// Dopo il clic su Registra: se entro 20 s il file non riceve video (grabber fermo, destinazione non scrivibile, muxer
+        /// terminato) ferma e avvisa. Gira in background: la registrazione è già partita e l'interfaccia è già in REC.
+        /// </summary>
+        async void VerifyRecordingStarted(string file, int session)
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.Elapsed.TotalSeconds < 20)
             {
-                startingRecording = false;
-                if (!closingApp && !IsDisposed) { lblRec.Text = ""; SetButtons(); }
+                await Task.Delay(250);
+                if (session != recSession || closingApp || IsDisposed || !engine.IsRecording || finalizing) return;
+                if (engine.Recorder.OutputStarted && RecordedBytes(file) > 0) return;          // tutto ok
+                if (engine.Recorder.LastError != null || !engine.Recorder.MuxAlive) break;     // errore vero
             }
+            if (session != recSession || closingApp || IsDisposed || !engine.IsRecording || finalizing) return;
+            string why = engine.Recorder.LastError ?? (!engine.Recorder.MuxAlive
+                ? "Il processo di registrazione si è fermato."
+                : "Il file non ha ricevuto video entro 20 secondi: controlla l'anteprima e la cartella di destinazione.");
+            AppendLog("Registrazione interrotta all'avvio: " + why);
+            StopRecording(true);
+            MessageBox.Show(this, "La registrazione non è partita.\n" + why, "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         async void StopRecording(bool restartPreview)

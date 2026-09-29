@@ -34,11 +34,15 @@ namespace VHSCapture
         ComboBox cbIntelField;
         // Fine cassetta
         CheckBox chkAutoStop, chkTrim, chkAskName, chkLocalFirst; NumericUpDown nAutoSec;
+        // CRM
+        TextBox txtCrmUrl, txtCrmToken; Label lblCrmProva;
+        CheckBox chkCrmCliente, chkCrmCartella, chkCrmFine, chkCrmMinima; NumericUpDown nCrmMin;
 
         readonly Dictionary<string, Panel> pages = new Dictionary<string, Panel>();
         ListBox nav; Panel host;
 
         const int LabelW = 190, FieldW = 260, RowH = 36;
+        string cartellaPrimaSalvataggio;
 
         public SettingsForm(AppSettings settings)
         {
@@ -68,7 +72,7 @@ namespace VHSCapture
             AcceptButton = btnOk; CancelButton = btnCancel;
 
             nav = new ListBox { Dock = DockStyle.Left, Width = 180, BorderStyle = BorderStyle.None, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 40, IntegralHeight = false, Font = new Font("Segoe UI", 10f) };
-            nav.Items.AddRange(new object[] { "Generale", "Registrazione", "Video", "Audio", "Avanzate" });
+            nav.Items.AddRange(new object[] { "Generale", "Registrazione", "Video", "Audio", "Avanzate", "CRM" });
             nav.DrawItem += DrawNav;
             nav.SelectedIndexChanged += (o, e) => ShowPage(nav.SelectedItem as string);
             var navWrap = new Panel { Dock = DockStyle.Left, Width = 196, Padding = new Padding(12, 12, 4, 12) };
@@ -76,7 +80,7 @@ namespace VHSCapture
 
             host = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8, 12, 12, 4) };
 
-            BuildGenerale(); BuildRegistrazione(); BuildVideo(); BuildAudio(); BuildAvanzate();
+            BuildGenerale(); BuildRegistrazione(); BuildVideo(); BuildAudio(); BuildAvanzate(); BuildCrm();
             foreach (var p in pages.Values) { p.Dock = DockStyle.Fill; p.Visible = false; host.Controls.Add(p); }
 
             Controls.Add(host);
@@ -101,7 +105,7 @@ namespace VHSCapture
                 using var b = new SolidBrush(Color.FromArgb(Theme.Dark ? 90 : 50, Theme.Accent));
                 g.FillPath(b, path);
             }
-            string icon = e.Index switch { 0 => "⚙", 1 => "⏺", 2 => "🖥", 3 => "🔊", _ => "🔧" };
+            string icon = e.Index switch { 0 => "⚙", 1 => "⏺", 2 => "🖥", 3 => "🔊", 5 => "🔗", _ => "🔧" };
             TextRenderer.DrawText(g, icon, new Font("Segoe UI Symbol", 10.5f), new Rectangle(r.X + 8, r.Y, 26, r.Height), Theme.Fore, TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter);
             TextRenderer.DrawText(g, nav.Items[e.Index].ToString(), nav.Font, new Rectangle(r.X + 38, r.Y, r.Width - 40, r.Height), Theme.Fore, TextFormatFlags.VerticalCenter);
         }
@@ -335,6 +339,39 @@ namespace VHSCapture
             cb.SelectedIndex = -1;
         }
 
+        void BuildCrm()
+        {
+            var p = Page("CRM");
+            var col = Section(p, "Collegamento al CRM");
+            txtCrmUrl = new TextBox { BorderStyle = BorderStyle.FixedSingle };
+            Row(col, "Indirizzo del CRM", txtCrmUrl, "es. https://crm.tastieredigitali.it");
+            txtCrmToken = new TextBox { BorderStyle = BorderStyle.FixedSingle, UseSystemPasswordChar = true };
+            Row(col, "Token di questo PC", txtCrmToken, "Nel CRM: Controllo PC → la postazione → 🎬 VHSCapture → Genera il token");
+            var provaRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0), Tag = "panel" };
+            var bProva = Ui.Btn("Prova collegamento", "ghost"); bProva.MinimumSize = new Size(150, 28); bProva.Height = 28; bProva.Margin = new Padding(0);
+            bProva.Click += async (o, e) =>
+            {
+                lblCrmProva.Text = "Provo…"; bProva.Enabled = false;
+                using var c = new CrmClient(s);
+                var (ok, msg) = await c.Prova(txtCrmUrl.Text, txtCrmToken.Text);
+                lblCrmProva.Text = (ok ? "✅ " : "⚠ ") + msg; lblCrmProva.ForeColor = ok ? Theme.Fore : Theme.Rec; bProva.Enabled = true;
+            };
+            provaRow.Controls.Add(bProva); provaRow.Height = 30;
+            Row(col, "", provaRow);
+            lblCrmProva = new Label { AutoSize = true, Name = "note", Margin = new Padding(0, 2, 0, 8) };
+            var tc = T(col); int r = tc.RowCount; tc.RowStyles.Add(new RowStyle(SizeType.AutoSize)); tc.Controls.Add(lblCrmProva, 0, r); tc.SetColumnSpan(lblCrmProva, 3); tc.RowCount = r + 1;
+
+            var opz = Section(p, "Questo PC");
+            Note(opz, "Valgono solo per questo PC e si vedono anche nel CRM (Controllo PC → 🎬 VHSCapture): vince l'ultima modifica. Le opzioni spente restano salvate.");
+            chkCrmCliente = Check(opz, "All'avvio chiedi il cliente", "«👤 Cliente» mostra la coda del CRM, «Nessun cliente» registra come sempre.");
+            chkCrmCartella = Check(opz, "Salva nella cartella del cliente", "«Nome Cognome» dentro la cartella di salvataggio del PC (Generale), creata se non c'è.");
+            chkCrmFine = Check(opz, "A fine cassetta chiedi com'è andata", "✅ Completata (si conta) · 🗑 Scarta (vuota: il totale scende) · 🔄 Rifai (partenza sbagliata). Scarta e Rifai cancellano il file.");
+            chkCrmMinima = Check(opz, "Durata minima per contare una cassetta", "Sotto questa durata la cassetta non si conta mai.");
+            nCrmMin = Num(1, 120, 1);
+            Row(opz, "Durata minima (minuti)", nCrmMin);
+            chkCrmMinima.CheckedChanged += (o, e) => nCrmMin.Enabled = chkCrmMinima.Checked;
+        }
+
         void LoadValues()
         {
             cbTheme.SelectedIndex = s.DarkTheme ? 1 : 0;
@@ -374,12 +411,21 @@ namespace VHSCapture
             chkDiag.Checked = s.DiagLog;
             chkIntel.Checked = s.IntelGpu;
             cbIntelField.SelectedIndex = s.IntelFieldOrder == "bff" ? 1 : 0;
+            txtCrmUrl.Text = s.CrmUrl ?? "";
+            txtCrmToken.Text = s.CrmToken ?? "";
+            chkCrmCliente.Checked = s.CrmChiediCliente;
+            chkCrmCartella.Checked = s.CrmCartellaCliente;
+            chkCrmFine.Checked = s.CrmChiediFine;
+            chkCrmMinima.Checked = s.CrmDurataMinimaAttiva;
+            nCrmMin.Value = Math.Clamp(s.CrmDurataMinimaMin, 1, 120);
+            nCrmMin.Enabled = chkCrmMinima.Checked;
             UpdateEnabled();
         }
 
         bool SaveValues()
         {
             if (probingEncoders) return false;
+            cartellaPrimaSalvataggio = s.OutputFolder;
             string selected = EncFromLabel(cbEncoder.Text);
             if ((encoderChosen || selected != s.Encoder) && (!encoderResults.TryGetValue(selected, out var probe) || !probe.Works))
             {
@@ -431,6 +477,19 @@ namespace VHSCapture
             s.DiagLog = chkDiag.Checked;
             s.IntelGpu = chkIntel.Checked;
             s.IntelFieldOrder = cbIntelField.SelectedIndex == 1 ? "bff" : "tff";
+
+            // CRM: se cambia qualcosa della configurazione di questo PC la segno «modificata adesso» (vince sulla copia nel CRM)
+            bool cambiata = s.CrmChiediCliente != chkCrmCliente.Checked || s.CrmCartellaCliente != chkCrmCartella.Checked
+                         || s.CrmChiediFine != chkCrmFine.Checked || s.CrmDurataMinimaAttiva != chkCrmMinima.Checked
+                         || s.CrmDurataMinimaMin != (int)nCrmMin.Value || !string.Equals(cartellaPrimaSalvataggio, s.OutputFolder, StringComparison.OrdinalIgnoreCase);
+            s.CrmUrl = txtCrmUrl.Text.Trim();
+            s.CrmToken = txtCrmToken.Text.Trim();
+            s.CrmChiediCliente = chkCrmCliente.Checked;
+            s.CrmCartellaCliente = chkCrmCartella.Checked;
+            s.CrmChiediFine = chkCrmFine.Checked;
+            s.CrmDurataMinimaAttiva = chkCrmMinima.Checked;
+            s.CrmDurataMinimaMin = (int)nCrmMin.Value;
+            if (cambiata) s.CrmConfigAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss");
             s.Save();
             return true;
         }

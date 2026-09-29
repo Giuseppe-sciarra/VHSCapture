@@ -24,6 +24,17 @@ namespace VHSCapture
         Label lblStatus; Pill lblRec;
         SourceList srcList;
         RoundedButton btnPanels; Label lblName;
+
+        // ── collegamento col CRM (Crm.cs, CrmForms.cs) ──
+        CrmClient crm;
+        CrmLavoro lavoro;                         // cliente scelto (null = nessun cliente)
+        int cassettaInCorso;                      // numero della cassetta che si sta registrando
+        TimeSpan durataStop;                      // durata misurata al clic su Stop (al netto delle pause)
+        RoundedButton btnCliente;
+        Label lblCrm; Panel crmWrap;
+        System.Windows.Forms.Timer crmTimer;
+        bool crmOccupato;
+        List<CrmPostazione> postazioni = new List<CrmPostazione>();
         Panel mixer;
         readonly Dictionary<string, MixerRow> mixerRows = new Dictionary<string, MixerRow>();
         System.Windows.Forms.Timer timer, restartTimer;
@@ -94,6 +105,9 @@ namespace VHSCapture
             timer = new System.Windows.Forms.Timer { Interval = 500 };
             timer.Tick += (o, e) => UpdateStatus();
             timer.Start();
+            crm = new CrmClient(settings) { Versione = $"{ver.Major}.{ver.Minor}.{ver.Build}" };
+            crmTimer = new System.Windows.Forms.Timer { Interval = 20000 };
+            crmTimer.Tick += (o, e) => CrmBattito();
             restartTimer = new System.Windows.Forms.Timer { Interval = 450 };
             restartTimer.Tick += (o, e) => { restartTimer.Stop(); if (!CaptureBusy) StartPreview(); };
 
@@ -101,6 +115,7 @@ namespace VHSCapture
             {
                 ApplySplitters();          // qui la finestra ha già la dimensione finale (anche se massimizzata)
                 splittersReady = true;
+                BeginInvoke(new Action(CrmAvvio));   // «Chi stai riversando?» a finestra già visibile
             };
             Load += (o, e) =>
             {
@@ -119,6 +134,7 @@ namespace VHSCapture
             FormClosing += (o, e) =>
             {
                 if (finalizing) { e.Cancel = true; return; }
+                crmTimer?.Stop();
                 if (engine.IsRecording)
                 {
                     if (MessageBox.Show(this, "Stai registrando. Fermare e uscire?", "VHSCapture", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
@@ -165,7 +181,9 @@ namespace VHSCapture
             btnTheme = Ui.IconBtn("◐", "Tema chiaro/scuro", (o, e) => { settings.DarkTheme = !settings.DarkTheme; settings.Save(); Theme.Apply(this, settings.DarkTheme); RefreshSourceList(); });
             btnLog = Ui.Btn("Log", "ghost", (o, e) => ToggleLog());
             btnPanels = Ui.IconBtn("◧", "Mostra/nascondi pannello Sorgenti e Mixer", (o, e) => ToggleRightPanel());
-            flow.Controls.AddRange(new Control[] { btnRec, btnPause, lblName, txtName, btnSettings, btnFolder, btnTheme, btnPanels, btnLog });
+            btnCliente = Ui.Btn("👤   Nessun cliente", "ghost", (o, e) => ScegliCliente(true));
+            btnCliente.Margin = new Padding(12, 0, 0, 0); btnCliente.Visible = false;
+            flow.Controls.AddRange(new Control[] { btnRec, btnPause, btnCliente, lblName, txtName, btnSettings, btnFolder, btnTheme, btnPanels, btnLog });
             Resize += (o, e) => ApplyCompact();
             top.Controls.Add(flow);
 
@@ -256,7 +274,15 @@ namespace VHSCapture
             var statusWrap = new Panel { Dock = DockStyle.Bottom, Height = 44 + gap, Padding = new Padding(gap, 0, gap, gap) };
             statusWrap.Controls.Add(status);
 
+            // ---- barra del CRM: cliente in corso e a che punto sono gli altri PC ----
+            var crmCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(12, 2, 12, 2), Radius = 10 };
+            lblCrm = new Label { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+            crmCard.Controls.Add(lblCrm);
+            crmWrap = new Panel { Dock = DockStyle.Bottom, Height = 34 + gap, Padding = new Padding(gap, 0, gap, gap), Visible = false };
+            crmWrap.Controls.Add(crmCard);
+
             Controls.Add(body);
+            Controls.Add(crmWrap);
             Controls.Add(statusWrap);
             Controls.Add(topWrap);
         }
@@ -334,6 +360,172 @@ namespace VHSCapture
             m.Show(owner, at);
         }
 
+        // ================= CRM =================
+
+        /// <summary>All'avvio: configurazione di questo PC dal CRM, battito, e «Chi stai riversando?».</summary>
+        async void CrmAvvio()
+        {
+            AggiornaCliente();
+            if (!crm.Configurato) return;
+            crmTimer.Start();
+            await CrmSincronizzaConfig();
+            CrmBattito();
+            if (settings.CrmChiediCliente && lavoro == null) ScegliCliente(false);
+        }
+
+        void CrmDopoImpostazioni()
+        {
+            if (crm.Configurato) { crmTimer.Start(); _ = CrmSincronizzaConfig(); CrmBattito(); }
+            else crmTimer.Stop();
+            AggiornaCliente();
+        }
+
+        void ScegliCliente(bool soloLista)
+        {
+            if (CaptureBusy) { MessageBox.Show(this, "Ferma la registrazione prima di cambiare cliente.", "VHSCapture"); return; }
+            if (!crm.Configurato) { MessageBox.Show(this, "Collega prima il CRM: Impostazioni → CRM.", "VHSCapture"); return; }
+            using var f = new ClienteForm(settings.DarkTheme, () => crm.Lavori(), () => crm.UltimoErrore, soloLista);
+            if (f.ShowDialog(this) != DialogResult.OK) return;
+            lavoro = f.Scelto;
+            AppendLog(lavoro == null ? "Nessun cliente: si registra come sempre" : $"Cliente: {lavoro.cliente} — {lavoro.dettaglio}");
+            AggiornaCliente();
+        }
+
+        void AggiornaCliente()
+        {
+            if (btnCliente == null || crm == null) return;
+            bool compact = compactState == true;
+            btnCliente.Visible = crm.Configurato;
+            int n = lavoro == null ? 0 : Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali));
+            btnCliente.Text = lavoro == null ? (compact ? "👤" : "👤   Nessun cliente") : (compact ? $"👤 {n}/{lavoro.nastri_totali}" : $"👤   {lavoro.cliente}  ·  {n}/{lavoro.nastri_totali}");
+            btnCliente.Variant = lavoro == null ? "ghost" : "accent";
+            btnCliente.Invalidate();
+            tips.SetToolTip(btnCliente, lavoro == null ? "Scegli il cliente dalla coda del CRM" : $"{lavoro.cliente}: {lavoro.dettaglio}. Clic per cambiare cliente");
+            AggiornaBarraCrm();
+        }
+
+        void AggiornaBarraCrm()
+        {
+            if (crmWrap == null || crm == null) return;
+            crmWrap.Visible = crm.Configurato;
+            if (!crm.Configurato) return;
+            var parti = new List<string>();
+            if (lavoro != null)
+                parti.Add($"👤 {lavoro.cliente} · cassetta {Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali))} di {lavoro.nastri_totali} · {lavoro.dettaglio}");
+            foreach (var p in postazioni.Where(p => !p.questa && p.configurata))
+                parti.Add(p.registrando ? $"🔴 {p.nome}: {p.cliente} {p.cassetta_n}/{p.nastri_totali} · {DurataTesto(p.secondi)}" + (p.in_pausa ? " (pausa)" : "")
+                                        : (p.online ? $"🟢 {p.nome}: libera" : $"⚪ {p.nome}: non collegata"));
+            string st = crm.Raggiungibile ? "CRM ✓" + (string.IsNullOrEmpty(crm.NomePostazione) ? "" : " · " + crm.NomePostazione)
+                                          : "⚠ " + (string.IsNullOrEmpty(crm.UltimoErrore) ? "CRM non raggiungibile" : crm.UltimoErrore);
+            if (crm.InCoda > 0) st += $" · {crm.InCoda} aggiornamenti in attesa di invio";
+            parti.Add(st);
+            lblCrm.Text = string.Join("      ·      ", parti);
+            lblCrm.ForeColor = crm.Raggiungibile ? Theme.Fore : Theme.Rec;
+        }
+
+        static string DurataTesto(int secondi)
+        {
+            var t = TimeSpan.FromSeconds(Math.Max(0, secondi));
+            return t.TotalHours >= 1 ? $"{(int)t.TotalHours}:{t.Minutes:00}:{t.Seconds:00}" : $"{t.Minutes}:{t.Seconds:00}";
+        }
+
+        TimeSpan DurataRegistrazione()
+        {
+            var d = DateTime.Now - recStart - pausedTotal;
+            if (pausedSince != null) d -= DateTime.Now - pausedSince.Value;
+            return d < TimeSpan.Zero ? TimeSpan.Zero : d;
+        }
+
+        /// <summary>Ogni 20 s: eventi rimasti indietro, battito, configurazione cambiata nel CRM, stato degli altri PC.</summary>
+        async void CrmBattito()
+        {
+            if (crm == null || !crm.Configurato || crmOccupato) return;
+            crmOccupato = true;
+            try
+            {
+                await crm.Svuota();
+                bool reg = engine.IsRecording && lavoro != null && !finalizing;
+                string cfgAt = await crm.Battito(reg, lavoro?.id ?? 0, cassettaInCorso, reg ? (int)DurataRegistrazione().TotalSeconds : 0, pausedSince != null);
+                if (cfgAt != null && cfgAt != (settings.CrmConfigAt ?? "")) await CrmSincronizzaConfig();
+                var p = await crm.Postazioni();
+                if (p != null)
+                {
+                    postazioni = p;
+                    var q = p.FirstOrDefault(x => x.questa);
+                    if (q != null) crm.NomePostazione = q.nome;
+                }
+            }
+            catch (Exception ex) { AppendLog("CRM: " + ex.Message); }
+            finally { crmOccupato = false; AggiornaBarraCrm(); }
+        }
+
+        CrmConfig ConfigLocale() => new CrmConfig
+        {
+            chiedi_cliente = settings.CrmChiediCliente, cartella_cliente = settings.CrmCartellaCliente, chiedi_fine = settings.CrmChiediFine,
+            durata_minima_attiva = settings.CrmDurataMinimaAttiva, durata_minima_min = settings.CrmDurataMinimaMin, cartella_base = settings.OutputFolder ?? "",
+        };
+
+        /// <summary>Configurazione di questo PC: vince la modifica più recente (qui nelle Impostazioni o nel CRM).</summary>
+        async Task CrmSincronizzaConfig()
+        {
+            var r = await crm.LeggiConfig();
+            if (r == null) return;
+            var (cfg, quando) = r.Value;
+            string locale = settings.CrmConfigAt ?? "";
+            int cmp = string.Compare(quando ?? "", locale, StringComparison.Ordinal);
+            if (cmp > 0)
+            {
+                settings.CrmChiediCliente = cfg.chiedi_cliente; settings.CrmCartellaCliente = cfg.cartella_cliente;
+                settings.CrmChiediFine = cfg.chiedi_fine; settings.CrmDurataMinimaAttiva = cfg.durata_minima_attiva;
+                settings.CrmDurataMinimaMin = Math.Clamp(cfg.durata_minima_min, 1, 120);
+                if (!string.IsNullOrWhiteSpace(cfg.cartella_base)) settings.OutputFolder = cfg.cartella_base;
+                settings.CrmConfigAt = quando; settings.Save();
+                AppendLog("Impostazioni di questo PC aggiornate dal CRM");
+            }
+            else if (cmp < 0) await crm.SalvaConfig(ConfigLocale(), locale);
+        }
+
+        /// <summary>Fine cassetta: la manda al CRM, aggiorna il conteggio e, finiti i nastri, propone «pronto».</summary>
+        async Task CrmFineCassetta(string esito, string file)
+        {
+            var l = lavoro; if (l == null) return;
+            string risp = await crm.Manda("fine", new Dictionary<string, object>
+            {
+                ["vhs_id"] = l.id, ["cassetta_n"] = cassettaInCorso, ["esito"] = esito, ["secondi"] = (int)durataStop.TotalSeconds, ["file"] = file,
+            });
+            var f = CrmClient.Leggi<CrmFine>(risp);
+            if (f != null) { l.nastri_fatti = f.nastri_fatti; l.nastri_totali = f.nastri_totali; l.prossima = f.prossima; if (!string.IsNullOrEmpty(f.dettaglio)) l.dettaglio = f.dettaglio; }
+            else
+            {
+                // CRM non raggiungibile: conto qui, il CRM si allinea quando l'evento parte dalla coda
+                if (esito == "completata") { l.nastri_fatti++; l.prossima = l.nastri_fatti + 1; }
+                else if (esito == "scartata") l.nastri_totali = Math.Max(0, l.nastri_totali - 1);
+            }
+            AppendLog(esito == "completata" ? $"Cassetta {cassettaInCorso} contata: {l.nastri_fatti} di {l.nastri_totali}"
+                    : esito == "scartata" ? $"Cassetta scartata (vuota): il totale scende a {l.nastri_totali}"
+                    : "Rifai: la cassetta non è stata contata");
+            AggiornaCliente();
+            CrmBattito();
+            bool finiti = f != null ? f.nastri_finiti : (l.nastri_totali > 0 && l.nastri_fatti >= l.nastri_totali);
+            if (!finiti) return;
+            if (f != null && f.tutto_finito)
+                MessageBox.Show(this, $"Hai finito tutte le cassette di {l.cliente} ({f.nastri_fatti} di {f.nastri_totali}) e non restano altri supporti.\n\n" +
+                    "Nel CRM il lavoro è stato segnato PRONTO in automatico: esce dalla coda ed è pronto per la consegna.",
+                    "VHSCapture — lavoro finito: segnato PRONTO", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            else if (f != null)
+                MessageBox.Show(this, $"Hai finito le cassette di {l.cliente} da passare col grabber ({f.nastri_fatti} di {f.nastri_totali}).\n\n" +
+                    $"Restano {f.restano_altri} supporti da lavorare a parte, che non passano dal grabber (supporti del cliente: {f.dettaglio}).\n\n" +
+                    "Nel CRM il lavoro resta «in lavorazione»: diventa PRONTO da solo quando segni fatti anche quelli.",
+                    "VHSCapture — cassette finite, restano altri supporti", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            else
+                MessageBox.Show(this, $"Hai finito le cassette di {l.cliente} ({l.nastri_fatti} di {l.nastri_totali}).\n\n" +
+                    "Il CRM adesso non risponde: conteggio e stato si aggiornano appena torna la connessione.",
+                    "VHSCapture — cassette finite (CRM non raggiungibile)", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            lavoro = null;                              // cliente finito: si passa al prossimo
+            AggiornaCliente();
+            if (settings.CrmChiediCliente) ScegliCliente(false);
+        }
+
         string Prompt(string title, string label, string value)
         {
             using var f = new Form { Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(480, 150), MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = true, TopMost = true, Font = Font };
@@ -367,6 +559,7 @@ namespace VHSCapture
             compactState = compact;
             UpdateRecButton();
             btnSettings.Text = compact ? "⚙" : "⚙   Impostazioni";
+            AggiornaCliente();
             btnFolder.Text = compact ? "📁" : "📁   Apri cartella";
             lblName.Visible = !compact;
             txtName.Width = compact ? 150 : 240;
@@ -620,6 +813,13 @@ namespace VHSCapture
             if (!settings.Sources.Any(x => x.Visible)) { MessageBox.Show(this, "Aggiungi almeno una sorgente.", "VHSCapture"); return; }
 
             string destFolder = settings.ResolvedOutputFolder();
+            if (lavoro != null && settings.CrmCartellaCliente && !string.IsNullOrWhiteSpace(lavoro.cartella))
+            {
+                // cartella «Nome Cognome» dentro la cartella del PC: creata se non c'è
+                string cli = Path.Combine(destFolder, lavoro.cartella);
+                try { Directory.CreateDirectory(cli); destFolder = cli; }
+                catch (Exception ex) { AppendLog("⚠ Cartella del cliente non creata (" + ex.Message + "): salvo nella cartella del PC"); }
+            }
             string folder = destFolder;
             moveTo = null;
             if (settings.RecordLocalFirst && IsNetworkFolder(destFolder))
@@ -671,6 +871,13 @@ namespace VHSCapture
                 AppendLog("Registrazione avviata: " + recFile.Replace("%03d", "000") + (moveTo != null ? $"  (passa dal PC, copia in rete a pezzi in {moveTo})" : ""));
                 SetButtons();
                 VerifyRecordingStarted(recFile, ++recSession);   // controllo dietro le quinte, non blocca
+                if (lavoro != null)
+                {
+                    cassettaInCorso = Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali));
+                    AppendLog($"Cliente {lavoro.cliente}: cassetta {cassettaInCorso} di {lavoro.nastri_totali}");
+                    _ = crm.Manda("inizio", new Dictionary<string, object> { ["vhs_id"] = lavoro.id, ["cassetta_n"] = cassettaInCorso, ["file"] = Path.GetFileName(recFile.Replace("%03d", "000")), ["versione"] = crm.Versione });
+                    CrmBattito();
+                }
             }
             catch (Exception ex)
             {
@@ -727,6 +934,7 @@ namespace VHSCapture
         async void StopRecording(bool restartPreview)
         {
             if (!engine.IsRecording || finalizing || startingRecording) return;
+            durataStop = DurataRegistrazione();
             finalizing = true;
             SetButtons();
             lblRec.Text = "Chiusura file…"; lblRec.Fill = Color.Transparent; lblRec.ForeColor = Theme.Fore;
@@ -778,6 +986,32 @@ namespace VHSCapture
                 bool ok = await Task.Run(() => Mp4Frag.TruncateAt(mainFile, cut, AppendLog));
                 if (!ok) { ok = await Task.Run(() => FFmpeg.TrimFile(mainFile, cut, AppendLog)); if (ok) rewritten = true; }
                 AppendLog(ok ? $"Coda uniforme tagliata: file lungo {TimeSpan.FromSeconds(cut):hh\\:mm\\:ss}" : "Coda uniforme non tagliata (il file è comunque salvo)");
+            }
+
+            // cliente del CRM: com'è andata la cassetta. Scarta / Rifai cancellano il file appena registrato.
+            if (lavoro != null)
+            {
+                bool haFile = muxOk && RecordedFiles(final).Any();
+                int minimi = settings.CrmDurataMinimaAttiva ? Math.Max(1, settings.CrmDurataMinimaMin) : 0;
+                string esito;
+                if (!haFile) esito = "rifai";
+                else if (settings.CrmChiediFine)
+                {
+                    using var ff = new FineCassettaForm(settings.DarkTheme, lavoro.cliente, cassettaInCorso, lavoro.nastri_totali, durataStop, minimi);
+                    ff.ShowDialog(this);
+                    esito = ff.Esito;
+                    if (esito != "completata")
+                    {
+                        if (moveTo != null) { mirror?.Abort(); mirror = null; }
+                        foreach (var fdel in RecordedFiles(final).Concat(RecordedFiles(written)).Distinct(StringComparer.OrdinalIgnoreCase).ToList())
+                        {
+                            try { File.Delete(fdel); AppendLog("Cancellato: " + Path.GetFileName(fdel)); } catch (Exception ex) { AppendLog("File non cancellato (" + ex.Message + "): " + fdel); }
+                            if (moveTo != null) try { File.Delete(Path.Combine(moveTo, Path.GetFileName(fdel))); } catch { }
+                        }
+                    }
+                }
+                else esito = (minimi > 0 && durataStop.TotalMinutes < minimi) ? "rifai" : "completata";   // senza domanda: sotto la durata minima non si conta
+                await CrmFineCassetta(esito, Path.GetFileName(final.Replace("%03d", "000")));
             }
 
             // nome della cassetta: rinomina il file (niente più rinomina a mano in Esplora file)
@@ -944,6 +1178,7 @@ namespace VHSCapture
             Theme.Apply(this, settings.DarkTheme);
             if (r != DialogResult.OK) return;
             engine.ResetGpuRetry(settings.QsvBackend);
+            CrmDopoImpostazioni();
             RefreshSourceList(); RebuildMixer();
             canvas.CanvasW = settings.CanvasW; canvas.CanvasH = settings.CanvasH;
             canvas.Invalidate();

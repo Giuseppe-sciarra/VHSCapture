@@ -98,6 +98,39 @@ namespace VHSCapture
         }
     }
 
+    /// <summary>
+    /// Avanzamento a pallini, uguale nella lista clienti e nella fascia in alto: un pallino per videocassetta
+    /// (verdi le fatte, rosso lampeggiante quella in registrazione, grigi da fare) e accanto il numero «9/34».
+    /// Con tante cassette i pallini si rimpiccioliscono ma restano pallini.
+    /// </summary>
+    static class Pallini
+    {
+        public static void Disegna(Graphics g, Rectangle area, int fatti, int totali, int inRegistrazione, bool lampo, int diametroMax, Font fNumero)
+        {
+            if (totali <= 0) return;
+            string num = $"{Math.Min(fatti, totali)}/{totali}";
+            int wNum = TextRenderer.MeasureText(num, fNumero).Width + 6;
+            int larga = Math.Max(40, area.Width - wNum - 10);
+            float passo = Math.Min(diametroMax * 1.55f, larga / (float)totali);
+            float d = Math.Max(3f, Math.Min(diametroMax, passo * 0.74f));
+            float y = area.Y + (area.Height - d) / 2f;
+            Color vuoto = Theme.Dark ? Color.FromArgb(78, 78, 84) : Color.FromArgb(214, 214, 222);
+            var old = g.SmoothingMode; g.SmoothingMode = SmoothingMode.AntiAlias;
+            for (int i = 0; i < totali; i++)
+            {
+                Color c = i < fatti ? CrmColori.Verde
+                        : (inRegistrazione > 0 && i == inRegistrazione - 1) ? (lampo ? CrmColori.Rosso : Color.FromArgb(110, CrmColori.Rosso))
+                        : vuoto;
+                using var b = new SolidBrush(c);
+                g.FillEllipse(b, area.X + i * passo, y, d, d);
+            }
+            g.SmoothingMode = old;
+            int fine = (int)(area.X + (totali - 1) * passo + d);
+            TextRenderer.DrawText(g, num, fNumero, new Rectangle(fine + 10, area.Y - 4, wNum + 4, area.Height + 8), Theme.Fore,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
+    }
+
     static class CrmColori
     {
         public static readonly Color Verde = Color.FromArgb(34, 150, 70);
@@ -150,28 +183,9 @@ namespace VHSCapture
             TextRenderer.DrawText(g, grande, fGrande, new Rectangle(Width - destra, 4, destra - 18, 40), Registrando ? CrmColori.Rosso : Theme.Accent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
             string sotto = Registrando ? $"🔴  IN REGISTRAZIONE  ·  {Fatti} già fatte" : $"{Math.Max(0, Totali - Fatti)} da fare";
             TextRenderer.DrawText(g, sotto, FSotto, new Rectangle(Width - destra, 44, destra - 18, 20), Registrando ? CrmColori.Rosso : Theme.Muted, TextFormatFlags.Right);
-            // barra: un blocchetto per cassetta (oltre 40 cassette diventa una barra continua)
-            var barra = new Rectangle(18, Height - 28, Width - 36, 14);
+            // pallini: uno per videocassetta, con accanto «3/10»
             if (Totali <= 0) return;
-            if (Totali <= 40)
-            {
-                int gap = Totali > 20 ? 3 : 5;
-                float w = (barra.Width - gap * (Totali - 1)) / (float)Totali;
-                for (int i = 0; i < Totali; i++)
-                {
-                    var b = new Rectangle((int)(barra.X + i * (w + gap)), barra.Y, Math.Max(2, (int)w), barra.Height);
-                    Color c = i < Fatti ? CrmColori.Verde
-                            : (Registrando && i == n - 1) ? (lampo ? CrmColori.Rosso : Color.FromArgb(120, CrmColori.Rosso))
-                            : (Theme.Dark ? Color.FromArgb(70, 70, 75) : Color.FromArgb(222, 222, 228));
-                    using var pb = Ui.Rounded(b, 4); using var fb = new SolidBrush(c); g.FillPath(fb, pb);
-                }
-            }
-            else
-            {
-                using (var pb = Ui.Rounded(barra, 6)) using (var fb = new SolidBrush(Theme.Dark ? Color.FromArgb(70, 70, 75) : Color.FromArgb(222, 222, 228))) g.FillPath(fb, pb);
-                var pieno = new Rectangle(barra.X, barra.Y, (int)(barra.Width * Math.Min(1.0, Fatti / (double)Totali)), barra.Height);
-                if (pieno.Width > 4) { using var pp = Ui.Rounded(pieno, 6); using var fv = new SolidBrush(CrmColori.Verde); g.FillPath(fv, pp); }
-            }
+            Pallini.Disegna(g, new Rectangle(18, Height - 32, Width - 36, 20), Fatti, Totali, Registrando ? n : 0, lampo, 14, FSotto);
         }
     }
 
@@ -230,26 +244,9 @@ namespace VHSCapture
             string sup = "Supporti: " + (string.IsNullOrEmpty(l.dettaglio) ? "—" : l.dettaglio) + (string.IsNullOrEmpty(l.stato) ? "" : "   ·   " + l.stato);
             TextRenderer.DrawText(g, sup, FSup, new Rectangle(x, r.Y + 44, Math.Max(40, r.Right - x - 20), 20), Theme.Muted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
 
+            // pallini: uno per videocassetta, con accanto «9/34» (lascio spazio al testo in basso a destra)
             if (l.nastri_totali > 0)
-            {
-                var mb = new Rectangle(x, r.Bottom - 20, Math.Min(280, Math.Max(80, r.Width - 330)), 8);
-                Color vuoto = Theme.Dark ? Color.FromArgb(70, 70, 75) : Color.FromArgb(222, 222, 228);
-                if (l.nastri_totali <= 30)
-                {
-                    int gap = 3; float w = (mb.Width - gap * (l.nastri_totali - 1)) / (float)l.nastri_totali;
-                    for (int i = 0; i < l.nastri_totali; i++)
-                    {
-                        var b = new Rectangle((int)(mb.X + i * (w + gap)), mb.Y, Math.Max(2, (int)w), mb.Height);
-                        using var pb = Ui.Rounded(b, 3); using var fb = new SolidBrush(i < l.nastri_fatti ? CrmColori.Verde : vuoto); g.FillPath(fb, pb);
-                    }
-                }
-                else
-                {
-                    using (var pb = Ui.Rounded(mb, 4)) using (var fb = new SolidBrush(vuoto)) g.FillPath(fb, pb);
-                    int wv = (int)(mb.Width * Math.Min(1.0, l.nastri_fatti / (double)l.nastri_totali));
-                    if (wv > 4) { using var pv = Ui.Rounded(new Rectangle(mb.X, mb.Y, wv, mb.Height), 4); using var fv = new SolidBrush(CrmColori.Verde); g.FillPath(fv, pv); }
-                }
-            }
+                Pallini.Disegna(g, new Rectangle(x, r.Bottom - 30, Math.Max(120, r.Right - x - 330), 18), l.nastri_fatti, l.nastri_totali, 0, false, 10, FAzione);
 
             string azione = altroPc ? "🔴 lo sta registrando " + l.in_registrazione_su
                           : sopra ? "▶  Clicca per iniziare"

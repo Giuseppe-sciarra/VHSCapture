@@ -480,6 +480,22 @@ namespace VHSCapture
                 bool reg = engine.IsRecording && lavoro != null && !finalizing;
                 string cfgAt = await crm.Battito(reg, lavoro?.id ?? 0, cassettaInCorso, reg ? (int)DurataRegistrazione().TotalSeconds : 0, pausedSince != null);
                 if (cfgAt != null && cfgAt != (settings.CrmConfigAt ?? "")) await CrmSincronizzaConfig();
+                // cliente in corso: il conteggio si rilegge dal CRM (altri PC, Avanzamento fatto a mano) → uguale su tutti i PC
+                if (lavoro != null && !finalizing)
+                {
+                    var agg = await crm.Lavoro(lavoro.id);
+                    if (agg != null && lavoro != null && agg.id == lavoro.id)
+                    {
+                        lavoro.nastri_fatti = agg.nastri_fatti; lavoro.nastri_totali = agg.nastri_totali; lavoro.prossima = agg.prossima;
+                        lavoro.dettaglio = agg.dettaglio; lavoro.stato = agg.stato; lavoro.in_registrazione_su = agg.in_registrazione_su;
+                        if (!engine.IsRecording && agg.nastri_totali > 0 && agg.nastri_fatti >= agg.nastri_totali)
+                        {
+                            AppendLog("Videocassette di " + lavoro.cliente + " finite (aggiornato dal CRM): alla prossima registrazione ti chiedo il cliente");
+                            lavoro = null; nessunCliente = false;
+                        }
+                        AggiornaCliente();
+                    }
+                }
                 var p = await crm.Postazioni();
                 if (p != null)
                 {
@@ -495,7 +511,7 @@ namespace VHSCapture
         CrmConfig ConfigLocale() => new CrmConfig
         {
             chiedi_cliente = settings.CrmChiediCliente, cartella_cliente = settings.CrmCartellaCliente, chiedi_fine = settings.CrmChiediFine,
-            durata_minima_attiva = settings.CrmDurataMinimaAttiva, durata_minima_min = settings.CrmDurataMinimaMin, cartella_base = settings.OutputFolder ?? "",
+            ripartenza_attiva = settings.CrmRipartenzaAttiva, ripartenza_sec = settings.CrmRipartenzaSec, cartella_base = settings.OutputFolder ?? "",
         };
 
         /// <summary>Configurazione di questo PC: vince la modifica più recente (qui nelle Impostazioni o nel CRM).</summary>
@@ -509,8 +525,8 @@ namespace VHSCapture
             if (cmp > 0)
             {
                 settings.CrmChiediCliente = cfg.chiedi_cliente; settings.CrmCartellaCliente = cfg.cartella_cliente;
-                settings.CrmChiediFine = cfg.chiedi_fine; settings.CrmDurataMinimaAttiva = cfg.durata_minima_attiva;
-                settings.CrmDurataMinimaMin = Math.Clamp(cfg.durata_minima_min, 1, 120);
+                settings.CrmChiediFine = cfg.chiedi_fine; settings.CrmRipartenzaAttiva = cfg.ripartenza_attiva;
+                settings.CrmRipartenzaSec = Math.Clamp(cfg.ripartenza_sec, 10, 600);
                 if (!string.IsNullOrWhiteSpace(cfg.cartella_base)) settings.OutputFolder = cfg.cartella_base;
                 settings.CrmConfigAt = quando; settings.Save();
                 AppendLog("Impostazioni di questo PC aggiornate dal CRM");
@@ -1100,26 +1116,33 @@ namespace VHSCapture
             if (lavoro != null)
             {
                 bool haFile = muxOk && RecordedFiles(final).Any();
-                int minimi = settings.CrmDurataMinimaAttiva ? Math.Max(1, settings.CrmDurataMinimaMin) : 0;
+                bool cancella = false;
                 string esito;
                 if (!haFile) esito = "rifai";
+                else if (settings.CrmRipartenzaAttiva && durataStop.TotalSeconds < Math.Max(10, settings.CrmRipartenzaSec))
+                {
+                    // partenza sbagliata: nessuna domanda, non si conta, file breve cancellato, si riparte dalla stessa cassetta
+                    esito = "rifai"; cancella = true;
+                    AppendLog($"Partenza sbagliata (fermata dopo {DurataTesto((int)durataStop.TotalSeconds)}): cassetta non contata, file cancellato. La prossima registrazione riparte dalla cassetta {cassettaInCorso}.");
+                }
                 else if (settings.CrmChiediFine)
                 {
-                    using var ff = new FineCassettaForm(settings.DarkTheme, lavoro.cliente, cassettaInCorso, lavoro.nastri_totali, durataStop, minimi);
+                    using var ff = new FineCassettaForm(settings.DarkTheme, lavoro.cliente, cassettaInCorso, lavoro.nastri_totali, durataStop);
                     ff.ShowDialog(this);
                     esito = ff.Esito;
-                    if (esito != "completata")
+                    cancella = esito == "scartata";
+                }
+                else esito = "completata";   // senza domanda: si conta sempre
+                if (cancella)
+                {
+                    cartellaDaSpostare = null;   // file cancellato: niente da spostare
+                    if (moveTo != null) { mirror?.Abort(); mirror = null; }
+                    foreach (var fdel in RecordedFiles(final).Concat(RecordedFiles(written)).Distinct(StringComparer.OrdinalIgnoreCase).ToList())
                     {
-                        cartellaDaSpostare = null;   // file cancellato: niente da spostare
-                        if (moveTo != null) { mirror?.Abort(); mirror = null; }
-                        foreach (var fdel in RecordedFiles(final).Concat(RecordedFiles(written)).Distinct(StringComparer.OrdinalIgnoreCase).ToList())
-                        {
-                            try { File.Delete(fdel); AppendLog("Cancellato: " + Path.GetFileName(fdel)); } catch (Exception ex) { AppendLog("File non cancellato (" + ex.Message + "): " + fdel); }
-                            if (moveTo != null) try { File.Delete(Path.Combine(moveTo, Path.GetFileName(fdel))); } catch { }
-                        }
+                        try { File.Delete(fdel); AppendLog("Cancellato: " + Path.GetFileName(fdel)); } catch (Exception ex) { AppendLog("File non cancellato (" + ex.Message + "): " + fdel); }
+                        if (moveTo != null) try { File.Delete(Path.Combine(moveTo, Path.GetFileName(fdel))); } catch { }
                     }
                 }
-                else esito = (minimi > 0 && durataStop.TotalMinutes < minimi) ? "rifai" : "completata";   // senza domanda: sotto la durata minima non si conta
                 await CrmFineCassetta(esito, Path.GetFileName(final.Replace("%03d", "000")));
             }
 

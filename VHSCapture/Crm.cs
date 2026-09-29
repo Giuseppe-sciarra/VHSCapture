@@ -55,8 +55,8 @@ namespace VHSCapture
         public bool chiedi_cliente { get; set; } = true;
         public bool cartella_cliente { get; set; } = true;
         public bool chiedi_fine { get; set; } = true;
-        public bool durata_minima_attiva { get; set; } = true;
-        public int durata_minima_min { get; set; } = 4;
+        public bool ripartenza_attiva { get; set; } = true;
+        public int ripartenza_sec { get; set; } = 60;
         public string cartella_base { get; set; } = "";
     }
 
@@ -158,6 +158,9 @@ namespace VHSCapture
             NomePostazione = r.postazione ?? "";
             return r.lavori ?? new List<CrmLavoro>();
         }
+
+        /// <summary>La scheda del cliente in corso, riletta dal CRM (conteggio aggiornato da altri PC o dall'Avanzamento).</summary>
+        public Task<CrmLavoro> Lavoro(int vhsId) => Chiama<CrmLavoro>(HttpMethod.Get, "lavoro/" + vhsId);
 
         /// <summary>A che punto sono tutti i PC di riversaggio (compreso questo).</summary>
         public Task<List<CrmPostazione>> Postazioni() => Chiama<List<CrmPostazione>>(HttpMethod.Get, "altre-postazioni");

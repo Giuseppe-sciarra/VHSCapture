@@ -431,39 +431,33 @@ namespace VHSCapture
     }
 
     /// <summary>
-    /// Fine cassetta, ogni scelta spiegata: ✅ Completata (si conta, il file resta) · 🗑 Scarta (cassetta vuota:
-    /// non si conta, il totale del cliente scende, il file si cancella) · 🔄 Rifai (partenza sbagliata: non si conta,
-    /// il file si cancella). Sotto la durata minima «Completata» non si può scegliere. Non si chiude senza scegliere.
+    /// Fine cassetta: due scelte grandi. ✅ Tieni (Invio) = si conta e il file resta, qualunque durata.
+    /// 🗑 Scarta = cassetta vuota: non si conta, il totale del cliente scende, il file si cancella.
+    /// (La partenza sbagliata non passa di qui: entro la soglia di secondi si gestisce da sola, senza domande.)
+    /// Non ha la X e non si chiude da sola: aspetta l'operatore anche dopo lo stop automatico.
     /// </summary>
     public class FineCassettaForm : Form
     {
-        public string Esito { get; private set; } = "rifai";
-        const int W = 640;
+        public string Esito { get; private set; } = "completata";
+        const int W = 680;
 
-        public FineCassettaForm(bool dark, string cliente, int cassetta, int totali, TimeSpan durata, int minutiMinimi)
+        public FineCassettaForm(bool dark, string cliente, int cassetta, int totali, TimeSpan durata)
         {
             Theme.Apply(this, dark);
             Text = "VHSCapture — com'è andata la cassetta?";
             FormBorderStyle = FormBorderStyle.FixedDialog; ControlBox = false; ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
             Font = new Font("Segoe UI", 10f);
-            bool troppoBreve = minutiMinimi > 0 && durata.TotalMinutes < minutiMinimi;
+            KeyPreview = true;
+            KeyDown += (o, e) => { if (e.KeyCode == Keys.Enter) { e.Handled = true; Esito = "completata"; DialogResult = DialogResult.OK; Close(); } };
             string d = durata.TotalHours >= 1 ? $"{(int)durata.TotalHours}:{durata.Minutes:00}:{durata.Seconds:00}" : $"{durata.Minutes}:{durata.Seconds:00}";
             int y = 18;
             var t = new Label { Text = "Com'è andata la cassetta?", AutoSize = true, Font = new Font("Segoe UI Semibold", 16f), Location = new Point(24, y) };
             Controls.Add(t); y += 40;
             var sub = new Label { Text = $"{cliente}  ·  cassetta {cassetta} di {totali}  ·  registrata per {d}", AutoSize = true, Font = new Font("Segoe UI Semibold", 11f), Location = new Point(26, y) };
             Controls.Add(sub); y += 34;
-            if (troppoBreve)
-            {
-                var avviso = new InfoBox("⚠️", $"La registrazione è durata meno di {minutiMinimi} minuti: con questa durata la cassetta NON si può contare. Scegli «Scarta» se era vuota, «Rifai» se è partita male. (La durata minima si cambia in Impostazioni → CRM.)", W - 48, CrmColori.Rosso) { Location = new Point(24, y) };
-                Controls.Add(avviso); y += avviso.Height + 12;
-            }
-            else
-            {
-                var info = new InfoBox("ℹ️", "Scegli cosa è successo: il CRM aggiorna da solo il conteggio delle cassette del cliente.", W - 48, Theme.Accent) { Location = new Point(24, y) };
-                Controls.Add(info); y += info.Height + 12;
-            }
+            var info = new InfoBox("ℹ️", "Premi Invio per tenerla. Scegli Scarta solo se la cassetta era vuota.", W - 48, Theme.Accent) { Location = new Point(24, y) };
+            Controls.Add(info); y += info.Height + 12;
             SceltaCard Scelta(string titolo, string spieg, string effetto, Color col, string esito)
             {
                 var c = new SceltaCard(titolo, spieg, effetto, col, W - 48) { Location = new Point(24, y) };
@@ -471,19 +465,14 @@ namespace VHSCapture
                 Controls.Add(c); y += c.Height + 10;
                 return c;
             }
-            var ok = Scelta("✅   Completata",
-                "La cassetta è stata registrata ed è venuta bene.",
-                $"→ la conto: {cassetta} di {totali} fatte · il file resta dov'è",
+            Scelta("✅   Tieni   (Invio)",
+                "La cassetta va bene, qualunque sia la durata.",
+                $"→ la conto: {Math.Min(cassetta, Math.Max(totali, 1))} di {totali} fatte · il file resta",
                 CrmColori.Verde, "completata");
-            ok.Attiva = !troppoBreve;
             Scelta("🗑   Scarta — cassetta vuota",
                 "Dentro non c'era niente: solo nero, neve o schermo blu.",
-                $"→ NON la conto · il cliente passa da {totali} a {Math.Max(0, totali - 1)} cassette (scende anche il prezzo) · il file appena registrato viene cancellato",
+                $"→ NON la conto · il cliente passa da {totali} a {Math.Max(0, totali - 1)} videocassette (scende anche il prezzo) · il file appena registrato viene cancellato",
                 CrmColori.Rosso, "scartata");
-            Scelta("🔄   Rifai — partenza sbagliata",
-                "Hai fermato per errore o vuoi ricominciare questa stessa cassetta.",
-                $"→ NON la conto · resta da fare la cassetta {cassetta} · il file appena registrato viene cancellato",
-                CrmColori.Arancio, "rifai");
             ClientSize = new Size(W, y + 12);
             Theme.Apply(this, dark);
             foreach (Control c in Controls) if (c is SceltaCard sc) sc.Colori();

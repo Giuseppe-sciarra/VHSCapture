@@ -29,7 +29,8 @@ VHSCapture può lavorare con la Coda Lavorazioni del CRM Tastiere Digitali:
 - **Avanzamento** ben visibile sotto la barra dei pulsanti: nome del cliente, «Cassetta 4 di 10» in grande e una barra a blocchetti (verdi le fatte, rossa lampeggiante quella in registrazione).
 - **Interruttore generale** in *Impostazioni → CRM → Usa il collegamento al CRM*: spento, VHSCapture registra come prima; indirizzo, token e opzioni restano salvati.
 - **Cartella**: le registrazioni vanno in «Nome Cognome» dentro la cartella del PC (creata se manca). Il nome del file si chiede a fine registrazione come sempre.
-- **Fine cassetta**: ✅ Completata (si conta) · 🗑 Scarta (vuota: non si conta, il totale del cliente scende, il file si cancella) · 🔄 Rifai (partenza sbagliata: non si conta, il file si cancella). Sotto la durata minima (4 minuti di partenza) la cassetta non si conta mai.
+- **Fine cassetta**: due scelte grandi — ✅ **Tieni** (Invio: si conta e il file resta, qualunque durata) · 🗑 **Scarta** (cassetta vuota: non si conta, il totale del cliente scende, il file si cancella). **Partenza sbagliata**: se fermi entro 60 secondi (modificabile) non chiede niente — non si conta, il file breve si cancella e si riparte dalla stessa cassetta.
+- **Conteggio unico**: le videocassette fatte sono lo stesso numero dell'Avanzamento del CRM; la fascia del cliente si riallinea ogni 20 secondi, quindi tutti i PC vedono lo stesso conteggio.
 - **Si contano le videocassette della scheda** (campo «N. Videocassette»: VHS, S-VHS, VHS-C, 8mm, Hi8, Digital8, MiniDV, tutte dal grabber); DVD, CD, musicassette e gli altri supporti di «Riversaggio / Backup» si lavorano a parte ma compaiono nel totale del cliente.
 - **Barra in basso**: cliente in corso e a che punto sono gli altri PC; nel CRM la Coda mostra «🔴 PC2 · Mario Rossi · cassetta 4/10 · 43:13».
 - Ogni opzione si accende e si spegne da *Impostazioni → CRM* o dal CRM (vince l'ultima modifica) e resta salvata anche da spenta.

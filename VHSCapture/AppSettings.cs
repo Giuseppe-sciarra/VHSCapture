@@ -218,9 +218,9 @@ namespace VHSCapture
         public string CrmToken { get; set; } = "";
         public bool CrmChiediCliente { get; set; } = true;       // al Registra, solo se non c'è un cliente in corso (prima volta / videocassette del cliente finite)
         public bool CrmCartellaCliente { get; set; } = true;     // salva in «Nome Cognome» dentro la cartella del PC
-        public bool CrmChiediFine { get; set; } = true;          // a fine cassetta: Completata / Scarta / Rifai
-        public bool CrmDurataMinimaAttiva { get; set; } = true;  // sotto questa durata la cassetta non si conta mai
-        public int CrmDurataMinimaMin { get; set; } = 4;
+        public bool CrmChiediFine { get; set; } = true;          // a fine cassetta: ✅ Tieni / 🗑 Scarta (spento = conta sempre)
+        public bool CrmRipartenzaAttiva { get; set; } = true;    // partenza sbagliata: fermata entro N secondi = non si conta, file cancellato
+        public int CrmRipartenzaSec { get; set; } = 60;
         public string CrmConfigAt { get; set; } = "";            // ultima modifica della configurazione (sincronizzata col CRM: vince la più recente)
 
         // Controllo live (zmq)

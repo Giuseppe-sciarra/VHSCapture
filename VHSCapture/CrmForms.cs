@@ -141,13 +141,14 @@ namespace VHSCapture
                 using var f = new SolidBrush(Theme.Panel); g.FillPath(f, path);
                 using var p = new Pen(Registrando ? CrmColori.Rosso : Theme.Accent, 2f); g.DrawPath(p, path);
             }
-            int n = Registrando && Corrente > 0 ? Corrente : Math.Min(Fatti + 1, Math.Max(1, Totali));
+            int n = Registrando && Corrente > 0 ? Corrente : Math.Min(Fatti + 1, Math.Max(1, Totali));   // cassetta in registrazione
             var fNome = FNome; var fGrande = FGrande; var fPiccolo = FPiccolo;
             int destra = 360;
             TextRenderer.DrawText(g, "👤  " + Cliente, fNome, new Rectangle(18, 10, Width - destra - 30, 30), Theme.Fore, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
             TextRenderer.DrawText(g, "Supporti: " + (string.IsNullOrEmpty(Dettaglio) ? "—" : Dettaglio), fPiccolo, new Rectangle(20, 42, Width - destra - 30, 20), Theme.Muted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-            TextRenderer.DrawText(g, $"Cassetta {n} di {Totali}", fGrande, new Rectangle(Width - destra, 4, destra - 18, 40), Registrando ? CrmColori.Rosso : Theme.Accent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
-            string sotto = Registrando ? "🔴  IN REGISTRAZIONE" : $"{Fatti} fatte  ·  {Math.Max(0, Totali - Fatti)} da fare";
+            string grande = Registrando ? $"Registro la {n}ª di {Totali}" : $"{Fatti} di {Totali} fatte";
+            TextRenderer.DrawText(g, grande, fGrande, new Rectangle(Width - destra, 4, destra - 18, 40), Registrando ? CrmColori.Rosso : Theme.Accent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+            string sotto = Registrando ? $"🔴  IN REGISTRAZIONE  ·  {Fatti} già fatte" : $"{Math.Max(0, Totali - Fatti)} da fare";
             TextRenderer.DrawText(g, sotto, FSotto, new Rectangle(Width - destra, 44, destra - 18, 20), Registrando ? CrmColori.Rosso : Theme.Muted, TextFormatFlags.Right);
             // barra: un blocchetto per cassetta (oltre 40 cassette diventa una barra continua)
             var barra = new Rectangle(18, Height - 28, Width - 36, 14);
@@ -189,7 +190,7 @@ namespace VHSCapture
         {
             Lavoro = l;
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            Height = 90; Width = 560; Cursor = Cursors.Hand; Margin = new Padding(0, 0, 0, 8);
+            Height = 98; Width = 560; Cursor = Cursors.Hand; Margin = new Padding(0, 0, 0, 8);
         }
 
         protected override void OnMouseEnter(EventArgs e) { sopra = true; Invalidate(); base.OnMouseEnter(e); }
@@ -216,24 +217,22 @@ namespace VHSCapture
             using (var barra = new SolidBrush(acc)) g.FillRectangle(barra, new Rectangle(r.X + 1, r.Y + 12, sopra ? 7 : 5, r.Height - 24));
             int x = r.X + 22;
 
-            // bollino «Cassetta n di tot» a destra
-            int n = Math.Min(l.prossima, Math.Max(1, l.nastri_totali));
-            string bol = $"Cassetta {n} di {l.nastri_totali}";
+            // bollino a destra: quante videocassette sono GIÀ FATTE (0 di 11 = non ancora iniziato)
+            string bol = $"{l.nastri_fatti} di {l.nastri_totali} fatte";
             var sz = TextRenderer.MeasureText(bol, FBollino);
             var rb = new Rectangle(r.Right - sz.Width - 36, r.Y + 12, sz.Width + 22, 30);
             using (var pb = Ui.Rounded(rb, 15)) using (var fb = new SolidBrush(acc)) g.FillPath(fb, pb);
             TextRenderer.DrawText(g, bol, FBollino, rb, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
 
-            // nome e supporti
+            // riga 1: nome · riga 2: supporti a tutta larghezza · riga 3: mini barra e «da fare»
             TextRenderer.DrawText(g, l.cliente, FNome, new Rectangle(x, r.Y + 10, Math.Max(40, rb.X - x - 12), 32), Theme.Fore,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             string sup = "Supporti: " + (string.IsNullOrEmpty(l.dettaglio) ? "—" : l.dettaglio) + (string.IsNullOrEmpty(l.stato) ? "" : "   ·   " + l.stato);
-            TextRenderer.DrawText(g, sup, FSup, new Rectangle(x, r.Y + 44, Math.Max(40, r.Width - 330), 20), Theme.Muted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, sup, FSup, new Rectangle(x, r.Y + 44, Math.Max(40, r.Right - x - 20), 20), Theme.Muted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
 
-            // mini barra delle videocassette: verdi le fatte
             if (l.nastri_totali > 0)
             {
-                var mb = new Rectangle(x, r.Bottom - 20, Math.Min(280, Math.Max(80, r.Width - 360)), 8);
+                var mb = new Rectangle(x, r.Bottom - 20, Math.Min(280, Math.Max(80, r.Width - 330)), 8);
                 Color vuoto = Theme.Dark ? Color.FromArgb(70, 70, 75) : Color.FromArgb(222, 222, 228);
                 if (l.nastri_totali <= 30)
                 {
@@ -252,11 +251,10 @@ namespace VHSCapture
                 }
             }
 
-            // in basso a destra: cosa succede cliccando
             string azione = altroPc ? "🔴 lo sta registrando " + l.in_registrazione_su
                           : sopra ? "▶  Clicca per iniziare"
-                          : $"{l.nastri_fatti} fatte  ·  {Math.Max(0, l.nastri_totali - l.nastri_fatti)} da fare";
-            TextRenderer.DrawText(g, azione, FAzione, new Rectangle(r.Right - 320, r.Bottom - 32, 298, 22),
+                          : $"{Math.Max(0, l.nastri_totali - l.nastri_fatti)} da fare";
+            TextRenderer.DrawText(g, azione, FAzione, new Rectangle(r.Right - 320, r.Bottom - 28, 298, 22),
                 altroPc ? CrmColori.Rosso : (sopra ? acc : Theme.Muted), TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
         }
     }
@@ -274,7 +272,9 @@ namespace VHSCapture
         readonly TextBox cerca;
         readonly List<ClienteCard> schede = new List<ClienteCard>();
         readonly Label lblStato;
-        const int W = 640;
+        // larga abbastanza da leggere tutto; sugli schermi piccoli si adatta all'area disponibile
+        static readonly int W = Math.Min(900, Screen.PrimaryScreen.WorkingArea.Width - 40);
+        static readonly int H = Math.Min(720, Screen.PrimaryScreen.WorkingArea.Height - 40);
         public CrmLavoro Scelto { get; private set; }
 
         readonly Label lblTempo;
@@ -300,7 +300,7 @@ namespace VHSCapture
             passo1.Controls.Add(info1); y += info1.Height + 14;
             var cCliente = new SceltaCard("👤   Cliente",
                 "Stai riversando le cassette di un cliente che è nella Coda Lavorazioni del CRM.",
-                "→ scegli il nome dalla lista · ogni cassetta si conta da sola (es. 3 di 4) · il file va nella cartella «Nome Cognome»",
+                "→ scegli il nome dalla lista · ogni cassetta si conta da sola (es. 2 di 4 fatte) · il file va nella cartella «Nome Cognome»",
                 Theme.Accent, W - 48) { Location = new Point(24, y) };
             cCliente.Scelta += (o, e) => MostraLista();
             passo1.Controls.Add(cCliente); y += cCliente.Height + 10;
@@ -319,14 +319,15 @@ namespace VHSCapture
                 (chiudiDopo > 0
                     ? "La registrazione è GIÀ PARTITA, non stai perdendo niente. Clicca sul cliente di questa cassetta: a fine registrazione il file viene spostato nella sua cartella. Le prossime cassette dello stesso cliente non chiedono più niente, finché non hai finito le sue videocassette.\n"
                     : "Clicca sul cliente di questa cassetta. Le prossime cassette dello stesso cliente partono senza chiedere, finché non hai finito le sue videocassette.\n") +
-                "«cassetta 3 di 4» = stai per registrare la 3ª delle 4 videocassette della scheda (VHS, S-VHS, VHS-C, 8mm, Hi8, Digital8, MiniDV).\n" +
+                "«2 di 4 fatte» = di 4 videocassette della scheda (VHS, S-VHS, VHS-C, 8mm, Hi8, Digital8, MiniDV) ne hai già registrate 2: adesso fai la 3ª. «0 di 4 fatte» = cliente non ancora iniziato.\n" +
                 "La riga sotto elenca tutti i supporti del cliente (anche DVD, CD, musicassette… che si lavorano a parte).\n" +
                 "🔴 = un altro PC sta già registrando questo cliente.",
                 W - 48, Theme.Accent) { Dock = DockStyle.Top };
             var spazio = new Panel { Dock = DockStyle.Top, Height = 10 };
             // ricerca: con tanti clienti in coda si trova il nome in un attimo (Invio = il primo della lista)
             var rigaCerca = new Panel { Dock = DockStyle.Top, Height = 40, Padding = new Padding(0, 2, 0, 6) };
-            cerca = new TextBox { Dock = DockStyle.Fill, Font = new Font("Segoe UI", 11f), PlaceholderText = "🔎  Cerca il cliente per nome…", BorderStyle = BorderStyle.FixedSingle };
+            cerca = new TextBox { Dock = DockStyle.Fill, Font = new Font("Segoe UI", 11f), PlaceholderText = "scrivi un pezzo del nome…", BorderStyle = BorderStyle.FixedSingle };
+            var lblCerca = new Label { Text = "🔎  Cerca", Dock = DockStyle.Left, Width = 84, TextAlign = ContentAlignment.MiddleLeft, Font = new Font("Segoe UI Semibold", 10.5f) };
             cerca.TextChanged += (o, e) => { Filtra(); restano = Math.Max(restano, 60); };   // stai cercando: il conto alla rovescia riparte
             cerca.KeyDown += (o, e) =>
             {
@@ -335,7 +336,7 @@ namespace VHSCapture
                 var primo = schede.FirstOrDefault(x => x.Visible);
                 if (primo != null) Scegli(primo.Lavoro);
             };
-            rigaCerca.Controls.Add(cerca);
+            rigaCerca.Controls.Add(cerca); rigaCerca.Controls.Add(lblCerca);
             lblStato = new Label { Dock = DockStyle.Top, Height = 28, Font = new Font("Segoe UI Semibold", 10f), Tag = "keep", TextAlign = ContentAlignment.MiddleLeft };
             elenco = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Padding = new Padding(0, 2, 0, 2) };
             elenco.Resize += (o, e) => Larghezze();
@@ -363,7 +364,7 @@ namespace VHSCapture
             passo2.Controls.Add(elenco); passo2.Controls.Add(lblStato); passo2.Controls.Add(rigaCerca); passo2.Controls.Add(spazio); passo2.Controls.Add(info2); passo2.Controls.Add(t2); passo2.Controls.Add(lblTempo); passo2.Controls.Add(giu);
 
             Controls.Add(passo2); Controls.Add(passo1);
-            ClientSize = new Size(W, soloLista ? 640 : altezzaPasso1);
+            ClientSize = new Size(W, soloLista ? H : altezzaPasso1);
             Theme.Apply(this, dark);
             foreach (Control c in passo1.Controls) if (c is SceltaCard sc) sc.Colori();
             elenco.BackColor = Theme.Back;
@@ -373,7 +374,7 @@ namespace VHSCapture
         async void MostraLista()
         {
             passo1.Visible = false; passo2.Visible = true;
-            if (ClientSize.Height < 640) { ClientSize = new Size(W, 640); CenterToParent(); }
+            if (ClientSize.Height < H) { ClientSize = new Size(W, H); CenterToParent(); }
             await Carica();
         }
 

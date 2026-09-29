@@ -429,8 +429,8 @@ namespace VHSCapture
                     prog.Invalidate();
                 }
             }
-            int n = lavoro == null ? 0 : Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali));
-            btnCliente.Text = lavoro == null ? (compact ? "👤" : "👤   Nessun cliente") : (compact ? $"👤 {n}/{lavoro.nastri_totali}" : $"👤   {lavoro.cliente}  ·  {n}/{lavoro.nastri_totali}");
+            btnCliente.Text = lavoro == null ? (compact ? "👤" : "👤   Nessun cliente")
+                            : (compact ? $"👤 {lavoro.nastri_fatti}/{lavoro.nastri_totali}" : $"👤   {lavoro.cliente}  ·  {lavoro.nastri_fatti} di {lavoro.nastri_totali} fatte");
             btnCliente.Variant = lavoro == null ? "ghost" : "accent";
             btnCliente.Invalidate();
             tips.SetToolTip(btnCliente, lavoro == null ? "Scegli il cliente dalla coda del CRM" : $"{lavoro.cliente}: {lavoro.dettaglio}. Clic per cambiare cliente");
@@ -444,9 +444,9 @@ namespace VHSCapture
             if (!CrmAttivo) return;
             var parti = new List<string>();
             if (lavoro != null)
-                parti.Add($"👤 {lavoro.cliente} · cassetta {Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali))} di {lavoro.nastri_totali} · {lavoro.dettaglio}");
+                parti.Add($"👤 {lavoro.cliente} · {lavoro.nastri_fatti} di {lavoro.nastri_totali} fatte · {lavoro.dettaglio}");
             foreach (var p in postazioni.Where(p => !p.questa && p.configurata))
-                parti.Add(p.registrando ? $"🔴 {p.nome}: {p.cliente} {p.cassetta_n}/{p.nastri_totali} · {DurataTesto(p.secondi)}" + (p.in_pausa ? " (pausa)" : "")
+                parti.Add(p.registrando ? $"🔴 {p.nome}: {p.cliente}, registra la {p.cassetta_n}ª di {p.nastri_totali} · {DurataTesto(p.secondi)}" + (p.in_pausa ? " (pausa)" : "")
                                         : (p.online ? $"🟢 {p.nome}: libera" : $"⚪ {p.nome}: non collegata"));
             string st = crm.Raggiungibile ? "CRM ✓" + (string.IsNullOrEmpty(crm.NomePostazione) ? "" : " · " + crm.NomePostazione)
                                           : "⚠ " + (string.IsNullOrEmpty(crm.UltimoErrore) ? "CRM non raggiungibile" : crm.UltimoErrore);

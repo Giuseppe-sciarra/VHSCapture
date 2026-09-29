@@ -36,7 +36,8 @@ namespace VHSCapture
         CheckBox chkAutoStop, chkTrim, chkAskName, chkLocalFirst; NumericUpDown nAutoSec;
         // CRM
         TextBox txtCrmUrl, txtCrmToken; Label lblCrmProva;
-        CheckBox chkCrmCliente, chkCrmCartella, chkCrmFine, chkCrmMinima; NumericUpDown nCrmMin;
+        CheckBox chkCrmAttivo, chkCrmCliente, chkCrmCartella, chkCrmFine, chkCrmMinima; NumericUpDown nCrmMin;
+        readonly List<Control> crmControlli = new List<Control>();
 
         readonly Dictionary<string, Panel> pages = new Dictionary<string, Panel>();
         ListBox nav; Panel host;
@@ -342,7 +343,12 @@ namespace VHSCapture
         void BuildCrm()
         {
             var p = Page("CRM");
-            var col = Section(p, "Collegamento al CRM");
+            var gen = Section(p, "Collegamento");
+            chkCrmAttivo = Check(gen, "Usa il collegamento al CRM",
+                "Spento: VHSCapture registra come prima, senza clienti né conteggio. Indirizzo, token e opzioni qui sotto restano salvati per quando lo riaccendi.");
+            chkCrmAttivo.Font = new Font(Font.FontFamily, 10.5f, FontStyle.Bold);
+            chkCrmAttivo.CheckedChanged += (o, e) => AggiornaCrmAbilitati();
+            var col = Section(p, "Indirizzo e token");
             txtCrmUrl = new TextBox { BorderStyle = BorderStyle.FixedSingle };
             Row(col, "Indirizzo del CRM", txtCrmUrl, "es. https://crm.tastieredigitali.it");
             txtCrmToken = new TextBox { BorderStyle = BorderStyle.FixedSingle, UseSystemPasswordChar = true };
@@ -363,13 +369,22 @@ namespace VHSCapture
 
             var opz = Section(p, "Questo PC");
             Note(opz, "Valgono solo per questo PC e si vedono anche nel CRM (Controllo PC → 🎬 VHSCapture): vince l'ultima modifica. Le opzioni spente restano salvate.");
-            chkCrmCliente = Check(opz, "All'avvio chiedi il cliente", "«👤 Cliente» mostra la coda del CRM, «Nessun cliente» registra come sempre.");
+            chkCrmCliente = Check(opz, "Chiedi il cliente quando parte la registrazione",
+                "Solo se non c'è un cliente in corso: la prima volta e quando hai finito le sue videocassette. Le cassette dello stesso cliente partono senza domande. «Nessun cliente» vale finché non scegli un cliente dal pulsante 👤.");
             chkCrmCartella = Check(opz, "Salva nella cartella del cliente", "«Nome Cognome» dentro la cartella di salvataggio del PC (Generale), creata se non c'è.");
             chkCrmFine = Check(opz, "A fine cassetta chiedi com'è andata", "✅ Completata (si conta) · 🗑 Scarta (vuota: il totale scende) · 🔄 Rifai (partenza sbagliata). Scarta e Rifai cancellano il file.");
             chkCrmMinima = Check(opz, "Durata minima per contare una cassetta", "Sotto questa durata la cassetta non si conta mai.");
             nCrmMin = Num(1, 120, 1);
             Row(opz, "Durata minima (minuti)", nCrmMin);
-            chkCrmMinima.CheckedChanged += (o, e) => nCrmMin.Enabled = chkCrmMinima.Checked;
+            chkCrmMinima.CheckedChanged += (o, e) => nCrmMin.Enabled = chkCrmAttivo.Checked && chkCrmMinima.Checked;
+            crmControlli.AddRange(new Control[] { txtCrmUrl, txtCrmToken, chkCrmCliente, chkCrmCartella, chkCrmFine, chkCrmMinima, nCrmMin });
+        }
+
+        /// <summary>CRM spento: le voci si vedono disattivate ma restano compilate e salvate.</summary>
+        void AggiornaCrmAbilitati()
+        {
+            foreach (var c in crmControlli) c.Enabled = chkCrmAttivo.Checked;
+            nCrmMin.Enabled = chkCrmAttivo.Checked && chkCrmMinima.Checked;
         }
 
         void LoadValues()
@@ -411,6 +426,7 @@ namespace VHSCapture
             chkDiag.Checked = s.DiagLog;
             chkIntel.Checked = s.IntelGpu;
             cbIntelField.SelectedIndex = s.IntelFieldOrder == "bff" ? 1 : 0;
+            chkCrmAttivo.Checked = s.CrmAttivo;
             txtCrmUrl.Text = s.CrmUrl ?? "";
             txtCrmToken.Text = s.CrmToken ?? "";
             chkCrmCliente.Checked = s.CrmChiediCliente;
@@ -418,7 +434,7 @@ namespace VHSCapture
             chkCrmFine.Checked = s.CrmChiediFine;
             chkCrmMinima.Checked = s.CrmDurataMinimaAttiva;
             nCrmMin.Value = Math.Clamp(s.CrmDurataMinimaMin, 1, 120);
-            nCrmMin.Enabled = chkCrmMinima.Checked;
+            AggiornaCrmAbilitati();
             UpdateEnabled();
         }
 
@@ -482,6 +498,7 @@ namespace VHSCapture
             bool cambiata = s.CrmChiediCliente != chkCrmCliente.Checked || s.CrmCartellaCliente != chkCrmCartella.Checked
                          || s.CrmChiediFine != chkCrmFine.Checked || s.CrmDurataMinimaAttiva != chkCrmMinima.Checked
                          || s.CrmDurataMinimaMin != (int)nCrmMin.Value || !string.Equals(cartellaPrimaSalvataggio, s.OutputFolder, StringComparison.OrdinalIgnoreCase);
+            s.CrmAttivo = chkCrmAttivo.Checked;
             s.CrmUrl = txtCrmUrl.Text.Trim();
             s.CrmToken = txtCrmToken.Text.Trim();
             s.CrmChiediCliente = chkCrmCliente.Checked;

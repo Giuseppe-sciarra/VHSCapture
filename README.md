@@ -25,7 +25,9 @@ Mettere ffmpeg.exe accanto all'eseguibile. Il workflow GitHub Actions esegue i c
 VHSCapture può lavorare con la Coda Lavorazioni del CRM Tastiere Digitali:
 
 - **Collegamento**: nel CRM, *Controllo PC → la postazione → 🎬 VHSCapture → Genera il token*; in VHSCapture, *Impostazioni → CRM*: indirizzo del CRM, token, *Prova collegamento*.
-- **All'avvio**: «👤 Cliente» mostra i clienti in coda (es. «Mario Rossi — cassetta 3 di 4 · 4 VHS · 3 DVD»), un clic sul nome e si parte; «Nessun cliente» registra come sempre. Il cliente si cambia dal pulsante 👤 in alto.
+- **Quando premi Registra** (solo se non c'è un cliente in corso: la prima volta e quando hai finito le sue videocassette) compare «Di chi è questa cassetta?»: un clic sul nome e parte. Le cassette dello stesso cliente partono senza domande. «Nessun cliente» vale finché non scegli un cliente dal pulsante 👤 in alto.
+- **Avanzamento** ben visibile sotto la barra dei pulsanti: nome del cliente, «Cassetta 4 di 10» in grande e una barra a blocchetti (verdi le fatte, rossa lampeggiante quella in registrazione).
+- **Interruttore generale** in *Impostazioni → CRM → Usa il collegamento al CRM*: spento, VHSCapture registra come prima; indirizzo, token e opzioni restano salvati.
 - **Cartella**: le registrazioni vanno in «Nome Cognome» dentro la cartella del PC (creata se manca). Il nome del file si chiede a fine registrazione come sempre.
 - **Fine cassetta**: ✅ Completata (si conta) · 🗑 Scarta (vuota: non si conta, il totale del cliente scende, il file si cancella) · 🔄 Rifai (partenza sbagliata: non si conta, il file si cancella). Sotto la durata minima (4 minuti di partenza) la cassetta non si conta mai.
 - **Si contano le videocassette della scheda** (campo «N. Videocassette»: VHS, S-VHS, VHS-C, 8mm, Hi8, Digital8, MiniDV, tutte dal grabber); DVD, CD, musicassette e gli altri supporti di «Riversaggio / Backup» si lavorano a parte ma compaiono nel totale del cliente.

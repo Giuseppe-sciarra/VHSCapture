@@ -213,9 +213,10 @@ namespace VHSCapture
         public string IntelFieldOrder { get; set; } = "tff"; // i grabber raw spesso non dichiarano l'ordine dei campi
 
         // Collegamento al CRM (Controllo PC → 🎬 VHSCapture). Le opzioni restano salvate anche quando sono spente.
+        public bool CrmAttivo { get; set; } = true;              // interruttore generale: spento = VHSCapture come prima (token e opzioni restano salvati)
         public string CrmUrl { get; set; } = "https://crm.tastieredigitali.it";
         public string CrmToken { get; set; } = "";
-        public bool CrmChiediCliente { get; set; } = true;       // all'avvio: «👤 Cliente» / «Nessun cliente»
+        public bool CrmChiediCliente { get; set; } = true;       // al Registra, solo se non c'è un cliente in corso (prima volta / videocassette del cliente finite)
         public bool CrmCartellaCliente { get; set; } = true;     // salva in «Nome Cognome» dentro la cartella del PC
         public bool CrmChiediFine { get; set; } = true;          // a fine cassetta: Completata / Scarta / Rifai
         public bool CrmDurataMinimaAttiva { get; set; } = true;  // sotto questa durata la cassetta non si conta mai

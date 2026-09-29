@@ -96,7 +96,8 @@ namespace VHSCapture
             try { if (File.Exists(CodaFile)) coda = JsonSerializer.Deserialize<List<Evento>>(File.ReadAllText(CodaFile)) ?? new List<Evento>(); } catch { coda = new List<Evento>(); }
         }
 
-        public bool Configurato => !string.IsNullOrWhiteSpace(s.CrmUrl) && (s.CrmToken ?? "").Trim().Length >= 20;
+        /// <summary>Collegamento acceso nelle Impostazioni e indirizzo/token compilati. «Prova collegamento» funziona anche da spento.</summary>
+        public bool Configurato => s.CrmAttivo && !string.IsNullOrWhiteSpace(s.CrmUrl) && (s.CrmToken ?? "").Trim().Length >= 20;
 
         string Base => (s.CrmUrl ?? "").Trim().TrimEnd('/');
 

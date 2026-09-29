@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -105,6 +106,162 @@ namespace VHSCapture
     }
 
     /// <summary>
+    /// Fascia dell'avanzamento del cliente in corso, ben visibile sotto la barra dei pulsanti:
+    /// nome, «Cassetta 4 di 10» in grande e una barra a blocchetti (verdi fatte, rossa lampeggiante in registrazione, grigie da fare).
+    /// </summary>
+    public class ProgressoCliente : Control
+    {
+        public string Cliente { get; set; } = "";
+        public string Dettaglio { get; set; } = "";
+        public int Fatti { get; set; }
+        public int Totali { get; set; }
+        public int Corrente { get; set; }
+        public bool Registrando { get; set; }
+        bool lampo;
+        // font creati una volta sola: la fascia si ridisegna due volte al secondo durante la registrazione
+        static readonly Font FNome = new Font("Segoe UI Semibold", 15f), FGrande = new Font("Segoe UI Semibold", 20f),
+                             FPiccolo = new Font("Segoe UI", 9.5f), FSotto = new Font("Segoe UI Semibold", 10f);
+
+        public ProgressoCliente()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Height = 96;
+        }
+
+        /// <summary>Chiamato ogni mezzo secondo: fa lampeggiare il blocchetto della cassetta in registrazione.</summary>
+        public void Lampeggia() { lampo = !lampo; if (Registrando) Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var bg = new SolidBrush(Parent?.BackColor ?? Theme.Back)) g.FillRectangle(bg, ClientRectangle);
+            var r = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (var path = Ui.Rounded(r, 12))
+            {
+                using var f = new SolidBrush(Theme.Panel); g.FillPath(f, path);
+                using var p = new Pen(Registrando ? CrmColori.Rosso : Theme.Accent, 2f); g.DrawPath(p, path);
+            }
+            int n = Registrando && Corrente > 0 ? Corrente : Math.Min(Fatti + 1, Math.Max(1, Totali));
+            var fNome = FNome; var fGrande = FGrande; var fPiccolo = FPiccolo;
+            int destra = 360;
+            TextRenderer.DrawText(g, "👤  " + Cliente, fNome, new Rectangle(18, 10, Width - destra - 30, 30), Theme.Fore, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, "Supporti: " + (string.IsNullOrEmpty(Dettaglio) ? "—" : Dettaglio), fPiccolo, new Rectangle(20, 42, Width - destra - 30, 20), Theme.Muted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, $"Cassetta {n} di {Totali}", fGrande, new Rectangle(Width - destra, 4, destra - 18, 40), Registrando ? CrmColori.Rosso : Theme.Accent, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+            string sotto = Registrando ? "🔴  IN REGISTRAZIONE" : $"{Fatti} fatte  ·  {Math.Max(0, Totali - Fatti)} da fare";
+            TextRenderer.DrawText(g, sotto, FSotto, new Rectangle(Width - destra, 44, destra - 18, 20), Registrando ? CrmColori.Rosso : Theme.Muted, TextFormatFlags.Right);
+            // barra: un blocchetto per cassetta (oltre 40 cassette diventa una barra continua)
+            var barra = new Rectangle(18, Height - 28, Width - 36, 14);
+            if (Totali <= 0) return;
+            if (Totali <= 40)
+            {
+                int gap = Totali > 20 ? 3 : 5;
+                float w = (barra.Width - gap * (Totali - 1)) / (float)Totali;
+                for (int i = 0; i < Totali; i++)
+                {
+                    var b = new Rectangle((int)(barra.X + i * (w + gap)), barra.Y, Math.Max(2, (int)w), barra.Height);
+                    Color c = i < Fatti ? CrmColori.Verde
+                            : (Registrando && i == n - 1) ? (lampo ? CrmColori.Rosso : Color.FromArgb(120, CrmColori.Rosso))
+                            : (Theme.Dark ? Color.FromArgb(70, 70, 75) : Color.FromArgb(222, 222, 228));
+                    using var pb = Ui.Rounded(b, 4); using var fb = new SolidBrush(c); g.FillPath(fb, pb);
+                }
+            }
+            else
+            {
+                using (var pb = Ui.Rounded(barra, 6)) using (var fb = new SolidBrush(Theme.Dark ? Color.FromArgb(70, 70, 75) : Color.FromArgb(222, 222, 228))) g.FillPath(fb, pb);
+                var pieno = new Rectangle(barra.X, barra.Y, (int)(barra.Width * Math.Min(1.0, Fatti / (double)Totali)), barra.Height);
+                if (pieno.Width > 4) { using var pp = Ui.Rounded(pieno, 6); using var fv = new SolidBrush(CrmColori.Verde); g.FillPath(fv, pp); }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Un cliente nella lista: si illumina passandoci sopra (sfondo colorato, bordo, «▶ Clicca per iniziare»,
+    /// manina), si «schiaccia» al clic. Nome grande, bollino «Cassetta 3 di 4», supporti e mini barra delle videocassette fatte.
+    /// </summary>
+    public class ClienteCard : Control
+    {
+        public CrmLavoro Lavoro { get; }
+        bool sopra, premuto;
+        static readonly Font FNome = new Font("Segoe UI Semibold", 13.5f), FBollino = new Font("Segoe UI Semibold", 11f),
+                             FSup = new Font("Segoe UI", 9.5f), FAzione = new Font("Segoe UI Semibold", 10f);
+
+        public ClienteCard(CrmLavoro l)
+        {
+            Lavoro = l;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Height = 90; Width = 560; Cursor = Cursors.Hand; Margin = new Padding(0, 0, 0, 8);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { sopra = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { sopra = false; premuto = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { premuto = true; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { premuto = false; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnMouseWheel(MouseEventArgs e) { Ui.ScrollParent(this, e.Delta); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var bg = new SolidBrush(Parent?.BackColor ?? Theme.Back)) g.FillRectangle(bg, ClientRectangle);
+            var l = Lavoro;
+            bool altroPc = !string.IsNullOrEmpty(l.in_registrazione_su);
+            Color acc = altroPc ? CrmColori.Rosso : Theme.Accent;
+            var r = new Rectangle(1, 1, Width - 3, Height - 3);
+            if (premuto) r.Inflate(-2, -2);
+            using (var path = Ui.Rounded(r, 12))
+            {
+                Color fondo = premuto ? Color.FromArgb(Theme.Dark ? 110 : 55, acc) : sopra ? Color.FromArgb(Theme.Dark ? 70 : 24, acc) : Theme.Panel;
+                using var f = new SolidBrush(fondo); g.FillPath(f, path);
+                using var p = new Pen(sopra ? acc : Theme.Border, sopra ? 2f : 1f); g.DrawPath(p, path);
+            }
+            using (var barra = new SolidBrush(acc)) g.FillRectangle(barra, new Rectangle(r.X + 1, r.Y + 12, sopra ? 7 : 5, r.Height - 24));
+            int x = r.X + 22;
+
+            // bollino «Cassetta n di tot» a destra
+            int n = Math.Min(l.prossima, Math.Max(1, l.nastri_totali));
+            string bol = $"Cassetta {n} di {l.nastri_totali}";
+            var sz = TextRenderer.MeasureText(bol, FBollino);
+            var rb = new Rectangle(r.Right - sz.Width - 36, r.Y + 12, sz.Width + 22, 30);
+            using (var pb = Ui.Rounded(rb, 15)) using (var fb = new SolidBrush(acc)) g.FillPath(fb, pb);
+            TextRenderer.DrawText(g, bol, FBollino, rb, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+
+            // nome e supporti
+            TextRenderer.DrawText(g, l.cliente, FNome, new Rectangle(x, r.Y + 10, Math.Max(40, rb.X - x - 12), 32), Theme.Fore,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            string sup = "Supporti: " + (string.IsNullOrEmpty(l.dettaglio) ? "—" : l.dettaglio) + (string.IsNullOrEmpty(l.stato) ? "" : "   ·   " + l.stato);
+            TextRenderer.DrawText(g, sup, FSup, new Rectangle(x, r.Y + 44, Math.Max(40, r.Width - 330), 20), Theme.Muted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+
+            // mini barra delle videocassette: verdi le fatte
+            if (l.nastri_totali > 0)
+            {
+                var mb = new Rectangle(x, r.Bottom - 20, Math.Min(280, Math.Max(80, r.Width - 360)), 8);
+                Color vuoto = Theme.Dark ? Color.FromArgb(70, 70, 75) : Color.FromArgb(222, 222, 228);
+                if (l.nastri_totali <= 30)
+                {
+                    int gap = 3; float w = (mb.Width - gap * (l.nastri_totali - 1)) / (float)l.nastri_totali;
+                    for (int i = 0; i < l.nastri_totali; i++)
+                    {
+                        var b = new Rectangle((int)(mb.X + i * (w + gap)), mb.Y, Math.Max(2, (int)w), mb.Height);
+                        using var pb = Ui.Rounded(b, 3); using var fb = new SolidBrush(i < l.nastri_fatti ? CrmColori.Verde : vuoto); g.FillPath(fb, pb);
+                    }
+                }
+                else
+                {
+                    using (var pb = Ui.Rounded(mb, 4)) using (var fb = new SolidBrush(vuoto)) g.FillPath(fb, pb);
+                    int wv = (int)(mb.Width * Math.Min(1.0, l.nastri_fatti / (double)l.nastri_totali));
+                    if (wv > 4) { using var pv = Ui.Rounded(new Rectangle(mb.X, mb.Y, wv, mb.Height), 4); using var fv = new SolidBrush(CrmColori.Verde); g.FillPath(fv, pv); }
+                }
+            }
+
+            // in basso a destra: cosa succede cliccando
+            string azione = altroPc ? "🔴 lo sta registrando " + l.in_registrazione_su
+                          : sopra ? "▶  Clicca per iniziare"
+                          : $"{l.nastri_fatti} fatte  ·  {Math.Max(0, l.nastri_totali - l.nastri_fatti)} da fare";
+            TextRenderer.DrawText(g, azione, FAzione, new Rectangle(r.Right - 320, r.Bottom - 32, 298, 22),
+                altroPc ? CrmColori.Rosso : (sopra ? acc : Theme.Muted), TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+        }
+    }
+
+    /// <summary>
     /// «Chi stai riversando?»: «👤 Cliente» mostra la coda del CRM (un clic sul nome e si parte),
     /// «Nessun cliente» registra come sempre. Dal pulsante 👤 in alto si apre direttamente la lista.
     /// </summary>
@@ -113,12 +270,14 @@ namespace VHSCapture
         readonly Func<Task<List<CrmLavoro>>> carica;
         readonly Func<string> errore;
         readonly Panel passo1, passo2;
-        readonly ListBox lista;
+        readonly FlowLayoutPanel elenco;
+        readonly TextBox cerca;
+        readonly List<ClienteCard> schede = new List<ClienteCard>();
         readonly Label lblStato;
         const int W = 640;
         public CrmLavoro Scelto { get; private set; }
 
-        public ClienteForm(bool dark, Func<Task<List<CrmLavoro>>> caricaLavori, Func<string> ultimoErrore, bool soloLista)
+        public ClienteForm(bool dark, Func<Task<List<CrmLavoro>>> caricaLavori, Func<string> ultimoErrore, bool soloLista, string titolo = null)
         {
             Theme.Apply(this, dark);   // i colori servono già per costruire i riquadri
             carica = caricaLavori; errore = ultimoErrore;
@@ -150,47 +309,67 @@ namespace VHSCapture
 
             // ── passo 2: lista dei clienti in coda ──
             passo2 = new Panel { Dock = DockStyle.Fill, Padding = new Padding(24, 16, 24, 16), Visible = false };
-            var t2 = new Label { Text = "Quale cliente?", Dock = DockStyle.Top, Height = 40, Font = new Font("Segoe UI Semibold", 15f) };
+            var t2 = new Label { Text = titolo ?? "Quale cliente?", Dock = DockStyle.Top, Height = 40, Font = new Font("Segoe UI Semibold", 15f) };
             var info2 = new InfoBox("ℹ️",
-                "Clicca sul cliente che stai riversando.\n" +
+                "Clicca sul cliente di questa cassetta: la registrazione parte subito. Le prossime cassette dello stesso cliente partono senza chiedere, finché non hai finito le sue videocassette.\n" +
                 "«cassetta 3 di 4» = stai per registrare la 3ª delle 4 videocassette della scheda (VHS, S-VHS, VHS-C, 8mm, Hi8, Digital8, MiniDV).\n" +
                 "La riga sotto elenca tutti i supporti del cliente (anche DVD, CD, musicassette… che si lavorano a parte).\n" +
                 "🔴 = un altro PC sta già registrando questo cliente.",
                 W - 48, Theme.Accent) { Dock = DockStyle.Top };
             var spazio = new Panel { Dock = DockStyle.Top, Height = 10 };
-            lblStato = new Label { Dock = DockStyle.Top, Height = 28, Font = new Font("Segoe UI Semibold", 10f), Tag = "keep", TextAlign = ContentAlignment.MiddleLeft };
-            lista = new ListBox { Dock = DockStyle.Fill, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 64, BorderStyle = BorderStyle.None, IntegralHeight = false };
-            lista.DrawItem += DisegnaCliente;
-            lista.MouseMove += (o, e) => { int i = lista.IndexFromPoint(e.Location); lista.Cursor = i >= 0 ? Cursors.Hand : Cursors.Default; };
-            lista.MouseClick += (o, e) =>
+            // ricerca: con tanti clienti in coda si trova il nome in un attimo (Invio = il primo della lista)
+            var rigaCerca = new Panel { Dock = DockStyle.Top, Height = 40, Padding = new Padding(0, 2, 0, 6) };
+            cerca = new TextBox { Dock = DockStyle.Fill, Font = new Font("Segoe UI", 11f), PlaceholderText = "🔎  Cerca il cliente per nome…", BorderStyle = BorderStyle.FixedSingle };
+            cerca.TextChanged += (o, e) => Filtra();
+            cerca.KeyDown += (o, e) =>
             {
-                int i = lista.IndexFromPoint(e.Location);
-                if (i >= 0 && lista.Items[i] is CrmLavoro l) { Scelto = l; DialogResult = DialogResult.OK; Close(); }
+                if (e.KeyCode != Keys.Enter) return;
+                e.SuppressKeyPress = true;
+                var primo = schede.FirstOrDefault(x => x.Visible);
+                if (primo != null) Scegli(primo.Lavoro);
             };
+            rigaCerca.Controls.Add(cerca);
+            lblStato = new Label { Dock = DockStyle.Top, Height = 28, Font = new Font("Segoe UI Semibold", 10f), Tag = "keep", TextAlign = ContentAlignment.MiddleLeft };
+            elenco = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Padding = new Padding(0, 2, 0, 2) };
+            elenco.Resize += (o, e) => Larghezze();
             var giu = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 54, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 12, 0, 0) };
-            var bNessuno2 = Ui.Btn("🚫  Nessun cliente (registra come sempre)", "ghost", (o, e) => { Scelto = null; DialogResult = DialogResult.OK; Close(); }, 250);
+            var bNessuno2 = Ui.Btn("🚫  Nessun cliente (registra senza CRM)", "ghost", (o, e) => { Scelto = null; DialogResult = DialogResult.OK; Close(); }, 250);
             var bAggiorna = Ui.Btn("↻  Aggiorna la lista", "ghost", async (o, e) => await Carica(), 150);
             giu.Controls.Add(bNessuno2); giu.Controls.Add(bAggiorna);
-            passo2.Controls.Add(lista); passo2.Controls.Add(lblStato); passo2.Controls.Add(spazio); passo2.Controls.Add(info2); passo2.Controls.Add(t2); passo2.Controls.Add(giu);
+            passo2.Controls.Add(elenco); passo2.Controls.Add(lblStato); passo2.Controls.Add(rigaCerca); passo2.Controls.Add(spazio); passo2.Controls.Add(info2); passo2.Controls.Add(t2); passo2.Controls.Add(giu);
 
             Controls.Add(passo2); Controls.Add(passo1);
             ClientSize = new Size(W, soloLista ? 600 : altezzaPasso1);
             Theme.Apply(this, dark);
             foreach (Control c in passo1.Controls) if (c is SceltaCard sc) sc.Colori();
-            lista.BackColor = Theme.Back;
+            elenco.BackColor = Theme.Back;
             if (soloLista) Shown += (o, e) => MostraLista();
         }
 
         async void MostraLista()
         {
             passo1.Visible = false; passo2.Visible = true;
-            if (ClientSize.Height < 600) { ClientSize = new Size(W, 600); CenterToParent(); }
+            if (ClientSize.Height < 640) { ClientSize = new Size(W, 640); CenterToParent(); }
             await Carica();
+        }
+
+        void Scegli(CrmLavoro l) { Scelto = l; DialogResult = DialogResult.OK; Close(); }
+
+        /// <summary>Card larghe quanto la lista, lasciando sempre il posto alla barra di scorrimento (niente scorrimento orizzontale).</summary>
+        void Larghezze()
+        {
+            int w = Math.Max(300, elenco.ClientSize.Width - elenco.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 4);
+            elenco.SuspendLayout();
+            foreach (var c in schede) c.Width = w;
+            elenco.ResumeLayout();
         }
 
         async Task Carica()
         {
-            lblStato.ForeColor = Theme.Muted; lblStato.Text = "Carico la coda dal CRM…"; lista.Items.Clear();
+            lblStato.ForeColor = Theme.Muted; lblStato.Text = "⏳  Carico la coda dal CRM…";
+            elenco.Controls.Clear();
+            foreach (var c in schede) c.Dispose();
+            schede.Clear();
             var l = await carica();
             if (IsDisposed) return;
             if (l == null)
@@ -199,36 +378,30 @@ namespace VHSCapture
                 lblStato.Text = "⚠ " + (errore() ?? "CRM non raggiungibile") + " — premi «Aggiorna la lista» o scegli «Nessun cliente».";
                 return;
             }
-            foreach (var x in l) lista.Items.Add(x);
-            lblStato.ForeColor = l.Count == 0 ? Theme.Muted : Theme.Accent;
-            lblStato.Text = l.Count == 0 ? "Nessun cliente in coda con cassette da riversare col grabber." : "👇  Clicca sul cliente per iniziare";
+            elenco.SuspendLayout();
+            foreach (var x in l)
+            {
+                var c = new ClienteCard(x);
+                c.Click += (o, e) => Scegli(x);
+                schede.Add(c); elenco.Controls.Add(c);
+            }
+            elenco.ResumeLayout();
+            Larghezze();
+            Filtra();
+            cerca.Focus();
         }
 
-        void DisegnaCliente(object sender, DrawItemEventArgs e)
+        void Filtra()
         {
-            if (e.Index < 0 || !(lista.Items[e.Index] is CrmLavoro l)) return;
-            var g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (var bg = new SolidBrush(Theme.Back)) g.FillRectangle(bg, e.Bounds);
-            var r = new Rectangle(e.Bounds.X + 2, e.Bounds.Y + 3, e.Bounds.Width - 4, e.Bounds.Height - 6);
-            var sopraPt = lista.PointToClient(Control.MousePosition);
-            bool sopra = r.Contains(sopraPt);
-            using (var path = Ui.Rounded(r, 10))
-            {
-                using var f = new SolidBrush(sopra ? Color.FromArgb(Theme.Dark ? 70 : 30, Theme.Accent) : Theme.Panel);
-                g.FillPath(f, path);
-                using var pen = new Pen(sopra ? Theme.Accent : Theme.Border, sopra ? 2f : 1f); g.DrawPath(pen, path);
-            }
-            using (var barra = new SolidBrush(string.IsNullOrEmpty(l.in_registrazione_su) ? Theme.Accent : Theme.Rec))
-                g.FillRectangle(barra, new Rectangle(r.X + 1, r.Y + 8, 5, r.Height - 16));
-            var fNome = new Font("Segoe UI Semibold", 12f);
-            TextRenderer.DrawText(g, l.cliente, fNome, new Rectangle(r.X + 16, r.Y + 7, r.Width - 230, 26), Theme.Fore, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-            string conto = $"cassetta {Math.Min(l.prossima, Math.Max(1, l.nastri_totali))} di {l.nastri_totali}";
-            TextRenderer.DrawText(g, conto, fNome, new Rectangle(r.Right - 214, r.Y + 7, 200, 26), Theme.Accent, TextFormatFlags.Right);
-            string sotto = "Supporti: " + (string.IsNullOrEmpty(l.dettaglio) ? "—" : l.dettaglio) + (string.IsNullOrEmpty(l.stato) ? "" : "   ·   " + l.stato);
-            TextRenderer.DrawText(g, sotto, Font, new Rectangle(r.X + 16, r.Y + 35, r.Width - 290, 22), Theme.Muted, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-            if (!string.IsNullOrEmpty(l.in_registrazione_su))
-                TextRenderer.DrawText(g, "🔴 lo sta registrando " + l.in_registrazione_su, new Font("Segoe UI Semibold", 9.5f), new Rectangle(r.Right - 290, r.Y + 35, 276, 22), Theme.Rec, TextFormatFlags.Right);
+            string q = (cerca.Text ?? "").Trim().ToLowerInvariant();
+            int vis = 0;
+            elenco.SuspendLayout();
+            foreach (var c in schede) { bool v = q.Length == 0 || (c.Lavoro.cliente ?? "").ToLowerInvariant().Contains(q); c.Visible = v; if (v) vis++; }
+            elenco.ResumeLayout();
+            if (schede.Count == 0) { lblStato.ForeColor = Theme.Muted; lblStato.Text = "Nessun cliente in coda con videocassette da registrare."; return; }
+            if (vis == 0) { lblStato.ForeColor = Theme.Muted; lblStato.Text = "Nessun cliente con questo nome."; return; }
+            lblStato.ForeColor = Theme.Accent;
+            lblStato.Text = q.Length > 0 && vis == 1 ? "⏎  Premi Invio o clicca per iniziare con questo cliente" : "👇  Passa sopra al cliente e clicca per iniziare";
         }
     }
 

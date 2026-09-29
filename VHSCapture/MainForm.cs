@@ -34,7 +34,10 @@ namespace VHSCapture
         Label lblCrm; Panel crmWrap;
         System.Windows.Forms.Timer crmTimer;
         bool crmOccupato;
+        bool nessunCliente;                       // scelto «Nessun cliente»: non si chiede più finché non scegli un cliente dal pulsante 👤
+        ProgressoCliente prog; Panel progWrap;    // fascia dell'avanzamento del cliente in corso
         List<CrmPostazione> postazioni = new List<CrmPostazione>();
+        bool CrmAttivo => crm != null && crm.Configurato;
         Panel mixer;
         readonly Dictionary<string, MixerRow> mixerRows = new Dictionary<string, MixerRow>();
         System.Windows.Forms.Timer timer, restartTimer;
@@ -103,7 +106,16 @@ namespace VHSCapture
             engine.Exited += OnEngineExited;
 
             timer = new System.Windows.Forms.Timer { Interval = 500 };
-            timer.Tick += (o, e) => UpdateStatus();
+            timer.Tick += (o, e) =>
+            {
+                UpdateStatus();
+                if (prog != null && progWrap.Visible)
+                {
+                    bool reg = engine.IsRecording && !finalizing;
+                    if (prog.Registrando != reg) { prog.Registrando = reg; prog.Corrente = reg ? cassettaInCorso : 0; prog.Invalidate(); }
+                    prog.Lampeggia();
+                }
+            };
             timer.Start();
             crm = new CrmClient(settings) { Versione = $"{ver.Major}.{ver.Minor}.{ver.Build}" };
             crmTimer = new System.Windows.Forms.Timer { Interval = 20000 };
@@ -281,9 +293,17 @@ namespace VHSCapture
             crmWrap = new Panel { Dock = DockStyle.Bottom, Height = 34 + gap, Padding = new Padding(gap, 0, gap, gap), Visible = false };
             crmWrap.Controls.Add(crmCard);
 
+            // ---- fascia dell'avanzamento del cliente (sotto la barra dei pulsanti) ----
+            prog = new ProgressoCliente { Dock = DockStyle.Fill, Cursor = Cursors.Hand };
+            prog.Click += (o, e) => ScegliCliente(true);
+            tips.SetToolTip(prog, "Clic per cambiare cliente");
+            progWrap = new Panel { Dock = DockStyle.Top, Height = 96 + gap, Padding = new Padding(gap, gap, gap, 0), Visible = false };
+            progWrap.Controls.Add(prog);
+
             Controls.Add(body);
             Controls.Add(crmWrap);
             Controls.Add(statusWrap);
+            Controls.Add(progWrap);
             Controls.Add(topWrap);
         }
 
@@ -370,23 +390,23 @@ namespace VHSCapture
             crmTimer.Start();
             await CrmSincronizzaConfig();
             CrmBattito();
-            if (settings.CrmChiediCliente && lavoro == null) ScegliCliente(false);
         }
 
         void CrmDopoImpostazioni()
         {
-            if (crm.Configurato) { crmTimer.Start(); _ = CrmSincronizzaConfig(); CrmBattito(); }
-            else crmTimer.Stop();
+            if (CrmAttivo) { crmTimer.Start(); _ = CrmSincronizzaConfig(); CrmBattito(); }
+            else { crmTimer.Stop(); lavoro = null; nessunCliente = false; }   // CRM spento: VHSCapture come prima
             AggiornaCliente();
         }
 
         void ScegliCliente(bool soloLista)
         {
             if (CaptureBusy) { MessageBox.Show(this, "Ferma la registrazione prima di cambiare cliente.", "VHSCapture"); return; }
-            if (!crm.Configurato) { MessageBox.Show(this, "Collega prima il CRM: Impostazioni → CRM.", "VHSCapture"); return; }
+            if (!CrmAttivo) { MessageBox.Show(this, "Il collegamento al CRM è spento o non configurato: Impostazioni → CRM.", "VHSCapture"); return; }
             using var f = new ClienteForm(settings.DarkTheme, () => crm.Lavori(), () => crm.UltimoErrore, soloLista);
             if (f.ShowDialog(this) != DialogResult.OK) return;
             lavoro = f.Scelto;
+            nessunCliente = lavoro == null;
             AppendLog(lavoro == null ? "Nessun cliente: si registra come sempre" : $"Cliente: {lavoro.cliente} — {lavoro.dettaglio}");
             AggiornaCliente();
         }
@@ -395,7 +415,18 @@ namespace VHSCapture
         {
             if (btnCliente == null || crm == null) return;
             bool compact = compactState == true;
-            btnCliente.Visible = crm.Configurato;
+            btnCliente.Visible = CrmAttivo;
+            if (progWrap != null)
+            {
+                progWrap.Visible = CrmAttivo && lavoro != null;
+                if (lavoro != null)
+                {
+                    prog.Cliente = lavoro.cliente; prog.Dettaglio = lavoro.dettaglio;
+                    prog.Fatti = lavoro.nastri_fatti; prog.Totali = lavoro.nastri_totali;
+                    prog.Registrando = engine.IsRecording && !finalizing; prog.Corrente = prog.Registrando ? cassettaInCorso : 0;
+                    prog.Invalidate();
+                }
+            }
             int n = lavoro == null ? 0 : Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali));
             btnCliente.Text = lavoro == null ? (compact ? "👤" : "👤   Nessun cliente") : (compact ? $"👤 {n}/{lavoro.nastri_totali}" : $"👤   {lavoro.cliente}  ·  {n}/{lavoro.nastri_totali}");
             btnCliente.Variant = lavoro == null ? "ghost" : "accent";
@@ -407,8 +438,8 @@ namespace VHSCapture
         void AggiornaBarraCrm()
         {
             if (crmWrap == null || crm == null) return;
-            crmWrap.Visible = crm.Configurato;
-            if (!crm.Configurato) return;
+            crmWrap.Visible = CrmAttivo;
+            if (!CrmAttivo) return;
             var parti = new List<string>();
             if (lavoro != null)
                 parti.Add($"👤 {lavoro.cliente} · cassetta {Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali))} di {lavoro.nastri_totali} · {lavoro.dettaglio}");
@@ -439,7 +470,7 @@ namespace VHSCapture
         /// <summary>Ogni 20 s: eventi rimasti indietro, battito, configurazione cambiata nel CRM, stato degli altri PC.</summary>
         async void CrmBattito()
         {
-            if (crm == null || !crm.Configurato || crmOccupato) return;
+            if (!CrmAttivo || crmOccupato) return;
             crmOccupato = true;
             try
             {
@@ -521,9 +552,10 @@ namespace VHSCapture
                 MessageBox.Show(this, $"Hai finito le cassette di {l.cliente} ({l.nastri_fatti} di {l.nastri_totali}).\n\n" +
                     "Il CRM adesso non risponde: conteggio e stato si aggiornano appena torna la connessione.",
                     "VHSCapture — cassette finite (CRM non raggiungibile)", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            lavoro = null;                              // cliente finito: si passa al prossimo
+            lavoro = null;                              // videocassette del cliente finite: al prossimo Registra si chiede il cliente
+            nessunCliente = false;
+            AppendLog("Videocassette di " + l.cliente + " finite: alla prossima registrazione ti chiedo il cliente");
             AggiornaCliente();
-            if (settings.CrmChiediCliente) ScegliCliente(false);
         }
 
         string Prompt(string title, string label, string value)
@@ -812,6 +844,19 @@ namespace VHSCapture
             if (CaptureBusy) return;
             if (!settings.Sources.Any(x => x.Visible)) { MessageBox.Show(this, "Aggiungi almeno una sorgente.", "VHSCapture"); return; }
 
+            // CRM: il cliente si chiede SOLO se non ce n'è uno in corso (prima registrazione, o videocassette del cliente
+            // finite). Le cassette dello stesso cliente partono senza domande.
+            if (CrmAttivo && settings.CrmChiediCliente && lavoro == null && !nessunCliente)
+            {
+                using var fc = new ClienteForm(settings.DarkTheme, () => crm.Lavori(), () => crm.UltimoErrore, true, "Di chi è questa cassetta?");
+                if (fc.ShowDialog(this) != DialogResult.OK) { AppendLog("Registrazione non avviata: nessun cliente scelto"); return; }
+                lavoro = fc.Scelto;
+                nessunCliente = lavoro == null;
+                AppendLog(lavoro == null ? "Nessun cliente: si registra senza CRM finché non scegli un cliente dal pulsante 👤"
+                                         : $"Cliente: {lavoro.cliente} — {lavoro.dettaglio}");
+                AggiornaCliente();
+            }
+
             string destFolder = settings.ResolvedOutputFolder();
             if (lavoro != null && settings.CrmCartellaCliente && !string.IsNullOrWhiteSpace(lavoro.cartella))
             {
@@ -875,6 +920,7 @@ namespace VHSCapture
                 {
                     cassettaInCorso = Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali));
                     AppendLog($"Cliente {lavoro.cliente}: cassetta {cassettaInCorso} di {lavoro.nastri_totali}");
+                    AggiornaCliente();
                     _ = crm.Manda("inizio", new Dictionary<string, object> { ["vhs_id"] = lavoro.id, ["cassetta_n"] = cassettaInCorso, ["file"] = Path.GetFileName(recFile.Replace("%03d", "000")), ["versione"] = crm.Versione });
                     CrmBattito();
                 }

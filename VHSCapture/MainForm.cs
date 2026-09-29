@@ -49,6 +49,7 @@ namespace VHSCapture
         DateTime blankFloor = DateTime.MinValue, lastSignalDiag = DateTime.MinValue;   // lo sfondo conta solo da inizio registrazione / ripresa
         bool stallWarned;
         string moveTo;   // cartella di rete di destinazione quando si registra prima sul PC
+        NetworkMirror mirror;   // copia in rete a pezzi durante la registrazione
 
         public MainForm()
         {
@@ -654,16 +655,20 @@ namespace VHSCapture
                 if (!engine.IsRunning) StartPreview();
                 // PARTE SUBITO (come prima): il registratore scrive dal keyframe già in memoria, o dal prossimo se non c'è ancora.
                 engine.StartRecording(settings, recFile); muxStarted = true;
+                // cartella di rete: il file sul NAS cresce insieme a quello sul PC (allo stop resta solo l'ultimo pezzo)
+                mirror = null;
+                if (moveTo != null && !recFile.Contains("%03d")) { mirror = new NetworkMirror(recFile, moveTo); mirror.Start(); }
                 recStart = DateTime.Now;
                 pausedSince = null; pausedTotal = TimeSpan.Zero;
                 blankSince = null; blankStartRecSec = -1; contentSamples = 0; autoStopped = false;
                 lastSignalAt = DateTime.MinValue; blankFloor = DateTime.UtcNow; stallWarned = false;
-                AppendLog("Registrazione avviata: " + Path.GetFileName(recFile) + (moveTo != null ? $" (sul PC, poi in {moveTo})" : ""));
+                AppendLog("Registrazione avviata: " + recFile.Replace("%03d", "000") + (moveTo != null ? $"  (passa dal PC, copia in rete a pezzi in {moveTo})" : ""));
                 SetButtons();
                 VerifyRecordingStarted(recFile, ++recSession);   // controllo dietro le quinte, non blocca
             }
             catch (Exception ex)
             {
+                mirror?.Abort(); mirror = null;
                 if (muxStarted) await Task.Run(() => engine.StopRecording());
                 string partial = RecordedBytes(recFile) > 0 ? "\nIl file parziale è conservato: " + recFile : "";
                 AppendLog("Registrazione non avviata: " + ex.Message + partial);
@@ -708,6 +713,7 @@ namespace VHSCapture
             try
             {
             string written = recFile, final = finalFile;
+            bool rewritten = false;   // contenuto rifatto da capo (MKV→MP4, taglio con riscrittura): la copia in rete riparte da zero
             bool muxOk = await Task.Run(() => engine.StopRecording());
             if (!muxOk) AppendLog("Registrazione interrotta: " + (engine.Recorder.LastError ?? "Chiusura non completata. Il file parziale è conservato."));
 
@@ -724,6 +730,7 @@ namespace VHSCapture
             }
             else if (settings.SafeRecording && !string.Equals(written, final, StringComparison.OrdinalIgnoreCase))
             {
+                rewritten = true;
                 lblRec.Text = "Conversione in MP4 (senza ricodifica)…";
                 bool ok = await Task.Run(() => FFmpeg.RemuxToMp4(written, final, AppendLog));
                 if (ok) { try { File.Delete(written); } catch { } AppendLog("Salvato: " + final); }
@@ -743,7 +750,9 @@ namespace VHSCapture
                 lblRec.Text = "Taglio la coda uniforme…";
                 // il file parte dal keyframe precedente al clic: margine = intervallo keyframe + 1 s
                 double cut = blankStartRecSec + Math.Max(1, settings.KeyframeSec) + 1;
-                bool ok = await Task.Run(() => FFmpeg.TrimFile(mainFile, cut, AppendLog));
+                // MP4 frammentato: si accorcia il file al pezzo giusto, istantaneo. Altrimenti riscrittura (una passata).
+                bool ok = await Task.Run(() => Mp4Frag.TruncateAt(mainFile, cut, AppendLog));
+                if (!ok) { ok = await Task.Run(() => FFmpeg.TrimFile(mainFile, cut, AppendLog)); if (ok) rewritten = true; }
                 AppendLog(ok ? $"Coda uniforme tagliata: file lungo {TimeSpan.FromSeconds(cut):hh\\:mm\\:ss}" : "Coda uniforme non tagliata (il file è comunque salvo)");
             }
 
@@ -771,10 +780,18 @@ namespace VHSCapture
                 else AppendLog($"Audio nel file OK: medio {mean:0.0} dB, picco {max:0.0} dB" + (max >= -0.5 ? " — satura, abbassa il volume nel mixer" : ""));
             }
 
-            // registrato sul PC: ora lo sposto nella cartella di rete (anche i file parziali, così non restano dimenticati)
+            // registrato sul PC: il grosso è già in rete (copia a pezzi), qui si completa l'ultimo pezzo
             if (moveTo != null)
             {
                 var files = RecordedFiles(final).Concat(RecordedFiles(written)).Distinct(StringComparer.OrdinalIgnoreCase).Where(File.Exists).ToList();
+                var m = mirror; mirror = null;
+                if (m != null && files.Count == 1)
+                {
+                    string target = await m.FinishAsync(files[0], rewritten, t => { if (!IsDisposed) lblRec.Text = t; });
+                    if (target != null) { AppendLog("In rete: " + target); files.Clear(); }
+                    else { AppendLog("Copia in rete a pezzi non completata (" + m.LastError + "): copio il file intero"); m.Abort(); }
+                }
+                else m?.Abort();
                 if (files.Count > 0) await MoveToNetwork(files, moveTo);
             }
 

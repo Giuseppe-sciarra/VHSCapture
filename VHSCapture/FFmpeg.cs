@@ -237,7 +237,7 @@ namespace VHSCapture
             try
             {
                 string tmp = Path.Combine(Path.GetDirectoryName(file), Path.GetFileNameWithoutExtension(file) + ".trim" + Path.GetExtension(file));
-                string args = $"-hide_banner -loglevel error -y -i \"{file}\" -t {seconds.ToString("0.00", CultureInfo.InvariantCulture)} -map 0 -c copy -movflags +faststart \"{tmp}\"";
+                string args = $"-hide_banner -loglevel error -y -i \"{file}\" -t {seconds.ToString("0.00", CultureInfo.InvariantCulture)} -map 0 -c copy \"{tmp}\"";   // senza +faststart: una passata sola
                 log?.Invoke("ffmpeg " + args);
                 using var p = Process.Start(Psi(args));
                 var se = p.StandardError.ReadToEndAsync(); p.StandardOutput.ReadToEnd(); p.WaitForExit();

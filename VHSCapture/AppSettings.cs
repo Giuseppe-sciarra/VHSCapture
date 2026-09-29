@@ -190,7 +190,8 @@ namespace VHSCapture
         public bool SafeRecording { get; set; } = false;       // opzionale: MKV + remux MP4 a fine
         public int MaxMinutes { get; set; } = 0;
 
-        public bool FragmentedMp4 { get; set; } = false;       // come "MP4 ibrido/frammentato" di OBS: leggibile anche dopo un crash
+        public bool FragmentedMp4 { get; set; } = true;        // come "MP4 ibrido" di OBS: scritto a pezzi, niente attese allo stop, leggibile dopo un crash
+        public int FormatVersion { get; set; } = 0;            // migrazioni una tantum delle impostazioni
         public int SplitMinutes { get; set; } = 0;             // come "Divisione automatica dei file" di OBS (0 = off)
         public bool HighPriority { get; set; } = true;         // come "Priorità del processo" di OBS
         public bool AudioMonitor { get; set; } = false;        // come "Monitoraggio audio" di OBS: senti l'audio dalle casse
@@ -200,7 +201,7 @@ namespace VHSCapture
         // Fine cassetta
         public bool AutoStopOnBlank { get; set; } = true;      // arresto prudente dopo conferma di assenza di dettagli, movimento e audio
         public int AutoStopSeconds { get; set; } = 120;        // secondi di fila di solo sfondo (blu/nero/neve) prima di fermare
-        public bool RecordLocalFirst { get; set; } = true;     // cartella di rete: registra sul disco del PC e sposta alla fine
+        public bool RecordLocalFirst { get; set; } = false;    // SPENTO = come OBS: si scrive direttamente nella cartella scelta, anche di rete
         public bool TrimBlankTail { get; set; } = true;        // taglia la coda uniforme dal file
         public bool AskNameAtEnd { get; set; } = true;         // a fine registrazione chiede il nome della cassetta e rinomina
         public string Profile { get; set; } = "";              // ultimo profilo applicato (solo per l'etichetta)
@@ -245,6 +246,10 @@ namespace VHSCapture
 
             // fine cassetta: sotto il minuto si rischia di fermare su un nero del filmato; il nuovo rilevatore conta tutto il tempo
             if (s.AutoStopSeconds < 60) s.AutoStopSeconds = 120;
+            // 1.2.3: MP4 frammentato predefinito (niente riscritture allo stop, taglio coda istantaneo). Chi usa MKV resta su MKV.
+            if (s.FormatVersion < 2) { if (!s.SafeRecording) s.FragmentedMp4 = true; s.FormatVersion = 2; }
+            // 1.2.4: "registra sul PC e sposta" non è più attivo di default: si scrive dritto nella cartella scelta, come OBS
+            if (s.FormatVersion < 3) { s.RecordLocalFirst = false; s.FormatVersion = 3; }
             if (!string.IsNullOrEmpty(s.Profile) && s.Profile != "PAL" && s.Profile != "NTSC")
                 s.Profile = s.Profile.Contains("NTSC") ? "NTSC" : (s.Profile.Contains("PAL") ? "PAL" : "");
             foreach (var src in s.Sources)

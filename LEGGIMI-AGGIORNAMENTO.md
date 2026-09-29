@@ -1,3 +1,14 @@
+# VHSCapture 1.2.4 — si scrive dritto nella cartella scelta, come OBS
+
+- "Cartella di rete: passa prima dal disco del PC" ora è **spenta di default**, e al primo avvio viene spenta anche a chi ce l'aveva. Il file si scrive direttamente nella cartella scelta e niente passa dal PC. A ogni registrazione il Log mostra il percorso completo.
+
+# VHSCapture 1.2.3 — chiusura istantanea come OBS
+
+- **MP4 frammentato predefinito** (come l'"MP4 ibrido" di OBS): il file si scrive a pezzi mentre registri, quindi allo stop non c'è niente da convertire e il file resta leggibile anche se salta la corrente. Chi aveva scelto "MKV sicuro" resta su MKV. Se un TV molto vecchio non legge il frammentato, in Impostazioni si sceglie "MP4 normale".
+- **Taglio della coda istantaneo**: nel frammentato si accorcia il file all'inizio del pezzo giusto (`Mp4Tools.cs`, `Mp4Frag.TruncateAt`) invece di riscriverlo. Provato con ffmpeg: 60 s → 30,04 s in 15 ms, 1500/1500 fotogrammi, decodifica pulita. Con l'MP4 normale resta la riscrittura, ma senza `+faststart` (una passata invece di due).
+- **Copia in rete a pezzi** (`NetworkMirror`): con "registra sul PC e sposta" il file sul NAS cresce insieme a quello locale, ogni 2 s. Allo stop si copiano solo l'ultimo pezzo e l'intestazione. Provato su file normale, accorciato e rifatto da capo: identici byte per byte, chiusura in 46–112 ms. Se la rete non risponde, la registrazione non ne risente e alla fine si ripiega sulla copia completa.
+- **Registrazione immediata**: niente più "Preparazione" al clic su Registra. Il controllo che il file riceva video gira in background per 20 s.
+
 # VHSCapture 1.2.2 — fine cassetta e registrazione su rete
 
 ## Fine cassetta: rilevatore nuovo, sui pixel

@@ -203,8 +203,8 @@ namespace VHSCapture
             folderRow.Controls.Add(txtFolder); folderRow.Controls.Add(browse);
             folderRow.Height = 30;
             Row(sal, "Cartella (anche di rete)", folderRow);
-            chkLocalFirst = Check(sal, "Se la cartella è in rete, registra sul PC e sposta alla fine (consigliato)",
-                "Un rallentamento del NAS o della rete non può più interrompere la registrazione. Il file viene copiato in rete dopo taglio e rinomina; se la rete non risponde resta sul PC e te lo dico.");
+            chkLocalFirst = Check(sal, "Cartella di rete: passa prima dal disco del PC (facoltativo)",
+                "Spenta (predefinito, come OBS): il file si scrive direttamente nella cartella scelta, niente sul PC. Accesa: si scrive sul PC e il file viene copiato in rete a pezzi mentre registri, utile solo se la rete è instabile.");
             txtPrefix = new TextBox { BorderStyle = BorderStyle.FixedSingle };
             Row(sal, "Prefisso nome file", txtPrefix, "→ Prefisso_Nome_2026-09-27_14-30-00.mp4");
             nMaxMin = Num(0, 600, 5);
@@ -215,9 +215,9 @@ namespace VHSCapture
         {
             var p = Page("Registrazione");
             var file = Section(p, "File");
-            cbFormat = Combo("MP4 (standard)", "MP4 anti-crash (frammentato)", "MKV sicuro → MP4 alla fine");
+            cbFormat = Combo("MP4 normale (allo stop il taglio coda riscrive il file)", "MP4 frammentato, come OBS (consigliato: stop istantaneo)", "MKV sicuro → MP4 alla fine (lento: riscrive tutto)");
             Row(file, "Formato", cbFormat);
-            Note(file, "MP4 anti-crash: come l'MP4 ibrido di OBS, il file resta leggibile anche se salta la corrente. Alcuni TV vecchi lo leggono peggio.");
+            Note(file, "MP4 frammentato: scritto a pezzi mentre registri, come l'MP4 ibrido di OBS. Allo stop non c'è niente da convertire, il taglio della coda è istantaneo e il file resta leggibile anche se salta la corrente. Se un TV molto vecchio non lo legge, scegli MP4 normale.");
             nSplit = Num(0, 600, 5);
             Row(file, "Dividi file ogni (minuti)", nSplit, "0 = no. Utile per chiavette FAT32 (4 GB)");
 

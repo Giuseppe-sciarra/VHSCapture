@@ -690,7 +690,7 @@ namespace VHSCapture
             mux.BeginErrorReadLine(); mux.BeginOutputReadLine();
             try { mux.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { }
 
-            queue = new System.Collections.Concurrent.BlockingCollection<byte[]>(new System.Collections.Concurrent.ConcurrentQueue<byte[]>(), 350_000); // ~66 MB max
+            queue = new System.Collections.Concurrent.BlockingCollection<byte[]>(new System.Collections.Concurrent.ConcurrentQueue<byte[]>(), 1_600_000); // ~300 MB: circa 10 minuti a 3,5 Mbit/s
             var q = queue; var stdin = mux.StandardInput.BaseStream;
             writer = new Thread(() =>
             {
@@ -811,7 +811,8 @@ namespace VHSCapture
         public event Action<byte[], int> MonitorData;
         public event Action<EngineStats> Stats;
         /// <summary>Stato della sorgente (2 volte al secondo), confermato su ogni frame: contenuto, verifica o assenza probabile.</summary>
-        public event Action<string, bool, string> SignalState;   // id, assenza confermata, stato
+        /// <summary>id sorgente, secondi di fila in cui si vede solo lo sfondo (0 = contenuto), dettaglio per il Log.</summary>
+        public event Action<string, double, string> SignalState;
         public event Action<string> Log;
         public event Action<int> Exited;
 
@@ -936,7 +937,8 @@ namespace VHSCapture
             foreach (var kv in names.Analysis)
             {
                 var id = kv.Key;
-                for (int i = 0; i < meterInstances; i++) { var pp = NewPipe(kv.Value, 64 << 10, meterInstances); Run("analysis", () => TextLoop(pp, l => OnAnalysisLine(id, l))); }
+                var pp = NewPipe(kv.Value, NoSignalDetector.FrameBytes * 8);
+                Run("analysis", () => AnalysisLoop(pp, id));
             }
             if (moPipe != null) Run("monitor", () => MonitorLoop(moPipe));
 
@@ -1267,6 +1269,7 @@ namespace VHSCapture
                 if (m.any)
                 {
                     audioObserved[id] = signalClock.Elapsed.TotalSeconds;
+                    sig.GetOrAdd(id, _ => new SigState()).detector.AddAudio(Math.Max(m.rl, m.rr), signalClock.Elapsed.TotalSeconds);
                     if (Math.Max(m.pl, m.pr) > -48 && Math.Max(m.rl, m.rr) > -60)
                         audioActivity[id] = signalClock.Elapsed.TotalSeconds;
                     AudioLevels?.Invoke(id, m.rl, m.pl, m.rr, m.pr);
@@ -1295,6 +1298,11 @@ namespace VHSCapture
         void OnFrameLine(string line)
         {
             if (!line.StartsWith("frame:")) return;
+            SourceFrameTick();
+        }
+
+        void SourceFrameTick()
+        {
             var now = DateTime.Now;
             lock (srcFrames)
             {
@@ -1310,9 +1318,7 @@ namespace VHSCapture
 
         class SigState
         {
-            public readonly double[] values = new double[NoSignalDetector.Keys.Length];
             public readonly NoSignalDetector detector = new NoSignalDetector();
-            public int seen;
             public double lastEmit = -1;
         }
         readonly ConcurrentDictionary<string, SigState> sig = new ConcurrentDictionary<string, SigState>();
@@ -1320,33 +1326,35 @@ namespace VHSCapture
         readonly ConcurrentDictionary<string, double> audioObserved = new ConcurrentDictionary<string, double>();
         readonly Stopwatch signalClock = Stopwatch.StartNew();
 
-        void OnAnalysisLine(string id, string line)
+        /// <summary>
+        /// Legge i fotogrammi 80×60 del ramo di analisi (prima del deinterlaccio, frequenza della sorgente) e li passa al
+        /// rilevatore. La pipe va SEMPRE svuotata: se si fermasse, ffmpeg bloccherebbe anche anteprima e registrazione.
+        /// </summary>
+        void AnalysisLoop(NamedPipeServerStream pipe, string id)
         {
+            try { pipe.WaitForConnection(); } catch { return; }
             var g = sig.GetOrAdd(id, _ => new SigState());
-            lock (g)
+            var buf = new byte[NoSignalDetector.FrameBytes];
+            while (true)
             {
-                if (line.StartsWith("frame:"))
+                int got = 0;
+                try { while (got < buf.Length) { int r = pipe.Read(buf, got, buf.Length - got); if (r <= 0) return; got += r; } }
+                catch { return; }
+                try
                 {
-                    OnFrameLine(line);
+                    SourceFrameTick();
                     double now = signalClock.Elapsed.TotalSeconds;
-                    bool audio = audioActivity.TryGetValue(id, out double active) && now - active < 3;
-                    bool audioKnown = !runningSources.TryGetValue(id, out var source) || !source.HasAudio ||
-                        audioObserved.TryGetValue(id, out double observed) && now - observed < 2;
-                    string state = g.detector.Observe(audioKnown && g.seen == (1 << NoSignalDetector.Keys.Length) - 1 ? g.values : null, now, audio);
+                    string state;
+                    lock (g) state = g.detector.Observe(buf, now);
                     if (now - g.lastEmit >= .5)
                     {
-                        SignalState?.Invoke(id, state == "assenza probabile", state);
                         g.lastEmit = now;
+                        var d = g.detector;
+                        string detail = $"{state} · sfondo {d.LastFraction:P0} (Y{d.LastBackground.y} U{d.LastBackground.u} V{d.LastBackground.v}) · movimento {d.LastMotion:P1} · audio {(d.LastAudioAlive ? "vivo" : "fermo")}";
+                        SignalState?.Invoke(id, d.BlankSeconds(now), detail);
                     }
-                    g.seen = 0;
-                    return;
                 }
-                const string k = "lavfi.signalstats.";
-                if (!line.StartsWith(k)) return;
-                int eq = line.IndexOf('='); if (eq < 0) return;
-                int index = Array.IndexOf(NoSignalDetector.Keys, line.Substring(k.Length, eq - k.Length));
-                if (index < 0 || !double.TryParse(line.Substring(eq + 1), NumberStyles.Float, CultureInfo.InvariantCulture, out double v)) return;
-                g.values[index] = v; g.seen |= 1 << index;
+                catch { }
             }
         }
 
@@ -1518,7 +1526,7 @@ namespace VHSCapture
             if (zmqFilter != null && !fast) { graph.Append($"[0:v]{zmqFilter}[base];"); cur = "[base]"; }
 
             int k = 0;
-            var analysisLabels = new List<string>();
+            var analysisLabels = new List<(string label, string pipe)>();
             foreach (var kv in idx)
             {
                 var src = kv.Key; int i = kv.Value;
@@ -1531,9 +1539,10 @@ namespace VHSCapture
                         // (per capire se lo schermo è uniforme non serve deinterlacciare). Sempre a piena velocità della sorgente:
                         // un'uscita decimata (es. 2 fps) resta indietro e ffmpeg 7 frena tutte le altre → anteprima a raffiche.
                         graph.Append($"[{i}:v]split=2[cs{k}][an{k}];");
-                        graph.Append($"[an{k}]crop=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT},scale=192:108:flags=area,format=yuv444p,signalstats," +
-                                     $"metadata=mode=print:direct=1:file={PipeNames.InFilter(anPipe)}[ano{k}];");
-                        analysisLabels.Add($"[ano{k}]");
+                        // 80×60 pixel yuv444p verso l'app (14 KB a fotogramma): il rilevatore guarda l'immagine, non statistiche riassuntive
+                        graph.Append($"[an{k}]crop=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT}," +
+                                     $"scale={NoSignalDetector.W}:{NoSignalDetector.H}:flags=area,format=yuv444p[ano{k}];");
+                        analysisLabels.Add(($"[ano{k}]", anPipe));
                         i = -1;   // l'ingresso della catena ora è [cs{k}]
                     }
                     var d = DeintFilter(src.DeinterlaceMode);
@@ -1654,7 +1663,7 @@ namespace VHSCapture
 
             sb.Append($"-map \"[pvs]\" -f rawvideo -flush_packets 1 \"{PipeNames.Win(pn.Preview)}\" ");
             foreach (var ml in meterLabels) sb.Append($"-map \"{ml}\" -f null NUL ");
-            foreach (var al in analysisLabels) sb.Append($"-map \"{al}\" -f null NUL ");
+            foreach (var al in analysisLabels) sb.Append($"-map \"{al.label}\" -f rawvideo \"{PipeNames.Win(al.pipe)}\" ");
             if (mon) sb.Append($"-map \"[amons]\" -f s16le -ar 48000 -ac 2 \"{PipeNames.Win(pn.Monitor)}\"");
             return sb.ToString();
         }

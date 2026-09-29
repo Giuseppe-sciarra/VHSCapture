@@ -46,6 +46,9 @@ namespace VHSCapture
         // fine cassetta
         DateTime lastSignalAt = DateTime.MinValue;
         DateTime? blankSince; string blankKind = ""; double blankStartRecSec = -1; int contentSamples; bool autoStopped;
+        DateTime blankFloor = DateTime.MinValue, lastSignalDiag = DateTime.MinValue;   // lo sfondo conta solo da inizio registrazione / ripresa
+        bool stallWarned;
+        string moveTo;   // cartella di rete di destinazione quando si registra prima sul PC
 
         public MainForm()
         {
@@ -78,7 +81,7 @@ namespace VHSCapture
             engine.Stats += st => lastStats = st;
             // spostamenti/colore che il grafo attuale non può applicare al volo: riavvio breve dell'anteprima
             engine.NeedsRestart += () => { if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (!CaptureBusy) ScheduleRestart(); else AppendLog("La modifica si applica alla fine della registrazione"); })); } catch { } };
-            engine.SignalState += (id, blank, kind) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => OnSignal(blank, kind))); } catch { } };
+            engine.SignalState += (id, sec, detail) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => OnSignal(sec, detail))); } catch { } };
             engine.MonitorData += (d, n) => monitor.Add(d, n);
             engine.Log += l => { lock (runLog) { if (runLog.Length < 20000) runLog.AppendLine(l); } AppendLog(l); };
             engine.Exited += OnEngineExited;
@@ -105,6 +108,7 @@ namespace VHSCapture
                 if (settings.Sources.Count == 0) AutoAddGrabber();
                 else StartPreview();
                 CheckEncoderAsync();
+                OfferPendingMoves();
             };
             FormClosing += (o, e) =>
             {
@@ -609,8 +613,17 @@ namespace VHSCapture
             if (CaptureBusy) return;
             if (!settings.Sources.Any(x => x.Visible)) { MessageBox.Show(this, "Aggiungi almeno una sorgente.", "VHSCapture"); return; }
 
-            string folder = settings.ResolvedOutputFolder();
-            if (!Directory.Exists(folder))
+            string destFolder = settings.ResolvedOutputFolder();
+            string folder = destFolder;
+            moveTo = null;
+            if (settings.RecordLocalFirst && IsNetworkFolder(destFolder))
+            {
+                // una pausa della rete non può più interrompere: si scrive sul disco del PC e si sposta alla fine
+                folder = LocalStagingFolder();
+                moveTo = destFolder;
+                if (!Directory.Exists(destFolder)) AppendLog("⚠ Cartella di rete non raggiungibile adesso: registro sul PC e la sposto a fine registrazione.");
+            }
+            else if (!Directory.Exists(folder))
             {
                 MessageBox.Show(this, "Cartella di destinazione non raggiungibile:\n" + folder, "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -621,7 +634,8 @@ namespace VHSCapture
             string baseName = string.IsNullOrEmpty(name) ? $"{settings.FilePrefix}_{stamp}" : $"{settings.FilePrefix}_{name}_{stamp}";
             foreach (var c in Path.GetInvalidFileNameChars()) baseName = baseName.Replace(c, '_');
             string rootName = baseName; int suffix = 1;
-            while (File.Exists(Path.Combine(folder, baseName + ".mp4")) || File.Exists(Path.Combine(folder, baseName + ".mkv")) || File.Exists(Path.Combine(folder, baseName + "_000.mp4")))
+            bool Taken(string dir, string b) => dir != null && (File.Exists(Path.Combine(dir, b + ".mp4")) || File.Exists(Path.Combine(dir, b + ".mkv")) || File.Exists(Path.Combine(dir, b + "_000.mp4")));
+            while (Taken(folder, baseName) || Taken(moveTo, baseName))
                 baseName = rootName + "_" + suffix++;
             recFolder = folder; recBase = baseName;
             finalFile = Path.Combine(folder, baseName + ".mp4");
@@ -664,8 +678,8 @@ namespace VHSCapture
                 }
                 if (engine.Recorder.LastError != null) throw new IOException(engine.Recorder.LastError);
                 blankSince = null; blankStartRecSec = -1; contentSamples = 0; autoStopped = false;
-                lastSignalAt = DateTime.MinValue;
-                AppendLog("Registrazione avviata: " + Path.GetFileName(recFile));
+                lastSignalAt = DateTime.MinValue; blankFloor = DateTime.UtcNow; stallWarned = false;
+                AppendLog("Registrazione avviata: " + Path.GetFileName(recFile) + (moveTo != null ? $" (sul PC, poi in {moveTo})" : ""));
             }
             catch (Exception ex)
             {
@@ -755,6 +769,13 @@ namespace VHSCapture
                 else AppendLog($"Audio nel file OK: medio {mean:0.0} dB, picco {max:0.0} dB" + (max >= -0.5 ? " — satura, abbassa il volume nel mixer" : ""));
             }
 
+            // registrato sul PC: ora lo sposto nella cartella di rete (anche i file parziali, così non restano dimenticati)
+            if (moveTo != null)
+            {
+                var files = RecordedFiles(final).Concat(RecordedFiles(written)).Distinct(StringComparer.OrdinalIgnoreCase).Where(File.Exists).ToList();
+                if (files.Count > 0) await MoveToNetwork(files, moveTo);
+            }
+
             }
             catch (Exception ex)
             {
@@ -773,6 +794,104 @@ namespace VHSCapture
                     SetButtons();
                 }
             }
+        }
+
+        /// <summary>Cartella di rete: percorso \\server\... oppure lettera di un'unità di rete mappata.</summary>
+        static bool IsNetworkFolder(string folder)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(folder)) return false;
+                if (folder.StartsWith(@"\\")) return true;
+                string root = Path.GetPathRoot(Path.GetFullPath(folder));
+                return !string.IsNullOrEmpty(root) && new DriveInfo(root).DriveType == DriveType.Network;
+            }
+            catch { return false; }
+        }
+
+        static string LocalStagingFolder()
+        {
+            string d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VHSCapture", "Da spostare");
+            Directory.CreateDirectory(d);
+            return d;
+        }
+
+        /// <summary>Copia in rete con verifica della dimensione, poi cancella dal PC. Se la rete non risponde il file resta sul PC.</summary>
+        async Task<bool> MoveToNetwork(List<string> files, string dest)
+        {
+            bool allOk = true;
+            foreach (var src in files)
+            {
+                string name = Path.GetFileName(src);
+                string target = Path.Combine(dest, name);
+                for (int i = 1; File.Exists(target); i++)
+                    target = Path.Combine(dest, Path.GetFileNameWithoutExtension(name) + "_" + i + Path.GetExtension(name));
+                long total = 0; try { total = new FileInfo(src).Length; } catch { }
+                string err = null;
+                for (int attempt = 1; attempt <= 3; attempt++)
+                {
+                    if (!IsDisposed) lblRec.Text = $"Copio in rete {name}…";
+                    err = await Task.Run(() =>
+                    {
+                        string part = target + ".part";
+                        try
+                        {
+                            if (!Directory.Exists(dest)) return "cartella di rete non raggiungibile";
+                            using (var fin = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20))
+                            using (var fout = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+                            {
+                                var buf = new byte[4 << 20]; int r; long done = 0; var tick = Stopwatch.StartNew();
+                                while ((r = fin.Read(buf, 0, buf.Length)) > 0)
+                                {
+                                    fout.Write(buf, 0, r); done += r;
+                                    if (tick.ElapsedMilliseconds > 500 && total > 0)
+                                    {
+                                        tick.Restart();
+                                        int pc = (int)(done * 100 / total);
+                                        try { BeginInvoke(new Action(() => { if (!IsDisposed) lblRec.Text = $"Copio in rete {name}… {pc}%"; })); } catch { }
+                                    }
+                                }
+                            }
+                            if (new FileInfo(part).Length != new FileInfo(src).Length) { try { File.Delete(part); } catch { } return "copia incompleta"; }
+                            File.Move(part, target);
+                            File.Delete(src);
+                            return null;
+                        }
+                        catch (Exception ex) { try { if (File.Exists(part)) File.Delete(part); } catch { } return ex.Message; }
+                    });
+                    if (err == null) break;
+                    await Task.Delay(5000);
+                }
+                if (err == null) AppendLog("Spostato in rete: " + target);
+                else
+                {
+                    allOk = false;
+                    AppendLog($"⚠ Non riesco a copiare in rete ({err}): il file resta sul PC in {src}");
+                    if (!IsDisposed) MessageBox.Show(this, $"Il video è salvo, ma non sono riuscito a copiarlo in rete ({err}).\nÈ sul PC in:\n{src}\n\nAl prossimo avvio ti chiedo se spostarlo.", "VHSCapture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            return allOk;
+        }
+
+        /// <summary>All'avvio: registrazioni rimaste sul PC (rete giù, chiusura improvvisa) → propongo di spostarle.</summary>
+        async void OfferPendingMoves()
+        {
+            try
+            {
+                string dest = settings.ResolvedOutputFolder();
+                string stage = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VHSCapture", "Da spostare");
+                if (!Directory.Exists(stage)) return;
+                var files = Directory.GetFiles(stage).Where(f => !f.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)).ToList();
+                if (files.Count == 0) return;
+                AppendLog($"Sul PC ci sono {files.Count} registrazioni non ancora spostate in rete ({stage})");
+                if (!Directory.Exists(dest)) return;
+                var r = MessageBox.Show(this, $"Ci sono {files.Count} registrazioni rimaste sul PC:\n" + string.Join("\n", files.Take(8).Select(Path.GetFileName)) +
+                    $"\n\nLe sposto adesso in:\n{dest}?", "VHSCapture", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (r != DialogResult.Yes) return;
+                await MoveToNetwork(files, dest);
+                if (!IsDisposed && !CaptureBusy) lblRec.Text = "";
+            }
+            catch { }
         }
 
         void OpenSettings()
@@ -929,7 +1048,7 @@ namespace VHSCapture
                 engine.ResumeRecording();
                 pausedTotal += DateTime.Now - pausedSince.Value;
                 pausedSince = null;
-                blankSince = null;
+                blankSince = null; blankFloor = DateTime.UtcNow;
                 AppendLog($"Registrazione ripresa (riparte dall'ultimo keyframe, al massimo {settings.KeyframeSec} s prima)");
             }
             UpdateRecButton();
@@ -1211,34 +1330,37 @@ namespace VHSCapture
         DateTime lastDiskCheck = DateTime.MinValue, lastCpuSample = DateTime.MinValue; long lastFree = -1;
 
         /// <summary>
-        /// Lo stop richiede una conferma continua dal rilevatore di dettagli/movimento/audio e poi l'attesa configurata.
-        /// Solo contenuto effettivo arma lo stop; dati mancanti, pause e preparazione annullano il conto alla rovescia.
+        /// Fine cassetta: il rilevatore dice da quanti secondi di fila si vede solo lo sfondo del lettore/videocamera.
+        /// Si ferma dopo il tempo impostato (default 120 s). Si arma solo dopo 10 s di filmato vero; pausa e avvio lo sospendono.
         /// </summary>
-        void OnSignal(bool blank, string kind)
+        void OnSignal(double blankSec, string detail)
         {
             var now = DateTime.UtcNow;
             if ((now - lastSignalAt).TotalSeconds > 2) blankSince = null;
             lastSignalAt = now;
+            if (settings.DiagLog && engine.IsRecording && (now - lastSignalDiag).TotalSeconds >= 10)
+            {
+                lastSignalDiag = now;
+                AppendLog($"[fine cassetta] {detail} · solo sfondo da {blankSec:0} s");
+            }
             // Una seconda cattura non analizzata potrebbe ancora contenere video valido.
             if (pausedSince != null || startingRecording || finalizing || !engine.IsRecording ||
                 settings.Sources.Count(x => x.Visible && x.Type == SourceType.Capture) != 1)
             { blankSince = null; return; }
-            if (!blank)
+            // lo sfondo visto durante una pausa o prima di premere Registra non conta
+            blankSec = Math.Min(blankSec, Math.Max(0, (now - blankFloor).TotalSeconds));
+            if (blankSec < 3)
             {
-                blankSince = null; blankKind = ""; blankStartRecSec = -1;
-                // La conferma di uno schermo piatto NON arma lo stop come se fosse una scena vera.
-                if (kind == "contenuto") contentSamples++;
+                blankSince = null; blankStartRecSec = -1;
+                contentSamples++;           // 2 al secondo: 20 = 10 s di filmato vero
                 return;
             }
             if (!settings.AutoStopOnBlank || contentSamples < 20) { blankSince = null; return; }
-            if (blankSince == null)
+            blankStartRecSec = Math.Max(0, RecElapsed().TotalSeconds - blankSec);   // dove inizia lo sfondo nel file (taglio coda)
+            blankSince = blankSec >= 10 ? now - TimeSpan.FromSeconds(blankSec) : (DateTime?)null;
+            if (blankSec >= settings.AutoStopSeconds)
             {
-                blankSince = now; blankKind = kind;
-                blankStartRecSec = RecElapsed().TotalSeconds;
-            }
-            if ((now - blankSince.Value).TotalSeconds >= Math.Max(5, settings.AutoStopSeconds))
-            {
-                AppendLog($"Probabile fine cassetta confermata: immagine senza dettagli o movimento e senza audio rilevato. Stop dopo {settings.AutoStopSeconds} s aggiuntivi.");
+                AppendLog($"Fine cassetta: da {blankSec:0} s si vede solo lo sfondo del lettore ({detail}). Stop.");
                 autoStopped = true;
                 StopRecording(true);
             }
@@ -1325,7 +1447,7 @@ namespace VHSCapture
                 parts.Add(EncName(settings.Encoder));
             }
             // spazio libero e tempo di registrazione residuo (come le Statistiche di OBS)
-            if ((DateTime.Now - lastDiskCheck).TotalSeconds > 5) { lastFree = FreeBytes(settings.ResolvedOutputFolder()); lastDiskCheck = DateTime.Now; }
+            if ((DateTime.Now - lastDiskCheck).TotalSeconds > 5) { lastFree = FreeBytes(settings.RecordLocalFirst && IsNetworkFolder(settings.ResolvedOutputFolder()) ? LocalStagingFolder() : settings.ResolvedOutputFolder()); lastDiskCheck = DateTime.Now; }
             if (lastFree >= 0)
             {
                 double bps = (settings.RateControl == "CRF" ? 8000 : settings.VideoBitrate) * 1000.0 / 8 + settings.AudioBitrate * 1000.0 / 8;
@@ -1337,8 +1459,15 @@ namespace VHSCapture
             if ((DateTime.UtcNow - lastSignalAt).TotalSeconds > 2) blankSince = null;
             if (engine.IsRecording && !finalizing && !startingRecording)
             {
-                if (engine.Recorder.LastError != null || !engine.Recorder.MuxAlive ||
-                    pausedSince == null && engine.Recorder.OutputStarted && engine.Recorder.SecondsSinceOutput > 20)
+                // Scrittura lenta (NAS che si risveglia, rete, antivirus): NON si ferma più. Il video resta nel buffer
+                // (~10 minuti) e viene scritto appena la destinazione riparte. Si ferma solo per un errore vero.
+                if (pausedSince == null && engine.Recorder.OutputStarted)
+                {
+                    double stall = engine.Recorder.SecondsSinceOutput;
+                    if (stall > 20 && !stallWarned) { stallWarned = true; AppendLog("⚠ La destinazione non scrive da 20 s: continuo a registrare in memoria e scrivo appena riparte."); }
+                    else if (stall < 3 && stallWarned) { stallWarned = false; AppendLog("Scrittura ripresa: nessun fotogramma perso."); }
+                }
+                if (engine.Recorder.LastError != null || !engine.Recorder.MuxAlive)
                 {
                     engine.Recorder.ReportFailure(engine.Recorder.LastError ?? "Il file non sta più ricevendo video.");
                     AppendLog(engine.Recorder.LastError);
@@ -1356,7 +1485,7 @@ namespace VHSCapture
                 if (blankSince != null && settings.AutoStopOnBlank && !isPaused)
                 {
                     int left = Math.Max(0, settings.AutoStopSeconds - (int)(DateTime.UtcNow - blankSince.Value).TotalSeconds);
-                    canvas.RecText += $"    probabile fine cassetta: stop tra {left} s";
+                    canvas.RecText += $"    solo sfondo: stop tra {left} s";
                 }
                 canvas.Invalidate();
                 if (settings.MaxMinutes > 0 && el.TotalMinutes >= settings.MaxMinutes)

@@ -199,7 +199,8 @@ namespace VHSCapture
 
         // Fine cassetta
         public bool AutoStopOnBlank { get; set; } = true;      // arresto prudente dopo conferma di assenza di dettagli, movimento e audio
-        public int AutoStopSeconds { get; set; } = 30;
+        public int AutoStopSeconds { get; set; } = 120;        // secondi di fila di solo sfondo (blu/nero/neve) prima di fermare
+        public bool RecordLocalFirst { get; set; } = true;     // cartella di rete: registra sul disco del PC e sposta alla fine
         public bool TrimBlankTail { get; set; } = true;        // taglia la coda uniforme dal file
         public bool AskNameAtEnd { get; set; } = true;         // a fine registrazione chiede il nome della cassetta e rinomina
         public string Profile { get; set; } = "";              // ultimo profilo applicato (solo per l'etichetta)
@@ -242,6 +243,8 @@ namespace VHSCapture
             s ??= new AppSettings();
             if (s.Sources == null) s.Sources = new List<Source>();
 
+            // fine cassetta: sotto il minuto si rischia di fermare su un nero del filmato; il nuovo rilevatore conta tutto il tempo
+            if (s.AutoStopSeconds < 60) s.AutoStopSeconds = 120;
             if (!string.IsNullOrEmpty(s.Profile) && s.Profile != "PAL" && s.Profile != "NTSC")
                 s.Profile = s.Profile.Contains("NTSC") ? "NTSC" : (s.Profile.Contains("PAL") ? "PAL" : "");
             foreach (var src in s.Sources)

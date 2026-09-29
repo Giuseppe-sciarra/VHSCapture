@@ -33,7 +33,7 @@ namespace VHSCapture
         CheckBox chkLive, chkPrio, chkDiag, chkIntel;
         ComboBox cbIntelField;
         // Fine cassetta
-        CheckBox chkAutoStop, chkTrim, chkAskName; NumericUpDown nAutoSec;
+        CheckBox chkAutoStop, chkTrim, chkAskName, chkLocalFirst; NumericUpDown nAutoSec;
 
         readonly Dictionary<string, Panel> pages = new Dictionary<string, Panel>();
         ListBox nav; Panel host;
@@ -203,6 +203,8 @@ namespace VHSCapture
             folderRow.Controls.Add(txtFolder); folderRow.Controls.Add(browse);
             folderRow.Height = 30;
             Row(sal, "Cartella (anche di rete)", folderRow);
+            chkLocalFirst = Check(sal, "Se la cartella è in rete, registra sul PC e sposta alla fine (consigliato)",
+                "Un rallentamento del NAS o della rete non può più interrompere la registrazione. Il file viene copiato in rete dopo taglio e rinomina; se la rete non risponde resta sul PC e te lo dico.");
             txtPrefix = new TextBox { BorderStyle = BorderStyle.FixedSingle };
             Row(sal, "Prefisso nome file", txtPrefix, "→ Prefisso_Nome_2026-09-27_14-30-00.mp4");
             nMaxMin = Num(0, 600, 5);
@@ -220,9 +222,9 @@ namespace VHSCapture
             Row(file, "Dividi file ogni (minuti)", nSplit, "0 = no. Utile per chiavette FAT32 (4 GB)");
 
             var fine = Section(p, "Fine cassetta");
-            chkAutoStop = Check(fine, "Ferma da sola quando la cassetta finisce", "Controlla dettagli, movimento e audio, anche nelle scene buie. Prima conferma per 12 s uno schermo fermo e privo di dettagli, poi attende il tempo indicato. Si arma dopo 10 s di contenuto. Un nero pieno e silenzioso prolungato resta indistinguibile dalla perdita del segnale.");
-            nAutoSec = Num(5, 600, 5);
-            Row(fine, "Attesa dopo la conferma (s)", nAutoSec, "In aggiunta ai 12 s iniziali");
+            chkAutoStop = Check(fine, "Ferma da sola quando la cassetta finisce", "Riconosce lo sfondo del lettore o della videocamera (blu, nero, grigio, neve, anche con le scritte OSD): quasi tutto il quadro dello stesso colore, niente movimento, nessuna voce o musica. Un disturbo di un attimo non azzera il conteggio. Si arma dopo 10 s di filmato.");
+            nAutoSec = Num(60, 900, 10);
+            Row(fine, "Secondi di solo sfondo", nAutoSec, "Consigliato 120: un nero lungo dentro il filmato non ferma la registrazione");
             chkTrim = Check(fine, "Taglia la parte uniforme finale dal file", "Senza ricodifica, pochi secondi anche per file lunghi.");
             chkAskName = Check(fine, "Chiedi il nome della cassetta alla fine", "Il file viene rinominato \"Nome cassetta.mp4\". Se annulli resta il nome automatico.");
             chkAutoStop.CheckedChanged += (o, e) => { nAutoSec.Enabled = chkTrim.Enabled = chkAutoStop.Checked; };
@@ -302,6 +304,7 @@ namespace VHSCapture
         {
             cbTheme.SelectedIndex = s.DarkTheme ? 1 : 0;
             txtFolder.Text = s.OutputFolder;
+            chkLocalFirst.Checked = s.RecordLocalFirst;
             txtPrefix.Text = s.FilePrefix;
             nMaxMin.Value = Math.Clamp(s.MaxMinutes, 0, 600);
 
@@ -328,7 +331,7 @@ namespace VHSCapture
 
             chkPrio.Checked = s.HighPriority;
             chkAutoStop.Checked = s.AutoStopOnBlank;
-            nAutoSec.Value = Math.Clamp(s.AutoStopSeconds, 5, 600);
+            nAutoSec.Value = Math.Clamp(s.AutoStopSeconds, 60, 900);
             chkTrim.Checked = s.TrimBlankTail;
             chkAskName.Checked = s.AskNameAtEnd;
             nAutoSec.Enabled = chkTrim.Enabled = chkAutoStop.Checked;
@@ -364,6 +367,7 @@ namespace VHSCapture
 
             s.DarkTheme = cbTheme.SelectedIndex == 1;
             s.OutputFolder = txtFolder.Text.Trim();
+            s.RecordLocalFirst = chkLocalFirst.Checked;
             s.FilePrefix = string.IsNullOrWhiteSpace(txtPrefix.Text) ? "VHS" : txtPrefix.Text.Trim();
             s.MaxMinutes = (int)nMaxMin.Value;
 

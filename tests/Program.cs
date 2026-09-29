@@ -61,56 +61,68 @@ Check(!recorder.HasBufferedKeyFrame && (int)typeof(TsRecorder).GetField("carryLe
 var oldSettings = JsonSerializer.Deserialize<AppSettings>("{\"SmoothPreview\":false,\"LowCpuPreview\":true,\"Fps\":\"50\"}");
 oldSettings.Sources=Settings().Sources;
 Check(Args(oldSettings,false).Contains("[pv]fps=50"), "Vecchie preferenze di risparmio ignorate");
-double[] Flat(double y = 16, double u = 128, double v = 128) => new[] { y,y,u,u,v,v,y,y,u,u,v,v,0d,0d,0d };
-string ObserveFor(NoSignalDetector detector, double[] values, double begin, double end, bool audio = false)
+// ---------- fine cassetta: rilevatore sui pixel 80×60 ----------
+var rng = new Random(3);
+byte[] Frame(int y, int u, int v, int noise = 6, Action<byte[]> draw = null)
 {
-    string state = "";
-    for (int frame = 0; begin + frame / 25d <= end; frame++) state = detector.Observe(values, begin + frame / 25d, audio);
-    return state;
+    var f = new byte[NoSignalDetector.FrameBytes]; int n = NoSignalDetector.W * NoSignalDetector.H;
+    for (int i = 0; i < n; i++)
+    {
+        f[i] = (byte)Math.Clamp(y + rng.Next(-noise, noise + 1), 0, 255);
+        f[n + i] = (byte)Math.Clamp(u + rng.Next(-2, 3), 0, 255);
+        f[2 * n + i] = (byte)Math.Clamp(v + rng.Next(-2, 3), 0, 255);
+    }
+    draw?.Invoke(f);
+    return f;
 }
-foreach (var color in new[] { ("nero",16d,128d,128d), ("grigio",128d,128d,128d), ("bianco",235d,128d,128d), ("blu",41d,240d,110d), ("rosso",81d,90d,240d), ("verde",145d,54d,34d), ("giallo",210d,16d,146d) })
+void Box(byte[] f, int x0, int y0, int w, int h, int y, int u = 128, int v = 128)
 {
-    var detector = new NoSignalDetector(); var flat = Flat(color.Item2,color.Item3,color.Item4);
-    Check(ObserveFor(detector,flat,0,11.96)=="verifica" && detector.Observe(flat,12)=="assenza probabile", "Conferma continua, nessun allarme anticipato: " + color.Item1);
+    int n = NoSignalDetector.W * NoSignalDetector.H;
+    for (int yy = y0; yy < y0 + h; yy++) for (int xx = x0; xx < x0 + w; xx++)
+    { int p = yy * NoSignalDetector.W + xx; f[p] = (byte)y; f[n + p] = (byte)u; f[2 * n + p] = (byte)v; }
 }
-var det = new NoSignalDetector();
-var dark = Flat(); dark[7] = 22;
-Check(ObserveFor(det,dark,0,40)=="contenuto", "Dettaglio piccolo e buio protetto anche se i percentili sono identici");
-var chroma = Flat(41,240,110); chroma[8]=230;
-Check(ObserveFor(det,chroma,41,80)=="contenuto", "Pattern blu cromatico protetto");
-var motion = Flat(); motion[12]=.1;
-Check(ObserveFor(det,motion,81,120)=="contenuto", "Movimento debolissimo impedisce lo stop");
-det.Reset();
-Check(ObserveFor(det,Flat(),0,40,true)=="contenuto", "Audio attivo protegge anche il nero pieno");
-Check(det.Observe(Flat(),40.04)=="verifica", "Dopo audio riparte la conferma");
-Check(ObserveFor(det,Flat(),40.08,53)=="assenza probabile", "Conferma riparte dopo il contenuto");
-Check(det.Observe(dark,53.04)=="contenuto" && det.Observe(Flat(),53.08)=="verifica", "Ritorno di contenuto cancella subito la conferma");
-Check(det.Observe(null,53.12)=="" && det.Observe(Flat(),53.16)=="verifica", "Metadati mancanti azzerano la conferma");
-ObserveFor(det,Flat(),54,70);
-Check(det.Observe(Flat(),73)=="verifica", "Interruzione dell'analisi non conta come segnale assente");
-var bad = Flat(); bad[0]=double.NaN;
-Check(det.Observe(bad,74)=="", "Valori non finiti non attivano lo stop");
-det.Reset(); bool fading = false;
-for (int frame=0;frame<1000;frame++) fading |= det.Observe(Flat(16+frame*.01), frame/25d)=="assenza probabile";
-Check(!fading,"Dissolvenza lenta non viene scambiata per schermo fermo");
-string ParseSignal(IEnumerable<string> values, bool audioSource = false, bool meterFresh = false, bool audioActive = false)
+byte[] Scene(double t) => Frame(90, 128, 128, 6, f => { for (int k = 0; k < 12; k++) Box(f, (k * 7 + (int)(t * 8)) % 70, (k * 5) % 50, 6, 6, 40 + k * 15, 100 + k * 3, 150 - k * 3); });
+double Run(NoSignalDetector d, Func<double, byte[]> frames, double from, double to, Func<double, double> audio = null)
 {
-    using var engine = new CaptureEngine(); string result=null;
-    if(audioSource) typeof(CaptureEngine).GetField("runningSources",flags).SetValue(engine,new Dictionary<string,Source>{["test"]=new Source{AudioDevice="audio"}});
-    if(meterFresh) ((System.Collections.Concurrent.ConcurrentDictionary<string,double>)typeof(CaptureEngine).GetField("audioObserved",flags).GetValue(engine))["test"]=0;
-    if(audioActive) ((System.Collections.Concurrent.ConcurrentDictionary<string,double>)typeof(CaptureEngine).GetField("audioActivity",flags).GetValue(engine))["test"]=0;
-    engine.SignalState += (_,uniform,kind) => result=kind;
-    var parse=typeof(CaptureEngine).GetMethod("OnAnalysisLine",flags);
-    foreach(var v in values) parse.Invoke(engine,new object[]{"test","lavfi.signalstats."+v});
-    parse.Invoke(engine,new object[]{"test","frame:1"});
-    return result;
+    for (double t = from; t <= to; t += 0.04)
+    {
+        if (audio != null) for (int k = 0; k < 2; k++) d.AddAudio(audio(t + k * 0.02), t + k * 0.02);
+        d.Observe(frames(t), t);
+    }
+    return d.BlankSeconds(to);
 }
-Check(ParseSignal(NoSignalDetector.Keys.Select((key,i)=>key+"="+Flat(128)[i].ToString(System.Globalization.CultureInfo.InvariantCulture))) == "verifica", "Parser completo attende conferma prima dello stop");
-Check(ParseSignal(new[]{"YLOW=128"}) == "", "Parser rifiuta frame incompleti");
-var metadata = NoSignalDetector.Keys.Select((key,i)=>key+"="+Flat(128)[i].ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-Check(ParseSignal(metadata,audioSource:true)=="","Audio previsto ma non misurabile impedisce lo stop");
-Check(ParseSignal(metadata,audioSource:true,meterFresh:true)=="verifica","Silenzio realmente misurato permette la conferma");
-Check(ParseSignal(metadata,audioSource:true,meterFresh:true,audioActive:true)=="contenuto","Audio misurato impedisce il falso allarme sul nero");
+double Speech(double t) { var r = new Random((int)(t * 1.7) * 31 + 5); return r.NextDouble() < .6 ? -20 - r.NextDouble() * 6 : -58 - r.NextDouble() * 8; }
+foreach (var c in new[] { ("blu", 41, 240, 110), ("nero", 16, 128, 128), ("grigio", 128, 128, 128), ("blu scuro", 30, 170, 115) })
+{
+    var d = new NoSignalDetector();
+    Check(Run(d, t => Frame(c.Item2, c.Item3, c.Item4, 8), 0, 30) >= 29, "Sfondo del lettore riconosciuto con rumore analogico: " + c.Item1);
+}
+var dd = new NoSignalDetector();
+Check(Run(dd, t => Frame(41, 240, 110, 8, f => Box(f, 60, 4, 12, 4, 200)), 0, 30) >= 29, "Scritta OSD bianca sullo schermo blu non blocca lo stop");
+dd = new NoSignalDetector();
+Check(Run(dd, t => Frame(16, 128, 128, 8, f => Box(f, 50, 52, 4 + ((int)t % 5) * 3, 3, 220)), 0, 30) >= 25, "Contatore OSD che cambia ogni secondo non blocca lo stop");
+dd = new NoSignalDetector();
+Check(Run(dd, t => Frame(16, 128, 128, 8), 0, 30, t => -30 + (t * 7 % 1) * 2) >= 29, "Fruscio costante (neve) non blocca lo stop");
+dd = new NoSignalDetector();
+Check(Run(dd, Scene, 0, 30) == 0, "Filmato con dettagli e movimento: nessuno stop");
+dd = new NoSignalDetector();
+Check(Run(dd, t => Frame(16, 128, 128, 8), 0, 30, Speech) < 2, "Nero con voci o musica: nessuno stop");
+dd = new NoSignalDetector();
+Check(Run(dd, t => Frame(12, 128, 128, 6, f => Box(f, 20 + (int)(15 * Math.Sin(t)), 30, 5, 4, 60, 90, 170)), 0, 30) < 3, "Piccolo oggetto colorato nel buio: filmato");
+dd = new NoSignalDetector();
+Run(dd, t => Frame(41, 240, 110, 8), 0, 20);
+Run(dd, t => t < 20.4 ? Scene(t) : Frame(41, 240, 110, 8), 20.04, 21);
+Check(dd.BlankSeconds(21) >= 20, "Un disturbo di mezzo secondo non azzera il conteggio");
+Run(dd, Scene, 21.04, 24);
+Check(dd.BlankSeconds(24) == 0, "Più di un secondo di filmato azzera il conteggio");
+dd = new NoSignalDetector();
+Run(dd, t => Frame(41, 240, 110, 8), 0, 10);
+dd.Observe(Frame(41, 240, 110, 8), 14);
+Check(dd.BlankSeconds(14) == 0, "Analisi interrotta per più di 2 s: il conteggio riparte");
+Check(dd.Observe(null, 15) == "contenuto" && dd.BlankSeconds(15) == 0, "Fotogramma mancante non conta come sfondo");
+var an = Args(Settings(), false, analysis: true);
+Check(an.Contains($"scale={NoSignalDetector.W}:{NoSignalDetector.H}:flags=area,format=yuv444p") && an.Contains("-f rawvideo \"\\\\.\\pipe\\analysis\"") && !an.Contains("signalstats"),
+    "Ramo di analisi: pixel 80×60 verso la pipe, niente statistiche testuali");
 // Una PSI corrotta non deve uccidere il thread che alimenta la registrazione.
 var random = new Random(42);
 for(int i=0;i<10000;i++)
@@ -153,16 +165,6 @@ if (args.Length > 0)
         record = Args(s, false), recordAnalysis = Args(s, false, analysis:true), recordSilent = Args(s, false, false), gpu,
         ntsc = Args(new AppSettings { Fps="59.94", Encoder="libx264", Sources=s.Sources },false)
     }));
-}
-if(args.Length>1)
-{
-    foreach(var x in JsonDocument.Parse(File.ReadAllText(args[1])).RootElement.EnumerateArray())
-    {
-        var samples=x.GetProperty("frames").EnumerateArray().Select(frame=>frame.EnumerateArray().Select(t=>t.GetDouble()).ToArray()).ToArray();
-        var detector=new NoSignalDetector(); bool detected=false;
-        for(int frame=0;frame<400;frame++) detected |= detector.Observe(samples[frame % samples.Length],frame/25d)=="assenza probabile";
-        Check(detected==x.GetProperty("expected").GetBoolean(),"FFmpeg signalstats reale: "+x.GetProperty("name").GetString());
-    }
 }
 if(args.Length>2) RecorderChecks.Run(args[0],args[2],Check);
 Console.WriteLine($"{checks} controlli superati.");

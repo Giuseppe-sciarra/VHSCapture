@@ -1,3 +1,25 @@
+# VHSCapture 1.2.2 — fine cassetta e registrazione su rete
+
+## Fine cassetta: rilevatore nuovo, sui pixel
+Il ramo di analisi manda all'app l'immagine rimpicciolita a 80×60 (yuv444p, 14 KB a fotogramma, prima del deinterlaccio) al posto delle statistiche `signalstats`. `NoSignalDetector.cs` la guarda così:
+- **sfondo dominante**: almeno l'85% del quadro (bordi esclusi) dello stesso colore, con tolleranza per il rumore analogico. Vale per blu, nero, grigio, neve e schermate "nessun segnale", anche con scritte OSD;
+- **movimento vero**: conta solo cambi netti e compatti (pixel vicini che cambiano insieme), rispetto al fotogramma precedente e a 1, 2 e 3 secondi prima. Il rumore e la neve non contano, una scritta che lampeggia nemmeno;
+- **oggetti colorati**, anche piccoli (almeno 6 pixel su 80×60) = filmato. Le scritte OSD sono bianche o grigie;
+- **audio vivo** (volume che sale e scende di almeno 12 dB, sopra −42 dB) = filmato. Fruscio costante e silenzio non bloccano lo stop.
+
+Un disturbo fino a 1 s non azzera il conteggio. Lo stop scatta dopo **120 s di fila** di solo sfondo (impostabile da 60 a 900; i valori salvati sotto 60 diventano 120). Si arma dopo 10 s di filmato, e la pausa riparte da zero.
+
+Provato su 14 clip generate con FFmpeg 7 attraverso la stessa catena di analisi dell'app, con rumore analogico, bordi scuri e righe sporche: 14 esiti corretti. Riconosce come fine cassetta blu con OSD, blu con OSD lampeggiante, nero con contatore, grigio "no signal", neve e neve a strisce con fruscio, dissolvenza al nero. Riconosce come filmato una scena in movimento con voce, una scena buia, un'inquadratura ferma, un oggetto colorato o bianco che si muove nel buio, e il nero con voci. 15 nuovi controlli in `tests/Program.cs`: 49 superati.
+
+**Limite:** un tratto di filmato quasi tutto di un colore, fermo e muto per 120 s di fila resta indistinguibile dallo sfondo del lettore.
+
+## Registrazione che non si interrompe più per la rete
+- Tolto lo stop dopo 20 s di file che non cresce: ora c'è solo un avviso nel Log. Il video resta in memoria (buffer da circa 10 minuti invece di 2,5) e viene scritto appena la destinazione riparte. La registrazione si ferma solo per un errore vero (processo terminato o buffer davvero pieno).
+- **Cartella di rete** (`\\server\...` o unità mappata): con l'opzione predefinita "registra sul PC e sposta alla fine" si scrive in `%LOCALAPPDATA%\VHSCapture\Da spostare`. Dopo taglio, rinomina e controllo audio il file viene copiato in rete, verificato e cancellato dal PC, con 3 tentativi. Se la rete non risponde il file resta sul PC, l'app lo dice, e al prossimo avvio propone di spostarlo.
+
+## Nota sul workflow
+Il `.github/workflows/build.yml` in questo pacchetto scarica l'ultima build "essentials" di gyan.dev e **non** esegue i test. Le sezioni qui sotto parlano di FFmpeg 8.0.1 fissato e di test nel workflow: nel file attuale quella parte non c'è.
+
 # VHSCapture 1.2.1 — sorgenti per GitHub
 
 Questo pacchetto contiene esclusivamente il progetto, le risorse dell'interfaccia, i test e il workflow GitHub Actions. Non contiene eseguibili, FFmpeg, runtime, SDK o cartelle di compilazione. Caricare il contenuto della cartella VHSCapture-main nella radice del repository, compresa `.github`: il workflow compila Windows e prepara la release.

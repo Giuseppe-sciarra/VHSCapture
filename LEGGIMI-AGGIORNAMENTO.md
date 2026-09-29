@@ -1,3 +1,9 @@
+# VHSCapture 1.2.5 — allo stop si salva e basta
+
+- **Il controllo audio non rilegge più il file**: la media e il picco vengono calcolati dal VU durante la registrazione. Prima, su un MP4 frammentato in rete, ffmpeg faceva circa un salto per ogni keyframe: 319 salti per 10 minuti, circa 5.700 per una cassetta di 3 ore, cioè minuti di attesa sul NAS.
+- **Taglio della coda spento di default**, e spento una volta anche a chi l'aveva attivo: lo stop automatico dopo 120 s di sfondo resta, ma il file non viene toccato.
+- Nel Log compare **"File chiuso in X s"** a ogni stop.
+
 # VHSCapture 1.2.4 — si scrive dritto nella cartella scelta, come OBS
 
 - "Cartella di rete: passa prima dal disco del PC" ora è **spenta di default**, e al primo avvio viene spenta anche a chi ce l'aveva. Il file si scrive direttamente nella cartella scelta e niente passa dal PC. A ogni registrazione il Log mostra il percorso completo.

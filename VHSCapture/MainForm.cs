@@ -78,7 +78,11 @@ namespace VHSCapture
             RebuildMixer();
 
             engine.FrameAvailable += () => canvas?.NotifyFrame();
-            engine.AudioLevels += (id, rl, pl, rr, pr) => { if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (mixerRows.TryGetValue(id, out var row)) row.Meter.SetLevels(rl, pl, rr, pr); })); } catch { } };
+            engine.AudioLevels += (id, rl, pl, rr, pr) =>
+            {
+                RecordAudioStats(Math.Max(rl, rr), Math.Max(pl, pr));
+                if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (mixerRows.TryGetValue(id, out var row)) row.Meter.SetLevels(rl, pl, rr, pr); })); } catch { }
+            };
             engine.Stats += st => lastStats = st;
             // spostamenti/colore che il grafo attuale non può applicare al volo: riavvio breve dell'anteprima
             engine.NeedsRestart += () => { if (IsHandleCreated) try { BeginInvoke(new Action(() => { if (!CaptureBusy) ScheduleRestart(); else AppendLog("La modifica si applica alla fine della registrazione"); })); } catch { } };
@@ -662,6 +666,7 @@ namespace VHSCapture
                 pausedSince = null; pausedTotal = TimeSpan.Zero;
                 blankSince = null; blankStartRecSec = -1; contentSamples = 0; autoStopped = false;
                 lastSignalAt = DateTime.MinValue; blankFloor = DateTime.UtcNow; stallWarned = false;
+                ResetAudioStats();
                 AppendLog("Registrazione avviata: " + recFile.Replace("%03d", "000") + (moveTo != null ? $"  (passa dal PC, copia in rete a pezzi in {moveTo})" : ""));
                 SetButtons();
                 VerifyRecordingStarted(recFile, ++recSession);   // controllo dietro le quinte, non blocca
@@ -678,6 +683,22 @@ namespace VHSCapture
         }
 
         int recSession;
+
+        // audio della registrazione misurato dal VU mentre si registra: allo stop non si rilegge il file
+        // (su un MP4 frammentato in rete la rilettura voleva migliaia di accessi al NAS = minuti)
+        readonly object audioStatsLock = new object();
+        double audioEnergy; long audioSamples; double audioPeak = -91;
+        void RecordAudioStats(double rmsDb, double peakDb)
+        {
+            if (!engine.IsRecording || pausedSince != null || finalizing) return;
+            lock (audioStatsLock)
+            {
+                if (rmsDb > -90) { audioEnergy += Math.Pow(10, rmsDb / 10); }
+                audioSamples++;
+                if (peakDb > audioPeak) audioPeak = peakDb;
+            }
+        }
+        void ResetAudioStats() { lock (audioStatsLock) { audioEnergy = 0; audioSamples = 0; audioPeak = -91; } }
 
         /// <summary>
         /// Dopo il clic su Registra: se entro 20 s il file non riceve video (grabber fermo, destinazione non scrivibile, muxer
@@ -714,7 +735,9 @@ namespace VHSCapture
             {
             string written = recFile, final = finalFile;
             bool rewritten = false;   // contenuto rifatto da capo (MKV→MP4, taglio con riscrittura): la copia in rete riparte da zero
+            var closeClock = Stopwatch.StartNew();
             bool muxOk = await Task.Run(() => engine.StopRecording());
+            AppendLog($"File chiuso in {closeClock.Elapsed.TotalSeconds:0.0} s");
             if (!muxOk) AppendLog("Registrazione interrotta: " + (engine.Recorder.LastError ?? "Chiusura non completata. Il file parziale è conservato."));
 
             bool HasData(string f) => RecordedBytes(f) > 0;
@@ -770,14 +793,13 @@ namespace VHSCapture
             }
 
             // controllo automatico dell'audio nel file: così non si resta col dubbio
-            var toCheck = RecordedFiles(final).FirstOrDefault() ?? RecordedFiles(written).FirstOrDefault();
-            if (toCheck != null && settings.Sources.Any(x => x.Visible && x.HasAudio))
+            if (RecordedFiles(final).Any() && settings.Sources.Any(x => x.Visible && x.HasAudio))
             {
-                lblRec.Text = "Controllo audio del file…";
-                var (has, mean, max) = await Task.Run(() => FFmpeg.CheckAudio(toCheck));
-                if (!has) AppendLog("⚠ ATTENZIONE: il file NON contiene la traccia audio");
-                else if (max <= -60) AppendLog($"⚠ ATTENZIONE: l'audio nel file è SILENZIO (picco {max:0.0} dB) — controlla il dispositivo audio della sorgente");
-                else AppendLog($"Audio nel file OK: medio {mean:0.0} dB, picco {max:0.0} dB" + (max >= -0.5 ? " — satura, abbassa il volume nel mixer" : ""));
+                double mean, max; long n;
+                lock (audioStatsLock) { n = audioSamples; max = audioPeak; mean = n > 0 && audioEnergy > 0 ? 10 * Math.Log10(audioEnergy / n) : -91; }
+                if (n == 0) AppendLog("Audio: nessuna misura durante la registrazione (VU non disponibile)");
+                else if (max <= -60) AppendLog($"⚠ ATTENZIONE: l'audio registrato è SILENZIO (picco {max:0.0} dB) — controlla il dispositivo audio della sorgente");
+                else AppendLog($"Audio registrato OK: medio {mean:0.0} dB, picco {max:0.0} dB" + (max >= -0.5 ? " — satura, abbassa il volume nel mixer" : ""));
             }
 
             // registrato sul PC: il grosso è già in rete (copia a pezzi), qui si completa l'ultimo pezzo

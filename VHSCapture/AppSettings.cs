@@ -202,7 +202,7 @@ namespace VHSCapture
         public bool AutoStopOnBlank { get; set; } = true;      // arresto prudente dopo conferma di assenza di dettagli, movimento e audio
         public int AutoStopSeconds { get; set; } = 120;        // secondi di fila di solo sfondo (blu/nero/neve) prima di fermare
         public bool RecordLocalFirst { get; set; } = false;    // SPENTO = come OBS: si scrive direttamente nella cartella scelta, anche di rete
-        public bool TrimBlankTail { get; set; } = true;        // taglia la coda uniforme dal file
+        public bool TrimBlankTail { get; set; } = false;       // taglia la coda uniforme dal file (spento: allo stop si salva e basta)
         public bool AskNameAtEnd { get; set; } = true;         // a fine registrazione chiede il nome della cassetta e rinomina
         public string Profile { get; set; } = "";              // ultimo profilo applicato (solo per l'etichetta)
         public bool DiagLog { get; set; } = false;             // riga di diagnostica anteprima nel Log ogni 5 s
@@ -250,6 +250,8 @@ namespace VHSCapture
             if (s.FormatVersion < 2) { if (!s.SafeRecording) s.FragmentedMp4 = true; s.FormatVersion = 2; }
             // 1.2.4: "registra sul PC e sposta" non è più attivo di default: si scrive dritto nella cartella scelta, come OBS
             if (s.FormatVersion < 3) { s.RecordLocalFirst = false; s.FormatVersion = 3; }
+            // 1.2.5: allo stop si salva e basta: niente taglio della coda di default
+            if (s.FormatVersion < 4) { s.TrimBlankTail = false; s.FormatVersion = 4; }
             if (!string.IsNullOrEmpty(s.Profile) && s.Profile != "PAL" && s.Profile != "NTSC")
                 s.Profile = s.Profile.Contains("NTSC") ? "NTSC" : (s.Profile.Contains("PAL") ? "PAL" : "");
             foreach (var src in s.Sources)

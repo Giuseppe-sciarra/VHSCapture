@@ -428,8 +428,10 @@ namespace VHSCapture
     }
 
     /// <summary>
-    /// Fine cassetta: due scelte grandi. ✅ Tieni (Invio) = si conta e il file resta, qualunque durata.
+    /// Fine cassetta: ✅ Tieni (Invio) = si conta e il file resta, qualunque durata.
     /// 🗑 Scarta = cassetta vuota: non si conta, il totale del cliente scende, il file si cancella.
+    /// 🔄 Ricomincia = video da buttare (es. il videoregistratore ha fatto il test testine): file cancellato,
+    ///    non si conta, stesso numero di cassetta, e la registrazione riparte subito.
     /// (La partenza sbagliata non passa di qui: entro la soglia di secondi si gestisce da sola, senza domande.)
     /// Non ha la X e non si chiude da sola: aspetta l'operatore anche dopo lo stop automatico.
     /// </summary>
@@ -453,7 +455,7 @@ namespace VHSCapture
             Controls.Add(t); y += 40;
             var sub = new Label { Text = $"{cliente}  ·  cassetta {cassetta} di {totali}  ·  registrata per {d}", AutoSize = true, Font = new Font("Segoe UI Semibold", 11f), Location = new Point(26, y) };
             Controls.Add(sub); y += 34;
-            var info = new InfoBox("ℹ️", "Premi Invio per tenerla. Scegli Scarta solo se la cassetta era vuota.", W - 48, Theme.Accent) { Location = new Point(24, y) };
+            var info = new InfoBox("ℹ️", "Premi Invio per tenerla. Scarta solo se la cassetta era vuota. Ricomincia se il video è da rifare (per esempio il videoregistratore ha fatto il test delle testine).", W - 48, Theme.Accent) { Location = new Point(24, y) };
             Controls.Add(info); y += info.Height + 12;
             SceltaCard Scelta(string titolo, string spieg, string effetto, Color col, string esito)
             {
@@ -470,6 +472,10 @@ namespace VHSCapture
                 "Dentro non c'era niente: solo nero, neve o schermo blu.",
                 $"→ NON la conto · il cliente passa da {totali} a {Math.Max(0, totali - 1)} videocassette (scende anche il prezzo) · il file appena registrato viene cancellato",
                 CrmColori.Rosso, "scartata");
+            Scelta("🔄   Ricomincia la cassetta",
+                "Il video è da rifare: test delle testine, partita nel punto sbagliato, immagine sbagliata…",
+                $"→ NON la conto · il file appena registrato viene cancellato · la registrazione RIPARTE SUBITO, sempre come cassetta {cassetta} di {totali}",
+                CrmColori.Arancio, "ricomincia");
             ClientSize = new Size(W, y + 12);
             Theme.Apply(this, dark);
             foreach (Control c in Controls) if (c is SceltaCard sc) sc.Colori();

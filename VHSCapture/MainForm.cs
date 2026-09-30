@@ -37,6 +37,7 @@ namespace VHSCapture
         bool nessunCliente;                       // scelto «Nessun cliente»: non si chiede più finché non scegli un cliente dal pulsante 👤
         ClienteForm sceltaAperta;                 // «Di chi è questa cassetta?» aperta mentre si registra (non blocca niente)
         bool daSpostare;                          // cliente scelto a registrazione già partita: a fine registrazione i file si SPOSTANO nella sua cartella
+        bool ricomincia;                          // «Ricomincia la cassetta»: finita la chiusura, la registrazione riparte da sola
         ProgressoCliente prog; Panel progWrap;    // fascia dell'avanzamento del cliente in corso
         List<CrmPostazione> postazioni = new List<CrmPostazione>();
         bool CrmAttivo => crm != null && crm.Configurato;
@@ -1130,7 +1131,13 @@ namespace VHSCapture
                     using var ff = new FineCassettaForm(settings.DarkTheme, lavoro.cliente, cassettaInCorso, lavoro.nastri_totali, durataStop);
                     ff.ShowDialog(this);
                     esito = ff.Esito;
-                    cancella = esito == "scartata";
+                    cancella = esito == "scartata" || esito == "ricomincia";
+                    if (esito == "ricomincia")
+                    {
+                        esito = "rifai";          // per il CRM: non contata, totale invariato, stessa cassetta
+                        ricomincia = true;
+                        AppendLog($"Ricomincia la cassetta {cassettaInCorso}: video cancellato, la registrazione riparte subito");
+                    }
                 }
                 else esito = "completata";   // senza domanda: si conta sempre
                 if (cancella)
@@ -1204,7 +1211,20 @@ namespace VHSCapture
                     lblRec.Text = "";
                     if (restartPreview && !engine.IsRunning) StartPreview();
                     SetButtons();
+                    if (ricomincia)
+                    {
+                        // «Ricomincia la cassetta»: si riparte come se si premesse Registra (stesso cliente, stessa cassetta)
+                        ricomincia = false;
+                        lblRec.Text = "Riparto a registrare…";
+                        BeginInvoke(new Action(async () =>
+                        {
+                            await Task.Delay(1500);   // l'anteprima deve essere di nuovo in piedi
+                            if (IsDisposed || closingApp || engine.IsRecording || finalizing) return;
+                            StartRecording();
+                        }));
+                    }
                 }
+                else ricomincia = false;
             }
         }
 

@@ -377,8 +377,8 @@ namespace VHSCapture
             nCrmRip = Num(10, 600, 10);
             Row(opz, "Entro (secondi)", nCrmRip);
             chkCrmRip.CheckedChanged += (o, e) => nCrmRip.Enabled = chkCrmAttivo.Checked && chkCrmRip.Checked;
-            chkCrmFine = Check(opz, "A fine cassetta chiedi ✅ Tieni / 🗑 Scarta",
-                "Tieni (Invio) = la conta e il file resta, qualunque durata. Scarta = cassetta vuota: non si conta, il totale del cliente scende, il file si cancella. Spento = conta sempre senza chiedere.");
+            chkCrmFine = Check(opz, "A fine cassetta chiedi ✅ Tieni / 🗑 Scarta / 🔄 Ricomincia",
+                "Tieni (Invio) = la conta e il file resta, qualunque durata. Scarta = cassetta vuota: non si conta, il totale del cliente scende, il file si cancella. Ricomincia = video da rifare (es. test testine): file cancellato, stessa cassetta, la registrazione riparte subito. Spento = conta sempre senza chiedere.");
             crmControlli.AddRange(new Control[] { txtCrmUrl, txtCrmToken, chkCrmCliente, chkCrmCartella, chkCrmFine, chkCrmRip, nCrmRip });
         }
 

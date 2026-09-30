@@ -440,7 +440,7 @@ namespace VHSCapture
         public string Esito { get; private set; } = "completata";
         const int W = 680;
 
-        public FineCassettaForm(bool dark, string cliente, int cassetta, int totali, TimeSpan durata)
+        public FineCassettaForm(bool dark, string cliente, int cassetta, int totali, int fatti, TimeSpan durata)
         {
             Theme.Apply(this, dark);
             Text = "VHSCapture — com'è andata la cassetta?";
@@ -455,7 +455,7 @@ namespace VHSCapture
             Controls.Add(t); y += 40;
             var sub = new Label { Text = $"{cliente}  ·  cassetta {cassetta} di {totali}  ·  registrata per {d}", AutoSize = true, Font = new Font("Segoe UI Semibold", 11f), Location = new Point(26, y) };
             Controls.Add(sub); y += 34;
-            var info = new InfoBox("ℹ️", "Premi Invio per tenerla. Scarta solo se la cassetta era vuota. Ricomincia se il video è da rifare (per esempio il videoregistratore ha fatto il test delle testine).", W - 48, Theme.Accent) { Location = new Point(24, y) };
+            var info = new InfoBox("ℹ️", "Premi Invio per tenerla. «Non farla pagare» per una cassetta corta che teniamo ma non contiamo. Scarta solo se era vuota. Ricomincia se il video è da rifare (es. test delle testine).", W - 48, Theme.Accent) { Location = new Point(24, y) };
             Controls.Add(info); y += info.Height + 12;
             SceltaCard Scelta(string titolo, string spieg, string effetto, Color col, string esito)
             {
@@ -466,8 +466,12 @@ namespace VHSCapture
             }
             Scelta("✅   Tieni   (Invio)",
                 "La cassetta va bene, qualunque sia la durata.",
-                $"→ la conto: {Math.Min(cassetta, Math.Max(totali, 1))} di {totali} fatte · il file resta",
+                $"→ la conto: {Math.Min(fatti + 1, Math.Max(totali, 1))} di {totali} fatte · il file resta",
                 CrmColori.Verde, "completata");
+            Scelta("🎁   Tieni, ma non farla pagare",
+                "Il video resta, ma questa cassetta non la facciamo pagare al cliente (es. dura pochi minuti).",
+                $"→ il file resta · il cliente passa da {totali} a {Math.Max(0, totali - 1)} videocassette (scende anche il prezzo) · non conta tra le fatte",
+                Theme.Accent, "omaggio");
             Scelta("🗑   Scarta — cassetta vuota",
                 "Dentro non c'era niente: solo nero, neve o schermo blu.",
                 $"→ NON la conto · il cliente passa da {totali} a {Math.Max(0, totali - 1)} videocassette (scende anche il prezzo) · il file appena registrato viene cancellato",

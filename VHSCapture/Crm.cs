@@ -60,6 +60,16 @@ namespace VHSCapture
         public string cartella_base { get; set; } = "";
     }
 
+    /// <summary>Risposta a «inizio»: il numero della cassetta lo assegna il CRM (se un altro PC fa la 4ª, qui arriva la 5ª).</summary>
+    public class CrmInizio
+    {
+        public int cassetta_n { get; set; }
+        public int nastri_fatti { get; set; }
+        public int nastri_totali { get; set; }
+        public List<CrmAltroPc> altri_pc { get; set; } = new List<CrmAltroPc>();
+    }
+    public class CrmAltroPc { public string pc { get; set; } = ""; public int cassetta { get; set; } }
+
     public class CrmFine
     {
         public int nastri_fatti { get; set; }

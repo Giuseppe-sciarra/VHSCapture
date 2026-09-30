@@ -549,9 +549,10 @@ namespace VHSCapture
             {
                 // CRM non raggiungibile: conto qui, il CRM si allinea quando l'evento parte dalla coda
                 if (esito == "completata") { l.nastri_fatti++; l.prossima = l.nastri_fatti + 1; }
-                else if (esito == "scartata") l.nastri_totali = Math.Max(0, l.nastri_totali - 1);
+                else if (esito == "scartata" || esito == "omaggio") l.nastri_totali = Math.Max(0, l.nastri_totali - 1);
             }
             AppendLog(esito == "completata" ? $"Cassetta {cassettaInCorso} contata: {l.nastri_fatti} di {l.nastri_totali}"
+                    : esito == "omaggio" ? $"Cassetta tenuta ma non fatta pagare: il file resta, il totale scende a {l.nastri_totali}"
                     : esito == "scartata" ? $"Cassetta scartata (vuota): il totale scende a {l.nastri_totali}"
                     : "Rifai: la cassetta non è stata contata");
             AggiornaCliente();
@@ -578,6 +579,33 @@ namespace VHSCapture
         }
 
         /// <summary>
+        /// Avvisa il CRM che la cassetta è partita e prende il numero che assegna lui: se un altro PC sta già
+        /// registrando la 4ª di questo cliente, qui arriva la 5ª. Senza CRM resta il numero calcolato qui.
+        /// </summary>
+        async Task CrmInizio(string file)
+        {
+            try { await CrmInizioInterno(file); }
+            catch (Exception ex) { AppendLog("CRM (inizio cassetta): " + ex.Message); }
+        }
+
+        async Task CrmInizioInterno(string file)
+        {
+            var l = lavoro; if (l == null) return;
+            string risp = await crm.Manda("inizio", new Dictionary<string, object> { ["vhs_id"] = l.id, ["cassetta_n"] = cassettaInCorso, ["file"] = file, ["versione"] = crm.Versione });
+            var r = CrmClient.Leggi<CrmInizio>(risp);
+            if (r == null || lavoro != l) return;
+            l.nastri_fatti = r.nastri_fatti; l.nastri_totali = r.nastri_totali;
+            if (r.cassetta_n > 0 && r.cassetta_n != cassettaInCorso)
+            {
+                var altri = string.Join(", ", (r.altri_pc ?? new List<CrmAltroPc>()).Select(x => $"{x.pc} la {x.cassetta}ª"));
+                AppendLog($"Il CRM assegna la cassetta {r.cassetta_n} di {r.nastri_totali}" + (altri.Length > 0 ? $" (stanno registrando: {altri})" : ""));
+                cassettaInCorso = r.cassetta_n;
+            }
+            AggiornaCliente();
+            CrmBattito();
+        }
+
+        /// <summary>
         /// «Di chi è questa cassetta?» aperta A REGISTRAZIONE GIÀ PARTITA, senza bloccare niente (si può anche fermare).
         /// Se entro 60 s non si sceglie, si chiude da sola e la registrazione continua nella cartella predefinita.
         /// </summary>
@@ -585,7 +613,7 @@ namespace VHSCapture
         {
             if (sceltaAperta != null) return;
             var f = new ClienteForm(settings.DarkTheme, () => crm.Lavori(), () => crm.UltimoErrore, true, "Di chi è questa cassetta?", 60);
-            f.FormClosed += (o, e) =>
+            f.FormClosed += async (o, e) =>
             {
                 if (sceltaAperta == f) sceltaAperta = null;
                 bool scelta = f.DialogResult == DialogResult.OK;
@@ -604,9 +632,8 @@ namespace VHSCapture
                 daSpostare = true;
                 cassettaInCorso = Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali));
                 AppendLog($"Cliente {lavoro.cliente}: cassetta {cassettaInCorso} di {lavoro.nastri_totali} — a fine registrazione il file va nella cartella «{lavoro.cartella}»");
-                _ = crm.Manda("inizio", new Dictionary<string, object> { ["vhs_id"] = lavoro.id, ["cassetta_n"] = cassettaInCorso, ["file"] = Path.GetFileName((recFile ?? "").Replace("%03d", "000")), ["versione"] = crm.Versione });
                 AggiornaCliente();
-                CrmBattito();
+                await CrmInizio(Path.GetFileName((recFile ?? "").Replace("%03d", "000")));   // numero assegnato dal CRM
             };
             // F9 (ferma) e F10 (pausa) funzionano anche mentre questa finestra ha la tastiera
             f.KeyPreview = true;
@@ -994,8 +1021,7 @@ namespace VHSCapture
                     cassettaInCorso = Math.Min(lavoro.prossima, Math.Max(1, lavoro.nastri_totali));
                     AppendLog($"Cliente {lavoro.cliente}: cassetta {cassettaInCorso} di {lavoro.nastri_totali}");
                     AggiornaCliente();
-                    _ = crm.Manda("inizio", new Dictionary<string, object> { ["vhs_id"] = lavoro.id, ["cassetta_n"] = cassettaInCorso, ["file"] = Path.GetFileName(recFile.Replace("%03d", "000")), ["versione"] = crm.Versione });
-                    CrmBattito();
+                    _ = CrmInizio(Path.GetFileName(recFile.Replace("%03d", "000")));   // numero assegnato dal CRM (a parte: non può mai fermare la registrazione)
                 }
                 else if (CrmAttivo && settings.CrmChiediCliente && !nessunCliente)
                     ChiediClienteDurante();   // la registrazione è già partita: la domanda arriva adesso, senza bloccare
@@ -1128,7 +1154,7 @@ namespace VHSCapture
                 }
                 else if (settings.CrmChiediFine)
                 {
-                    using var ff = new FineCassettaForm(settings.DarkTheme, lavoro.cliente, cassettaInCorso, lavoro.nastri_totali, durataStop);
+                    using var ff = new FineCassettaForm(settings.DarkTheme, lavoro.cliente, cassettaInCorso, lavoro.nastri_totali, lavoro.nastri_fatti, durataStop);
                     ff.ShowDialog(this);
                     esito = ff.Esito;
                     cancella = esito == "scartata" || esito == "ricomincia";

@@ -298,8 +298,11 @@ namespace VHSCapture
 
             // ---- fascia dell'avanzamento del cliente (sotto la barra dei pulsanti) ----
             prog = new ProgressoCliente { Dock = DockStyle.Fill, Cursor = Cursors.Hand };
-            prog.Click += (o, e) => ScegliCliente(true);
-            tips.SetToolTip(prog, "Clic per cambiare cliente");
+            var menuProg = new ContextMenuStrip { Font = new Font("Segoe UI", 10.5f), ShowImageMargin = false };
+            menuProg.Items.Add("👤   Cambia cliente", null, (o, e) => ScegliCliente(true));
+            menuProg.Items.Add("🔢   Correggi il conteggio", null, async (o, e) => await Riconta(false));
+            prog.MouseUp += (o, e) => menuProg.Show(prog, e.Location);
+            tips.SetToolTip(prog, "Clic: cambia cliente o correggi il conteggio");
             progWrap = new Panel { Dock = DockStyle.Top, Height = 96 + gap, Padding = new Padding(gap, gap, gap, 0), Visible = false };
             progWrap.Controls.Add(prog);
 
@@ -413,6 +416,31 @@ namespace VHSCapture
             nessunCliente = lavoro == null;
             AppendLog(lavoro == null ? "Nessun cliente: si registra come sempre" : $"Cliente: {lavoro.cliente} — {lavoro.dettaglio}");
             AggiornaCliente();
+        }
+
+        /// <summary>
+        /// Riconteggio: mostra fatte/totali del CRM e i video del cliente su questo PC; se correggi, aggiorna il CRM.
+        /// Restituisce true se il conteggio è stato cambiato.
+        /// </summary>
+        async Task<bool> Riconta(bool fineCliente)
+        {
+            var l = lavoro; if (l == null || !CrmAttivo) return false;
+            string cartella = string.IsNullOrWhiteSpace(l.cartella) ? null : Path.Combine(settings.ResolvedOutputFolder(), l.cartella);
+            int f0 = l.nastri_fatti, t0 = l.nastri_totali;
+            int fatti, totali;
+            using (var f = new RiconteggioForm(settings.DarkTheme, l.cliente, f0, t0, cartella, fineCliente))
+            {
+                if (f.ShowDialog(this) != DialogResult.OK || !f.Corretto) return false;
+                fatti = f.Fatti; totali = f.Totali;
+            }
+            string risp = await crm.Manda("conteggio", new Dictionary<string, object> { ["vhs_id"] = l.id, ["fatti"] = fatti, ["totali"] = totali });
+            var agg = CrmClient.Leggi<CrmLavoro>(risp);
+            if (agg != null) { l.nastri_fatti = agg.nastri_fatti; l.nastri_totali = agg.nastri_totali; l.prossima = agg.prossima; l.dettaglio = agg.dettaglio; l.stato = agg.stato; }
+            else { l.nastri_fatti = fatti; l.nastri_totali = totali; l.prossima = fatti + 1; }   // CRM giù: si allinea quando torna
+            AppendLog($"Conteggio corretto per {l.cliente}: fatte {f0} → {l.nastri_fatti}, totali {t0} → {l.nastri_totali}");
+            AggiornaCliente();
+            CrmBattito();
+            return true;
         }
 
         /// <summary>Ricorda il cliente in corso anche se si chiude VHSCapture (0 = nessuno da ricordare).</summary>
@@ -586,6 +614,12 @@ namespace VHSCapture
             CrmBattito();
             bool finiti = f != null ? f.nastri_finiti : (l.nastri_totali > 0 && l.nastri_fatti >= l.nastri_totali);
             if (!finiti) return;
+            // 🔢 riconteggio prima di chiudere il cliente: se correggi e mancano ancora cassette, il cliente resta aperto
+            if (await Riconta(true) && lavoro != null && lavoro.nastri_fatti < lavoro.nastri_totali)
+            {
+                AppendLog($"{lavoro.cliente} resta aperto: {lavoro.nastri_fatti} di {lavoro.nastri_totali} fatte");
+                return;
+            }
             if (f != null && f.tutto_finito)
                 MessageBox.Show(this, $"Hai finito tutte le cassette di {l.cliente} ({f.nastri_fatti} di {f.nastri_totali}) e non restano altri supporti.\n\n" +
                     "Nel CRM il lavoro è stato segnato PRONTO in automatico: esce dalla coda ed è pronto per la consegna.",

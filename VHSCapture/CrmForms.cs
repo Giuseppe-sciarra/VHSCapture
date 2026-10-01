@@ -506,4 +506,115 @@ namespace VHSCapture
             foreach (Control c in Controls) if (c is SceltaCard sc) sc.Colori();
         }
     }
+    /// <summary>
+    /// Riconteggio del cliente: fatte e totali secondo il CRM, i video che ci sono nella sua cartella su questo PC
+    /// (con dimensione e durata), e due caselle per correggere. A fine cliente: «✅ Torna tutto» (Invio) o «💾 Salva correzione».
+    /// </summary>
+    public class RiconteggioForm : Form
+    {
+        public bool Corretto { get; private set; }
+        public int Fatti => (int)nFatti.Value;
+        public int Totali => (int)nTotali.Value;
+        readonly NumericUpDown nFatti, nTotali;
+        readonly ListView lista;
+        static readonly string[] Video = { ".mp4", ".mkv", ".avi", ".mov", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".m4v" };
+        const int W = 720;
+
+        public RiconteggioForm(bool dark, string cliente, int fatti, int totali, string cartella, bool fineCliente)
+        {
+            Theme.Apply(this, dark);
+            Text = "VHSCapture — riconteggio";
+            FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false;
+            StartPosition = FormStartPosition.CenterParent;
+            Font = new Font("Segoe UI", 10f);
+            KeyPreview = true;
+            int y = 18;
+            Controls.Add(new Label { Text = fineCliente ? $"Riconteggio — hai finito {cliente}?" : $"Correggi il conteggio — {cliente}", AutoSize = true, Font = new Font("Segoe UI Semibold", 15f), Location = new Point(24, y) });
+            y += 42;
+            var info = new InfoBox(fineCliente ? "🔢" : "ℹ️",
+                fineCliente ? "Prima di chiudere il cliente controlla che il numero torni con i video qui sotto. Se torna, premi Invio."
+                            : "Correggi le videocassette fatte o il totale del cliente: il CRM si aggiorna subito (se cambia il totale, cambia anche il prezzo).",
+                W - 48, Theme.Accent) { Location = new Point(24, y) };
+            Controls.Add(info); y += info.Height + 12;
+            Controls.Add(new Label { Text = $"Secondo il CRM: {fatti} di {totali} videocassette fatte", AutoSize = true, Font = new Font("Segoe UI Semibold", 11.5f), Location = new Point(26, y) });
+            y += 32;
+
+            // video nella cartella del cliente su questo PC
+            var files = new List<string>();
+            try
+            {
+                if (!string.IsNullOrEmpty(cartella) && System.IO.Directory.Exists(cartella))
+                    files = System.IO.Directory.GetFiles(cartella).Where(f => Video.Contains(System.IO.Path.GetExtension(f).ToLowerInvariant())).OrderBy(f => f).ToList();
+            }
+            catch { }
+            string titoloFile = string.IsNullOrEmpty(cartella) ? "Cartella del cliente non impostata"
+                              : !System.IO.Directory.Exists(cartella) ? $"Su questo PC non c'è la cartella «{System.IO.Path.GetFileName(cartella)}»"
+                              : $"Video nella cartella «{System.IO.Path.GetFileName(cartella)}» di questo PC: {files.Count}";
+            Controls.Add(new Label { Text = titoloFile, AutoSize = true, Font = new Font("Segoe UI Semibold", 10.5f), Location = new Point(26, y) });
+            y += 26;
+            Controls.Add(new Label { Text = "Se il cliente è stato fatto anche su un altro PC, qui vedi solo i file di questo.", AutoSize = true, Tag = "muted", Location = new Point(26, y) });
+            y += 26;
+            lista = new ListView { View = View.Details, FullRowSelect = true, HeaderStyle = ColumnHeaderStyle.Nonclickable, Location = new Point(24, y), Size = new Size(W - 48, 190), BorderStyle = BorderStyle.FixedSingle };
+            lista.Columns.Add("File", 400); lista.Columns.Add("Dimensione", 110, HorizontalAlignment.Right); lista.Columns.Add("Durata", 120, HorizontalAlignment.Right);
+            foreach (var f in files)
+            {
+                long b = 0; try { b = new System.IO.FileInfo(f).Length; } catch { }
+                var it = new ListViewItem(new[] { System.IO.Path.GetFileName(f), b >= 1L << 30 ? $"{b / (double)(1L << 30):0.0} GB" : $"{b / (double)(1L << 20):0} MB", "…" }) { Tag = f };
+                lista.Items.Add(it);
+            }
+            Controls.Add(lista); y += lista.Height + 16;
+
+            // le due caselle
+            nTotali = new NumericUpDown { Minimum = 0, Maximum = 999, Value = Math.Max(0, totali), Width = 90, Font = new Font("Segoe UI Semibold", 14f), TextAlign = HorizontalAlignment.Center };
+            nFatti = new NumericUpDown { Minimum = 0, Maximum = Math.Max(0, totali), Value = Math.Min(Math.Max(0, fatti), Math.Max(0, totali)), Width = 90, Font = new Font("Segoe UI Semibold", 14f), TextAlign = HorizontalAlignment.Center };
+            nTotali.ValueChanged += (o, e) => { nFatti.Maximum = nTotali.Value; };
+            Controls.Add(new Label { Text = "Fatte", AutoSize = true, Font = new Font("Segoe UI Semibold", 11f), Location = new Point(26, y + 8) });
+            nFatti.Location = new Point(90, y); Controls.Add(nFatti);
+            Controls.Add(new Label { Text = "di   Totali", AutoSize = true, Font = new Font("Segoe UI Semibold", 11f), Location = new Point(196, y + 8) });
+            nTotali.Location = new Point(290, y); Controls.Add(nTotali);
+            Controls.Add(new Label { Text = "videocassette", AutoSize = true, Tag = "muted", Location = new Point(392, y + 10) });
+            y += 56;
+
+            var bSalva = Ui.Btn("💾   Salva correzione", "accent", (o, e) => { Corretto = Fatti != fatti || Totali != totali; DialogResult = DialogResult.OK; Close(); }, 200);
+            var bTorna = Ui.Btn(fineCliente ? "✅   Torna tutto  (Invio)" : "Annulla", fineCliente ? "ghost" : "ghost", (o, e) => { Corretto = false; DialogResult = DialogResult.OK; Close(); }, 220);
+            bSalva.MinimumSize = new Size(200, 44); bTorna.MinimumSize = new Size(220, 44);
+            bTorna.Location = new Point(W - 24 - 220, y); bSalva.Location = new Point(W - 24 - 220 - 12 - 200, y);
+            Controls.Add(bSalva); Controls.Add(bTorna);
+            // Invio = «Torna tutto», salvo che si stia scrivendo un numero o si sia su un pulsante (lì vale il pulsante)
+            KeyDown += (o, e) => { if (e.KeyCode == Keys.Enter && !(ActiveControl is NumericUpDown) && !(ActiveControl is Button)) { e.Handled = true; bTorna.PerformClick(); } };
+            ClientSize = new Size(W, y + 60);
+            Theme.Apply(this, dark);
+            Shown += async (o, e) => await CaricaDurate();
+        }
+
+        /// <summary>Durata di ogni video, letta da ffmpeg in sottofondo (la finestra non si blocca).</summary>
+        async Task CaricaDurate()
+        {
+            foreach (ListViewItem it in lista.Items)
+            {
+                string f = it.Tag as string;
+                string d = await Task.Run(() => DurataVideo(f));
+                if (IsDisposed) return;
+                it.SubItems[2].Text = d;
+            }
+        }
+
+        static string DurataVideo(string file)
+        {
+            try
+            {
+                if (!FFmpeg.Exists) return "—";
+                var psi = new System.Diagnostics.ProcessStartInfo(FFmpeg.ExePath, "-hide_banner -i \"" + file + "\"")
+                { RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+                using var p = System.Diagnostics.Process.Start(psi);
+                string err = p.StandardError.ReadToEnd();
+                p.WaitForExit(10000);
+                var m = System.Text.RegularExpressions.Regex.Match(err, @"Duration:\s*(\d+):(\d+):(\d+)");
+                if (!m.Success) return "—";
+                int h = int.Parse(m.Groups[1].Value), mi = int.Parse(m.Groups[2].Value), se = int.Parse(m.Groups[3].Value);
+                return h > 0 ? $"{h}:{mi:00}:{se:00}" : $"{mi}:{se:00}";
+            }
+            catch { return "—"; }
+        }
+    }
 }

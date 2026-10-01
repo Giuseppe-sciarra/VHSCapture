@@ -278,9 +278,13 @@ namespace VHSCapture
         System.Windows.Forms.Timer tempo;
         int restano;
 
+        readonly CrmLavoro riprendi;
+
         /// <param name="chiudiDopo">secondi dopo cui la finestra si chiude da sola senza scelta (0 = mai): usato mentre si registra</param>
-        public ClienteForm(bool dark, Func<Task<List<CrmLavoro>>> caricaLavori, Func<string> ultimoErrore, bool soloLista, string titolo = null, int chiudiDopo = 0)
+        /// <param name="riprendi">cliente che si stava facendo (anche prima di chiudere VHSCapture): «▶ Continua con…» in cima, Invio = lui</param>
+        public ClienteForm(bool dark, Func<Task<List<CrmLavoro>>> caricaLavori, Func<string> ultimoErrore, bool soloLista, string titolo = null, int chiudiDopo = 0, CrmLavoro riprendi = null)
         {
+            this.riprendi = riprendi;
             Theme.Apply(this, dark);   // i colori servono già per costruire i riquadri
             carica = caricaLavori; errore = ultimoErrore;
             Text = "VHSCapture — chi stai riversando?";
@@ -321,6 +325,19 @@ namespace VHSCapture
                 "🔴 = un altro PC sta già registrando questo cliente.",
                 W - 48, Theme.Accent) { Dock = DockStyle.Top };
             var spazio = new Panel { Dock = DockStyle.Top, Height = 10 };
+            // «▶ Continua con…»: il cliente che si stava facendo (anche dopo aver chiuso e riaperto VHSCapture)
+            Panel pRiprendi = null;
+            if (riprendi != null)
+            {
+                int resta = Math.Max(0, riprendi.nastri_totali - riprendi.nastri_fatti);
+                var card = new SceltaCard($"▶   Continua con {riprendi.cliente}   (Invio)",
+                    $"Stavi facendo questo cliente: {riprendi.nastri_fatti} di {riprendi.nastri_totali} videocassette fatte, ne restano {resta}.",
+                    "→ un clic o Invio · la cassetta si conta per lui e va nella sua cartella",
+                    CrmColori.Verde, W - 48) { Location = new Point(0, 4) };
+                card.Scelta += (o, e) => Scegli(riprendi);
+                pRiprendi = new Panel { Dock = DockStyle.Top, Height = card.Height + 14 };
+                pRiprendi.Controls.Add(card);
+            }
             // ricerca: con tanti clienti in coda si trova il nome in un attimo (Invio = il primo della lista)
             var rigaCerca = new Panel { Dock = DockStyle.Top, Height = 40, Padding = new Padding(0, 2, 0, 6) };
             cerca = new TextBox { Dock = DockStyle.Fill, Font = new Font("Segoe UI", 11f), PlaceholderText = "scrivi un pezzo del nome…", BorderStyle = BorderStyle.FixedSingle };
@@ -330,6 +347,7 @@ namespace VHSCapture
             {
                 if (e.KeyCode != Keys.Enter) return;
                 e.SuppressKeyPress = true;
+                if (riprendi != null && string.IsNullOrWhiteSpace(cerca.Text)) { Scegli(riprendi); return; }   // Invio = continua
                 var primo = schede.FirstOrDefault(x => x.Visible);
                 if (primo != null) Scegli(primo.Lavoro);
             };
@@ -358,12 +376,15 @@ namespace VHSCapture
                 Shown += (o, e) => tempo.Start();
                 FormClosed += (o, e) => { tempo.Stop(); tempo.Dispose(); };
             }
-            passo2.Controls.Add(elenco); passo2.Controls.Add(lblStato); passo2.Controls.Add(rigaCerca); passo2.Controls.Add(spazio); passo2.Controls.Add(info2); passo2.Controls.Add(t2); passo2.Controls.Add(lblTempo); passo2.Controls.Add(giu);
+            passo2.Controls.Add(elenco); passo2.Controls.Add(lblStato); passo2.Controls.Add(rigaCerca); passo2.Controls.Add(spazio); passo2.Controls.Add(info2);
+            if (pRiprendi != null) passo2.Controls.Add(pRiprendi);      // sotto il titolo, sopra la spiegazione
+            passo2.Controls.Add(t2); passo2.Controls.Add(lblTempo); passo2.Controls.Add(giu);
 
             Controls.Add(passo2); Controls.Add(passo1);
             ClientSize = new Size(W, soloLista ? H : altezzaPasso1);
             Theme.Apply(this, dark);
             foreach (Control c in passo1.Controls) if (c is SceltaCard sc) sc.Colori();
+            if (pRiprendi != null) foreach (Control c in pRiprendi.Controls) if (c is SceltaCard sc2) sc2.Colori();
             elenco.BackColor = Theme.Back;
             if (soloLista) Shown += (o, e) => MostraLista();
         }

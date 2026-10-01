@@ -402,11 +402,12 @@ namespace VHSCapture
             AggiornaCliente();
         }
 
-        void ScegliCliente(bool soloLista)
+        async void ScegliCliente(bool soloLista)
         {
             if (CaptureBusy) { MessageBox.Show(this, "Ferma la registrazione prima di cambiare cliente.", "VHSCapture"); return; }
             if (!CrmAttivo) { MessageBox.Show(this, "Il collegamento al CRM è spento o non configurato: Impostazioni → CRM.", "VHSCapture"); return; }
-            using var f = new ClienteForm(settings.DarkTheme, () => crm.Lavori(), () => crm.UltimoErrore, soloLista);
+            var riprendi = lavoro == null ? await ClienteDaRiprendere() : null;
+            using var f = new ClienteForm(settings.DarkTheme, () => crm.Lavori(), () => crm.UltimoErrore, soloLista, null, 0, riprendi);
             if (f.ShowDialog(this) != DialogResult.OK) return;
             lavoro = f.Scelto;
             nessunCliente = lavoro == null;
@@ -414,11 +415,37 @@ namespace VHSCapture
             AggiornaCliente();
         }
 
+        /// <summary>Ricorda il cliente in corso anche se si chiude VHSCapture (0 = nessuno da ricordare).</summary>
+        void RicordaCliente(int id)
+        {
+            if (settings.CrmUltimoCliente == id) return;
+            settings.CrmUltimoCliente = id;
+            try { settings.Save(); } catch { }
+        }
+
+        /// <summary>
+        /// Il cliente da proporre con «▶ Continua con…»: l'ultimo che si stava facendo, SOLO se nel CRM ha ancora
+        /// videocassette libere (non finito, non consegnato, non tutte in registrazione su altri PC).
+        /// </summary>
+        async Task<CrmLavoro> ClienteDaRiprendere()
+        {
+            int id = settings.CrmUltimoCliente;
+            if (id <= 0 || !CrmAttivo) return null;
+            var l = await crm.Lavoro(id);
+            if (l == null) return crm.Raggiungibile ? Dimentica() : null;          // scheda non più esistente (o CRM giù: non si decide)
+            string st = (l.stato ?? "").Trim().ToLowerInvariant();
+            bool aperta = st == "in attesa" || st == "in lavorazione";
+            if (!aperta || l.nastri_totali <= 0 || l.nastri_fatti >= l.nastri_totali || l.prossima > l.nastri_totali) return Dimentica();
+            return l;
+            CrmLavoro Dimentica() { RicordaCliente(0); return null; }
+        }
+
         void AggiornaCliente()
         {
             if (btnCliente == null || crm == null) return;
             bool compact = compactState == true;
             btnCliente.Visible = CrmAttivo;
+            if (lavoro != null) RicordaCliente(lavoro.id);
             if (progWrap != null)
             {
                 progWrap.Visible = CrmAttivo && lavoro != null;
@@ -492,7 +519,7 @@ namespace VHSCapture
                         if (!engine.IsRecording && agg.nastri_totali > 0 && agg.nastri_fatti >= agg.nastri_totali)
                         {
                             AppendLog("Videocassette di " + lavoro.cliente + " finite (aggiornato dal CRM): alla prossima registrazione ti chiedo il cliente");
-                            lavoro = null; nessunCliente = false;
+                            lavoro = null; nessunCliente = false; RicordaCliente(0);
                         }
                         AggiornaCliente();
                     }
@@ -574,6 +601,7 @@ namespace VHSCapture
                     "VHSCapture — cassette finite (CRM non raggiungibile)", MessageBoxButtons.OK, MessageBoxIcon.Information);
             lavoro = null;                              // videocassette del cliente finite: al prossimo Registra si chiede il cliente
             nessunCliente = false;
+            RicordaCliente(0);                          // finito: alla riapertura non si propone più
             AppendLog("Videocassette di " + l.cliente + " finite: alla prossima registrazione ti chiedo il cliente");
             AggiornaCliente();
         }
@@ -609,10 +637,12 @@ namespace VHSCapture
         /// «Di chi è questa cassetta?» aperta A REGISTRAZIONE GIÀ PARTITA, senza bloccare niente (si può anche fermare).
         /// Se entro 60 s non si sceglie, si chiude da sola e la registrazione continua nella cartella predefinita.
         /// </summary>
-        void ChiediClienteDurante()
+        async void ChiediClienteDurante()
         {
             if (sceltaAperta != null) return;
-            var f = new ClienteForm(settings.DarkTheme, () => crm.Lavori(), () => crm.UltimoErrore, true, "Di chi è questa cassetta?", 60);
+            var riprendi = await ClienteDaRiprendere();
+            if (sceltaAperta != null || !engine.IsRecording || finalizing) return;   // nel frattempo fermata o già aperta
+            var f = new ClienteForm(settings.DarkTheme, () => crm.Lavori(), () => crm.UltimoErrore, true, "Di chi è questa cassetta?", 60, riprendi);
             f.FormClosed += async (o, e) =>
             {
                 if (sceltaAperta == f) sceltaAperta = null;

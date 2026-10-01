@@ -221,7 +221,8 @@ namespace VHSCapture
         public bool CrmChiediFine { get; set; } = true;          // a fine cassetta: ✅ Tieni / 🗑 Scarta (spento = conta sempre)
         public bool CrmRipartenzaAttiva { get; set; } = true;    // partenza sbagliata: fermata entro N secondi = non si conta, file cancellato
         public int CrmRipartenzaSec { get; set; } = 60;
-        public string CrmConfigAt { get; set; } = "";            // ultima modifica della configurazione (sincronizzata col CRM: vince la più recente)
+        public string CrmConfigAt { get; set; } = "";
+        public int CrmUltimoCliente { get; set; } = 0;           // ultimo cliente (scheda) in corso: alla riapertura si propone «Continua con…»            // ultima modifica della configurazione (sincronizzata col CRM: vince la più recente)
 
         // Controllo live (zmq)
         public bool LiveControl { get; set; } = true;

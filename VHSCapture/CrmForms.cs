@@ -25,9 +25,9 @@ namespace VHSCapture
             DoubleBuffered = true; SetStyle(ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
             Width = larghezza; Cursor = Cursors.Hand; Margin = new Padding(0, 0, 0, 10);
             int w = larghezza - 44;
-            lTitolo = new Label { Text = titolo, AutoSize = true, Font = new Font("Segoe UI Semibold", 13f), Location = new Point(24, 12), Tag = "keep", BackColor = Color.Transparent };
-            lSpieg = new Label { Text = spiegazione, AutoSize = true, MaximumSize = new Size(w, 0), Font = new Font("Segoe UI", 10f), Tag = "keep", BackColor = Color.Transparent };
-            lEffetto = new Label { Text = effetto, AutoSize = true, MaximumSize = new Size(w, 0), Font = new Font("Segoe UI Semibold", 10f), Tag = "keep", BackColor = Color.Transparent };
+            lTitolo = new Label { Text = titolo, AutoSize = true, Font = new Font("Segoe UI Semibold", 11.5f), Location = new Point(24, 12), Tag = "keep", BackColor = Color.Transparent };
+            lSpieg = new Label { Text = spiegazione, AutoSize = true, MaximumSize = new Size(w, 0), Font = new Font("Segoe UI", 9.25f), Tag = "keep", BackColor = Color.Transparent };
+            lEffetto = new Label { Text = effetto, AutoSize = true, MaximumSize = new Size(w, 0), Font = new Font("Segoe UI Semibold", 9.25f), Tag = "keep", BackColor = Color.Transparent };
             Controls.AddRange(new Control[] { lTitolo, lSpieg, lEffetto });
             int y = 12 + lTitolo.GetPreferredSize(Size.Empty).Height + 4;
             lSpieg.Location = new Point(24, y); y += lSpieg.GetPreferredSize(new Size(w, 0)).Height + 6;
@@ -270,7 +270,7 @@ namespace VHSCapture
         readonly List<ClienteCard> schede = new List<ClienteCard>();
         readonly Label lblStato;
         // larga abbastanza da leggere tutto; sugli schermi piccoli si adatta all'area disponibile
-        static readonly int W = Math.Min(900, Screen.PrimaryScreen.WorkingArea.Width - 40);
+        static readonly int W = Math.Min(1040, Screen.PrimaryScreen.WorkingArea.Width - 40);
         static readonly int H = Math.Min(720, Screen.PrimaryScreen.WorkingArea.Height - 40);
         public CrmLavoro Scelto { get; private set; }
 
@@ -459,49 +459,67 @@ namespace VHSCapture
     public class FineCassettaForm : Form
     {
         public string Esito { get; private set; } = "completata";
-        const int W = 680;
+        static readonly int W = Math.Min(960, Screen.PrimaryScreen.WorkingArea.Width - 40);
 
-        public FineCassettaForm(bool dark, string cliente, int cassetta, int totali, int fatti, TimeSpan durata)
+        /// <param name="cliente">null = nessun cliente del CRM: si chiede solo «Tieni» o «Elimina e ricomincia»</param>
+        /// <param name="completa">false = anche col cliente solo le due scelte base (opzione «A fine cassetta chiedi…» spenta)</param>
+        public FineCassettaForm(bool dark, string cliente, int cassetta, int totali, int fatti, TimeSpan durata, bool completa = true)
         {
             Theme.Apply(this, dark);
-            Text = "VHSCapture — com'è andata la cassetta?";
+            bool conCliente = !string.IsNullOrEmpty(cliente);
+            Text = conCliente ? "VHSCapture — com'è andata la cassetta?" : "VHSCapture — com'è andata la registrazione?";
             FormBorderStyle = FormBorderStyle.FixedDialog; ControlBox = false; ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
-            Font = new Font("Segoe UI", 10f);
+            Font = new Font("Segoe UI", 9.5f);
             KeyPreview = true;
             KeyDown += (o, e) => { if (e.KeyCode == Keys.Enter) { e.Handled = true; Esito = "completata"; DialogResult = DialogResult.OK; Close(); } };
             string d = durata.TotalHours >= 1 ? $"{(int)durata.TotalHours}:{durata.Minutes:00}:{durata.Seconds:00}" : $"{durata.Minutes}:{durata.Seconds:00}";
-            int y = 18;
-            var t = new Label { Text = "Com'è andata la cassetta?", AutoSize = true, Font = new Font("Segoe UI Semibold", 16f), Location = new Point(24, y) };
-            Controls.Add(t); y += 40;
-            var sub = new Label { Text = $"{cliente}  ·  cassetta {cassetta} di {totali}  ·  registrata per {d}", AutoSize = true, Font = new Font("Segoe UI Semibold", 11f), Location = new Point(26, y) };
-            Controls.Add(sub); y += 34;
-            var info = new InfoBox("ℹ️", "Premi Invio per tenerla. «Non farla pagare» per una cassetta corta che teniamo ma non contiamo. Scarta solo se era vuota. Ricomincia se il video è da rifare (es. test delle testine).", W - 48, Theme.Accent) { Location = new Point(24, y) };
-            Controls.Add(info); y += info.Height + 12;
+            int y = 16;
+            var t = new Label { Text = conCliente ? "Com'è andata la cassetta?" : "Com'è andata la registrazione?", AutoSize = true, Font = new Font("Segoe UI Semibold", 14f), Location = new Point(24, y) };
+            Controls.Add(t); y += 34;
+            var sub = new Label { Text = conCliente ? $"{cliente}  ·  cassetta {cassetta} di {totali}  ·  registrata per {d}" : $"Registrata per {d}", AutoSize = true, Font = new Font("Segoe UI Semibold", 10f), Location = new Point(26, y) };
+            Controls.Add(sub); y += 30;
             SceltaCard Scelta(string titolo, string spieg, string effetto, Color col, string esito)
             {
                 var c = new SceltaCard(titolo, spieg, effetto, col, W - 48) { Location = new Point(24, y) };
                 c.Scelta += (o, e) => { Esito = esito; DialogResult = DialogResult.OK; Close(); };
-                Controls.Add(c); y += c.Height + 10;
+                Controls.Add(c); y += c.Height + 8;
                 return c;
             }
-            Scelta("✅   Tieni   (Invio)",
-                "La cassetta va bene, qualunque sia la durata.",
-                $"→ la conto: {Math.Min(fatti + 1, Math.Max(totali, 1))} di {totali} fatte · il file resta",
-                CrmColori.Verde, "completata");
-            Scelta("🎁   Tieni, ma non farla pagare",
-                "Il video resta, ma questa cassetta non la facciamo pagare al cliente (es. dura pochi minuti).",
-                $"→ il file resta · il cliente passa da {totali} a {Math.Max(0, totali - 1)} videocassette (scende anche il prezzo) · non conta tra le fatte",
-                Theme.Accent, "omaggio");
-            Scelta("🗑   Scarta — cassetta vuota",
-                "Dentro non c'era niente: solo nero, neve o schermo blu.",
-                $"→ NON la conto · il cliente passa da {totali} a {Math.Max(0, totali - 1)} videocassette (scende anche il prezzo) · il file appena registrato viene cancellato",
-                CrmColori.Rosso, "scartata");
-            Scelta("🔄   Ricomincia la cassetta",
-                "Il video è da rifare: test delle testine, partita nel punto sbagliato, immagine sbagliata…",
-                $"→ NON la conto · il file appena registrato viene cancellato · la registrazione RIPARTE SUBITO, sempre come cassetta {cassetta} di {totali}",
-                CrmColori.Arancio, "ricomincia");
-            ClientSize = new Size(W, y + 12);
+            if (conCliente && completa)
+            {
+                var info = new InfoBox("ℹ️", "Premi Invio per tenerla. «Non farla pagare» per una cassetta corta che teniamo ma non contiamo. Scarta solo se era vuota. Ricomincia se il video è da rifare (es. test delle testine).", W - 48, Theme.Accent) { Location = new Point(24, y) };
+                Controls.Add(info); y += info.Height + 10;
+                Scelta("✅   Tieni   (Invio)",
+                    "La cassetta va bene, qualunque sia la durata.",
+                    $"→ la conto: {Math.Min(fatti + 1, Math.Max(totali, 1))} di {totali} fatte · il file resta",
+                    CrmColori.Verde, "completata");
+                Scelta("🎁   Tieni, ma non farla pagare",
+                    "Il video resta, ma questa cassetta non la facciamo pagare al cliente (es. dura pochi minuti).",
+                    $"→ il file resta · il cliente passa da {totali} a {Math.Max(0, totali - 1)} videocassette (scende anche il prezzo) · non conta tra le fatte",
+                    Theme.Accent, "omaggio");
+                Scelta("🗑   Scarta — cassetta vuota",
+                    "Dentro non c'era niente: solo nero, neve o schermo blu.",
+                    $"→ NON la conto · il cliente passa da {totali} a {Math.Max(0, totali - 1)} videocassette (scende anche il prezzo) · il file appena registrato viene cancellato",
+                    CrmColori.Rosso, "scartata");
+                Scelta("🔄   Ricomincia la cassetta",
+                    "Il video è da rifare: test delle testine, partita nel punto sbagliato, immagine sbagliata…",
+                    $"→ NON la conto · il file appena registrato viene cancellato · la registrazione RIPARTE SUBITO, sempre come cassetta {cassetta} di {totali}",
+                    CrmColori.Arancio, "ricomincia");
+            }
+            else
+            {
+                // scelte base: valgono senza cliente e anche col cliente quando l'opzione «chiedi» è spenta
+                Scelta("✅   Tieni   (Invio)",
+                    "La registrazione va bene, qualunque sia la durata.",
+                    conCliente ? $"→ la conto: {Math.Min(fatti + 1, Math.Max(totali, 1))} di {totali} fatte · il file resta" : "→ il file resta nella cartella",
+                    CrmColori.Verde, "completata");
+                Scelta("🔄   Elimina e ricomincia",
+                    "Sbagliata: il file appena registrato viene cancellato e la registrazione riparte subito" + (conCliente ? $", sempre come cassetta {cassetta} di {totali}." : "."),
+                    conCliente ? "→ NON la conto · il file viene cancellato · si riparte subito" : "→ il file viene cancellato · si riparte subito",
+                    CrmColori.Arancio, "ricomincia");
+            }
+            ClientSize = new Size(W, y + 10);
             Theme.Apply(this, dark);
             foreach (Control c in Controls) if (c is SceltaCard sc) sc.Colori();
         }
@@ -518,7 +536,7 @@ namespace VHSCapture
         readonly NumericUpDown nFatti, nTotali;
         readonly ListView lista;
         static readonly string[] Video = { ".mp4", ".mkv", ".avi", ".mov", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv", ".m4v" };
-        const int W = 720;
+        static readonly int W = Math.Min(960, Screen.PrimaryScreen.WorkingArea.Width - 40);
 
         public RiconteggioForm(bool dark, string cliente, int fatti, int totali, string cartella, bool fineCliente)
         {

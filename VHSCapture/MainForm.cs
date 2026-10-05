@@ -31,6 +31,7 @@ namespace VHSCapture
         int cassettaInCorso;                      // numero della cassetta che si sta registrando
         TimeSpan durataStop;                      // durata misurata al clic su Stop (al netto delle pause)
         RoundedButton btnCliente;
+        RoundedButton btnConteggio;
         Label lblCrm; Panel crmWrap;
         System.Windows.Forms.Timer crmTimer;
         bool crmOccupato;
@@ -198,7 +199,10 @@ namespace VHSCapture
             btnPanels = Ui.IconBtn("◧", "Mostra/nascondi pannello Sorgenti e Mixer", (o, e) => ToggleRightPanel());
             btnCliente = Ui.Btn("👤   Nessun cliente", "ghost", (o, e) => ScegliCliente(true));
             btnCliente.Margin = new Padding(12, 0, 0, 0); btnCliente.Visible = false;
-            flow.Controls.AddRange(new Control[] { btnRec, btnPause, btnCliente, lblName, txtName, btnSettings, btnFolder, btnTheme, btnPanels, btnLog });
+            btnConteggio = Ui.Btn("🔢   Conteggio", "ghost", async (o, e) => await Riconta(false));
+            btnConteggio.Visible = false;
+            tips.SetToolTip(btnConteggio, "Correggi quante videocassette sono state fatte e il totale del cliente (si aggiorna il CRM)");
+            flow.Controls.AddRange(new Control[] { btnRec, btnPause, btnCliente, btnConteggio, lblName, txtName, btnSettings, btnFolder, btnTheme, btnPanels, btnLog });
             Resize += (o, e) => ApplyCompact();
             top.Controls.Add(flow);
 
@@ -489,6 +493,8 @@ namespace VHSCapture
                             : (compact ? $"👤 {lavoro.nastri_fatti}/{lavoro.nastri_totali}" : $"👤   {lavoro.cliente}  ·  {lavoro.nastri_fatti} di {lavoro.nastri_totali} fatte");
             btnCliente.Variant = lavoro == null ? "ghost" : "accent";
             btnCliente.Invalidate();
+            btnConteggio.Visible = CrmAttivo && lavoro != null;
+            btnConteggio.Text = compact ? "🔢" : "🔢   Conteggio";
             tips.SetToolTip(btnCliente, lavoro == null ? "Scegli il cliente dalla coda del CRM" : $"{lavoro.cliente}: {lavoro.dettaglio}. Clic per cambiare cliente");
             AggiornaBarraCrm();
         }
@@ -1216,9 +1222,10 @@ namespace VHSCapture
                     esito = "rifai"; cancella = true;
                     AppendLog($"Partenza sbagliata (fermata dopo {DurataTesto((int)durataStop.TotalSeconds)}): cassetta non contata, file cancellato. La prossima registrazione riparte dalla cassetta {cassettaInCorso}.");
                 }
-                else if (settings.CrmChiediFine)
+                else
                 {
-                    using var ff = new FineCassettaForm(settings.DarkTheme, lavoro.cliente, cassettaInCorso, lavoro.nastri_totali, lavoro.nastri_fatti, durataStop);
+                    // si chiede SEMPRE: con l'opzione «chiedi» accesa le 4 scelte, altrimenti solo Tieni / Elimina e ricomincia
+                    using var ff = new FineCassettaForm(settings.DarkTheme, lavoro.cliente, cassettaInCorso, lavoro.nastri_totali, lavoro.nastri_fatti, durataStop, settings.CrmChiediFine);
                     ff.ShowDialog(this);
                     esito = ff.Esito;
                     cancella = esito == "scartata" || esito == "ricomincia";
@@ -1229,7 +1236,6 @@ namespace VHSCapture
                         AppendLog($"Ricomincia la cassetta {cassettaInCorso}: video cancellato, la registrazione riparte subito");
                     }
                 }
-                else esito = "completata";   // senza domanda: si conta sempre
                 if (cancella)
                 {
                     cartellaDaSpostare = null;   // file cancellato: niente da spostare
@@ -1241,6 +1247,23 @@ namespace VHSCapture
                     }
                 }
                 await CrmFineCassetta(esito, Path.GetFileName(final.Replace("%03d", "000")));
+            }
+            else if (muxOk && RecordedFiles(final).Any())
+            {
+                // nessun cliente del CRM: comunque la scelta «Tieni» o «Elimina e ricomincia»
+                using var ff0 = new FineCassettaForm(settings.DarkTheme, null, 0, 0, 0, durataStop);
+                ff0.ShowDialog(this);
+                if (ff0.Esito == "ricomincia")
+                {
+                    ricomincia = true;
+                    AppendLog("Registrazione eliminata su richiesta: si riparte subito");
+                    if (moveTo != null) { mirror?.Abort(); mirror = null; }
+                    foreach (var fdel in RecordedFiles(final).Concat(RecordedFiles(written)).Distinct(StringComparer.OrdinalIgnoreCase).ToList())
+                    {
+                        try { File.Delete(fdel); AppendLog("Cancellato: " + Path.GetFileName(fdel)); } catch (Exception ex) { AppendLog("File non cancellato (" + ex.Message + "): " + fdel); }
+                        if (moveTo != null) try { File.Delete(Path.Combine(moveTo, Path.GetFileName(fdel))); } catch { }
+                    }
+                }
             }
 
             // nome della cassetta: rinomina il file (niente più rinomina a mano in Esplora file)

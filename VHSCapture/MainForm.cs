@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -1209,6 +1209,25 @@ namespace VHSCapture
             // cliente scelto a registrazione già partita: a fine chiusura i file si SPOSTANO nella sua cartella
             string cartellaDaSpostare = (daSpostare && lavoro != null && settings.CrmCartellaCliente && !string.IsNullOrWhiteSpace(lavoro.cartella)) ? lavoro.cartella : null;
 
+            // nome della cassetta: rinomina il file (niente più rinomina a mano in Esplora file).
+            // Si chiede PRIMA delle domande di fine cliente (riconteggio, «lavoro finito»): prima dai il nome all'ultima
+            // cassetta, poi i controlli. Dopo «Tieni / Scarta», così non si dà il nome a un file che viene cancellato.
+            bool nomeChiesto = false;
+            void ChiediNomeCassetta()
+            {
+                if (nomeChiesto) return;
+                nomeChiesto = true;
+                if (!(muxOk && settings.AskNameAtEnd && RecordedFiles(final).Any())) return;
+                string suggested = txtName.Text.Trim();
+                string n = Prompt("Nome della cassetta", "Come si chiama questa cassetta? (Invio per confermare, Annulla per lasciare il nome automatico)", suggested);
+                if (!string.IsNullOrWhiteSpace(n))
+                {
+                    var renamed = RenameRecording(final, n.Trim());
+                    if (renamed != null) { final = renamed; written = renamed; AppendLog("Rinominato: " + Path.GetFileName(renamed.Replace("%03d", "000"))); }
+                }
+                txtName.Text = "";
+            }
+
             // cliente del CRM: com'è andata la cassetta. Scarta / Rifai cancellano il file appena registrato.
             if (lavoro != null)
             {
@@ -1246,6 +1265,7 @@ namespace VHSCapture
                         if (moveTo != null) try { File.Delete(Path.Combine(moveTo, Path.GetFileName(fdel))); } catch { }
                     }
                 }
+                if (!cancella) ChiediNomeCassetta();      // prima il nome, poi riconteggio e messaggi di fine cliente
                 await CrmFineCassetta(esito, Path.GetFileName(final.Replace("%03d", "000")));
             }
             else if (muxOk && RecordedFiles(final).Any())
@@ -1266,18 +1286,8 @@ namespace VHSCapture
                 }
             }
 
-            // nome della cassetta: rinomina il file (niente più rinomina a mano in Esplora file)
-            if (muxOk && settings.AskNameAtEnd && RecordedFiles(final).Any())
-            {
-                string suggested = txtName.Text.Trim();
-                string n = Prompt("Nome della cassetta", "Come si chiama questa cassetta? (Invio per confermare, Annulla per lasciare il nome automatico)", suggested);
-                if (!string.IsNullOrWhiteSpace(n))
-                {
-                    var renamed = RenameRecording(final, n.Trim());
-                    if (renamed != null) { final = renamed; written = renamed; AppendLog("Rinominato: " + Path.GetFileName(renamed.Replace("%03d", "000"))); }
-                }
-                txtName.Text = "";
-            }
+            // nome della cassetta (se non è già stato chiesto prima delle domande di fine cliente)
+            ChiediNomeCassetta();
 
             // controllo automatico dell'audio nel file: così non si resta col dubbio
             if (RecordedFiles(final).Any() && settings.Sources.Any(x => x.Visible && x.HasAudio))

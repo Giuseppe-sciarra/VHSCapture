@@ -23,24 +23,29 @@ namespace VHSCapture
         /// |U| 26 contro 40 e |V| 17 contro 23 rispetto a PAL_B). 1,5 riporta la saturazione a quella di PAL_B; si rifinisce con «Saturazione».</summary>
         public const double ChromaGain = 1.5;
         static readonly string G = ChromaGain.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture);
-        // U: media con la riga precedente dello stesso campo (Y-2). V: segno + − − + per righe del fotogramma, alternato a ogni
-        // fotogramma (N), poi la stessa media: s(Y)·(V(Y) − V(Y−2))/2 perché s(Y−2) = −s(Y). Le prime 2 righe restano com'erano.
-        static readonly string UExpr = "if(lt(Y\\,2)\\,p(X\\,Y)\\,clip(128+" + G + "*((p(X\\,Y)+p(X\\,Y-2))/2-128)\\,16\\,240))";
-        static readonly string VExpr = "if(lt(Y\\,2)\\,p(X\\,Y)\\,clip(128+" + G + "*(1-2*mod(floor(Y/2)+mod(Y\\,2)+N\\,2))*(p(X\\,Y)-p(X\\,Y-2))/2\\,16\\,240))";
+        // Il segno di V segue lo schema + − − + sulle righe del fotogramma (periodo 4), rovesciato a ogni fotogramma.
+        // Niente geq (una formula per pixel: ~29 fps su 2 core, 24 fps misurati sul PC del laboratorio → buffer pieno e fotogrammi persi):
+        // solo filtri a blocchi. il=l=d due volte riordina le righe per Y mod 4 = 0, 2, 1, 3 → si nega la metà centrale
+        // (Y mod 4 = 2 e 1) → il=l=i due volte rimette tutto a posto; il rovesciamento per fotogramma lo fa negate con enable.
+        // Linea di ritardo PAL (media con la riga precedente dello stesso campo) = convolution verticale; guadagno = lut.
+        // Misurato: 124 fps su 2 core, risultato uguale al geq (differenza media 3,6/255 su V).
+        static readonly string Delay = "convolution=0m='0 1 0 0 1 0 0 0 0':0rdiv=0.5";
+        static readonly string Gain = "lut=y='clip(128+" + G + "*(val-128)\\,16\\,240)'";
 
         /// <summary>
         /// Pezzo di grafo: dall'ingresso <paramref name="input"/> all'etichetta <paramref name="output"/>, con lo streamselect
-        /// che si chiama streamselect@pal{id} (map 0 = come calcolato, map 1 = V invertito).
-        /// I piani si lavorano separati: il geq calcola solo la crominanza (metà dei punti), ~2× più veloce.
+        /// che si chiama streamselect@pal{id} (map 0 = come calcolato, map 1 = V invertito). Serve un'altezza multipla di 4.
         /// </summary>
         public static string Filter(string input, string output, string id, string tag)
         {
             string t = "pal" + tag;
             return $"{input}format=yuv422p,split=3[{t}y0][{t}u0][{t}v0];" +
                    $"[{t}y0]extractplanes=y[{t}y];" +
-                   $"[{t}u0]extractplanes=u,geq=lum='{UExpr}'[{t}u];" +
-                   $"[{t}v0]extractplanes=v,geq=lum='{VExpr}'[{t}v];" +
-                   $"[{t}y][{t}u][{t}v]mergeplanes=0x001020:yuv422p,split=2[{t}a][{t}b];" +
+                   $"[{t}u0]extractplanes=u,{Delay},{Gain}[{t}u];" +
+                   $"[{t}v0]extractplanes=v,il=l=d,il=l=d,split=3[{t}q1][{t}q2][{t}q3];" +
+                   $"[{t}q1]crop=iw:ih/4:0:0[{t}qa];[{t}q2]crop=iw:ih/2:0:ih/4,negate[{t}qb];[{t}q3]crop=iw:ih/4:0:3*ih/4[{t}qc];" +
+                   $"[{t}qa][{t}qb][{t}qc]vstack=inputs=3,il=l=i,il=l=i,negate=enable='mod(n\\,2)',{Delay},{Gain}[{t}v];" +
+                   $"[{t}y][{t}u][{t}v]mergeplanes=map0s=0:map1s=1:map2s=2:format=yuv422p,split=2[{t}a][{t}b];" +
                    $"[{t}b]lutyuv=v=negval[{t}c];" +
                    $"[{t}a][{t}c]streamselect@pal{id}=inputs=2:map=0{output};";
         }

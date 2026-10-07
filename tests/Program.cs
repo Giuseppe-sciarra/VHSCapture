@@ -213,7 +213,12 @@ Check(!tBlu && mBlu.Decided, "Monitor: scena blu = fase giusta, nessuna inversio
 var mViola = new PalPhaseMonitor(); int tV = -1; for (int i = 0; i < 80 && tV < 0; i++) if (mViola.Observe(Img(30, 20, i))) tV = i;
 Check(tV >= PalPhaseMonitor.PriorMinFrames - 1 && tV < 80, "Monitor: scena viola = fase da girare dopo ~1,5 s");
 var mDrop = new PalPhaseMonitor(); int tD = -1; for (int i = 0; i < 70; i++) if (mDrop.Observe(Img(30, i < 60 ? -20 : 20, i)) && tD < 0) tD = i;
-Check(tD == 60, "Monitor: rovesciamento di colpo (fotogramma perso) riconosciuto subito");
+Check(tD == 61, "Monitor: rovesciamento di colpo (fotogramma perso) riconosciuto e confermato al fotogramma dopo");
+var mGl = new PalPhaseMonitor(); bool tG = false; for (int i = 0; i < 80; i++) tG |= mGl.Observe(Img(30, i == 60 ? 20 : -20, i));
+Check(!tG, "Monitor: disturbo di un solo fotogramma ignorato");
+var mLate = new PalPhaseMonitor(); int tL = -1; for (int i = 0; i < 200; i++) if (mLate.Observe(Img(30, i < 100 ? -20 : 20, i * (i < 100 ? 1 : 9) + (i < 100 ? 0 : 500))) && tL < 0) tL = i;
+Check(tL > 100 && tL <= 100 + PalPhaseMonitor.EmaConfirm + 12, "Monitor: dopo una giunta con fase girata si corregge entro ~1,5 s");
+Check(PalSoftware.Filter("[0:v]", "[o]", "s", "0").Contains("1.5*"), "Guadagno crominanza 1,5 nel filtro");
 var mOwn = new PalPhaseMonitor(); for (int i = 0; i < 50; i++) mOwn.Observe(Img(30, -20, i)); mOwn.ExpectFlip(); bool tO = false;
 for (int i = 50; i < 70; i++) tO |= mOwn.Observe(Img(30, i < 53 ? -20 : 20, i));
 Check(!tO, "Monitor: il rovesciamento chiesto da noi non conta");

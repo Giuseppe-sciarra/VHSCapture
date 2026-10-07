@@ -16,6 +16,8 @@ Un videoregistratore PAL che legge una cassetta NTSC manda **525 righe a 60 Hz c
     - se il grabber perde un fotogramma, il colore si rovescia di colpo: lo riconosce sull'immagine stessa e lo rigira.
 
     Provato sul campione vero: fase sbagliata corretta al fotogramma 44, fotogramma tolto a metà riconosciuto all'istante, nessun falso allarme su 5 riprese con colori già giusti.
+  - Saturazione: in PAL_60 il grabber tira fuori la crominanza con ampiezza ridotta (|U| 26 contro 40, |V| 17 contro 23 rispetto a PAL_B). Il filtro applica un guadagno 1,5 (`PalSoftware.ChromaGain`): misurato dopo, |U| 38 e |V| 26, cioè come PAL_B. Il cursore «Saturazione» resta per rifinire.
+  - Fase che si girava ogni tanto durante la cattura: il controllo ora 1) riconosce il rovesciamento anche con molto movimento, perché guarda U e V e non la luminanza; 2) lo conferma sul fotogramma dopo, così un disturbo di un solo fotogramma (drop-out) non conta; 3) dopo un cambio di scena, dove la sequenza del VCR può ripartire girata, rivaluta i colori di continuo e se restano viola/verdi per 1 s corregge.
   - Tasto **«⇄ Inverti colore»** nelle Proprietà, che vale anche in registrazione. Nel Log compaiono le righe «Colore PAL: …».
   - Deinterlaccio Yadif 2x (campi nell'ordine normale, prima il superiore), registrazione a 59,94 con 60 immagini diverse al secondo. Il grafo esatto generato dall'app è stato provato con ffmpeg sul campione, compreso il cambio dal vivo via zmq.
   - Serve «Modifiche delle sorgenti al volo (zmq)» attivo nelle Impostazioni, che è il predefinito; l'ffmpeg «essentials» ha zmq. Il geq costa CPU: su 2 core lenti va a circa 29 fotogrammi al secondo, sui PC del laboratorio ci sono più core.

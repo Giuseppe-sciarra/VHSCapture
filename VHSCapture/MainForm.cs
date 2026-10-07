@@ -1807,7 +1807,7 @@ namespace VHSCapture
 
             var src = new Source { Type = SourceType.Capture, Name = "Grabber USB", VideoDevice = video, AudioDevice = audio };
             var v = VideoStandard.PAL;
-            src.InputSize = v.Size; src.InputFps = v.InFps; src.DeinterlaceMode = v.Deint; src.CropB = v.CropB;
+            src.InputSize = v.Size; src.InputFps = v.InFps; src.DeinterlaceMode = v.Deint; src.CropB = v.CropB; src.TvStandard = v.Tv;
             src.Locked = true;
             settings.CanvasW = 1920; settings.CanvasH = 1080; settings.Fps = v.CanvasFps;
             canvas.CanvasW = 1920; canvas.CanvasH = 1080;

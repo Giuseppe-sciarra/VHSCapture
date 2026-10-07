@@ -1,3 +1,16 @@
+# VHSCapture — cassette NTSC su videoregistratore PAL
+
+Un videoregistratore PAL che legge una cassetta NTSC manda **525 righe a 60 Hz con il colore a 4,43 MHz** (PAL-60, oppure NTSC 4.43 su alcuni VCR vecchi). Con il grabber su NTSC_M l'immagine è intera ma in bianco e nero; con PAL_B è tagliata o sfarfalla. Prima lo standard del grabber si cambiava a mano da «Driver video…» e restava scollegato da risoluzione e fps: da lì il «miscuglio» NTSC + PAL.
+
+- **Proprietà sorgente → Standard video**, due voci nuove: «NTSC su videoregistratore PAL — PAL-60» e «… — NTSC 4.43». Ingresso 720×480 a 29,97, Yadif 2x, registrazione 1080p a 59,94.
+- **Standard nel grabber** (riga nuova): ogni preset imposta da solo anche la scheda «Decoder video» del driver (PAL B/G, NTSC M, PAL-60, NTSC 4.43…), prima di avviare ffmpeg. 4 s dopo la partenza ricontrolla, e se il driver all'apertura ha rimesso il vecchio standard lo corregge. Se il grabber non ha PAL-60 usa NTSC 4.43, e viceversa.
+- Sotto la riga si vede cosa c'è adesso nel grabber: standard, **righe rilevate** (525 = NTSC/PAL-60, 625 = PAL; vanno lette col nastro in Play, perché il menu blu del VCR è sempre a 625), segnale agganciato e standard che il driver accetta. Le stesse informazioni finiscono nel Log a ogni avvio.
+- Se le righe rilevate non tornano con lo standard scelto (625 con 720×480, o 525 con 720×576) compare un avviso con lo standard da provare.
+- Se cambi lo standard dalla pagina del driver, VHSCapture si adegua invece di rimettere il suo al riavvio.
+- Al primo avvio le sorgenti esistenti prendono lo standard del grabber che corrisponde alla loro risoluzione (720×576 → PAL B/G, 720×480 → NTSC M). «Non toccare» lascia il driver com'è, come prima.
+- Se i colori vengono sbagliati o a strisce orizzontali con PAL-60, il VCR manda NTSC 4.43: scegli l'altra voce.
+- Fine cliente CRM: prima si dà il **nome della cassetta**, poi arrivano riconteggio e domande.
+
 # VHSCapture 1.2.8 — avvio veloce e anteprima fluida
 
 - **GPU Intel vecchie (es. HD Graphics 4600)**: se QuickSync via D3D11 fallisce ("Error creating a MFX session: -9"), l'app usa DXVA2 e **se lo ricorda** per quel PC. Prima riprovava D3D11 a ogni avvio e a ogni chiusura delle Impostazioni, perdendo circa 6 s ogni volta. "Verifica encoder" nelle Impostazioni fa riprovare D3D11 al prossimo avvio (utile dopo un aggiornamento dei driver).

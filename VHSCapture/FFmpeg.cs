@@ -922,6 +922,12 @@ namespace VHSCapture
             var mePipes = names.Meters.ToDictionary(kv => kv.Key,
                 kv => Enumerable.Range(0, meterInstances).Select(_ => NewPipe(kv.Value, 256 << 10, meterInstances)).ToList());
 
+            // standard del grabber (PAL_B / NTSC_M / PAL_60…) scritto PRIMA che ffmpeg apra il dispositivo:
+            // così risoluzione, fps e decoder sono sempre dello stesso standard (niente più "miscuglio" NTSC + PAL)
+            var tvSet = s.Sources.Where(x => x.Visible && x.Type == SourceType.Capture && !string.IsNullOrWhiteSpace(x.VideoDevice) && !string.IsNullOrEmpty(x.TvStandard))
+                                 .Select(x => (dev: x.VideoDevice, std: x.TvStandard)).Distinct().ToList();
+            foreach (var (dev, std) in tvSet) DShowProps.ApplyTv(dev, std, l => Log?.Invoke(l));
+
             string args = BuildArgs(s, PW, PH, zmqPort, names, out inputMap, GpuActive, QsvBackend);
             fastIdRunning = FastPathId;
             var fs = s.Sources.FirstOrDefault(x => x.Id == fastIdRunning);
@@ -967,6 +973,23 @@ namespace VHSCapture
                 zmq = new ZmqControl(zmqPort);
                 zmq.Log += l => Log?.Invoke(l);
                 zmq.Start();
+            }
+
+            // alcuni driver all'apertura rimettono lo standard salvato nel registro: ricontrollo a cattura avviata
+            if (tvSet.Count > 0)
+            {
+                int run = RunId;
+                var chk = new Thread(() =>
+                {
+                    try
+                    {
+                        Thread.Sleep(4000);
+                        if (stopping || RunId != run) return;
+                        foreach (var (dev, std) in tvSet) DShowProps.ApplyTv(dev, std, l => Log?.Invoke(l), recheck: true);
+                    }
+                    catch { }
+                }) { IsBackground = true, Name = "tvcheck" };
+                chk.Start();
             }
         }
 

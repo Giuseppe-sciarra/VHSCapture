@@ -158,6 +158,26 @@ using (var retryEngine = new CaptureEngine())
     retryEngine.ResetGpuRetry();
     Check(!retryEngine.GpuDisabled && retryEngine.QsvBackend == "d3d11va", "Ripristino dei tentativi GPU dalla configurazione");
 }
+// standard del grabber: i preset portano con sé il decoder giusto (cassette NTSC su VCR PAL = PAL-60 / NTSC 4.43)
+Check(DShowProps.TvFlag("PAL_60") == 0x800 && DShowProps.TvFlag("NTSC_433") == 0x4 && DShowProps.TvFlag("PAL_B") == 0x10 && DShowProps.TvFlag("NTSC_M") == 0x1, "Valori AnalogVideoStandard di PAL-60, NTSC 4.43, PAL B, NTSC M");
+Check(DShowProps.TvSame("PAL_G", "PAL_B") && DShowProps.TvSame("NTSC_M_J", "NTSC_M") && !DShowProps.TvSame("PAL_60", "PAL_B") && !DShowProps.TvSame("NTSC_433", "NTSC_M") && !DShowProps.TvSame("", ""), "PAL-60 e NTSC 4.43 non confusi con PAL/NTSC normali");
+Check(string.Join(",", DShowProps.TvNames(0x1 | 0x4 | 0x10 | 0x800)) == "NTSC_M,NTSC_433,PAL_B,PAL_60", "Elenco standard accettati dal driver");
+var tvSrc = new Source { InputSize = "720x480", InputFps = "29.97", DeinterlaceMode = "yadif2x", CropB = 6, TvStandard = "PAL_60" };
+Check(VideoStandard.Detect(tvSrc) == VideoStandard.NTSC_PAL60, "Preset NTSC su VCR PAL (PAL-60) riconosciuto");
+tvSrc.TvStandard = "NTSC_433";
+Check(VideoStandard.Detect(tvSrc) == VideoStandard.NTSC_443, "Preset NTSC su VCR PAL (NTSC 4.43) riconosciuto");
+tvSrc.TvStandard = "NTSC_M";
+Check(VideoStandard.Detect(tvSrc) == VideoStandard.NTSC, "Preset NTSC con lettore NTSC riconosciuto");
+tvSrc.TvStandard = "PAL_B";
+Check(VideoStandard.Detect(tvSrc) == null, "720×480 col grabber in PAL = personalizzato (il miscuglio non passa per standard)");
+tvSrc.TvStandard = "";
+Check(VideoStandard.Detect(tvSrc) == null && VideoStandard.DetectValues(tvSrc) == VideoStandard.NTSC, "Sorgenti vecchie senza standard grabber: migrazione da risoluzione e fps");
+var tvA = new Source { TvStandard = "PAL_B" }; var tvB = tvA.Clone(); tvB.TvStandard = "PAL_60";
+Check(!tvA.StructurallyEquals(tvB), "Cambiare lo standard del grabber riavvia la cattura");
+tvA.CopyStructuralFrom(tvB);
+Check(tvA.TvStandard == "PAL_60", "Lo standard del grabber segue la sorgente nelle copie");
+var tvS = Settings(); var tvArgs1 = Args(tvS, false); tvS.Sources[0].TvStandard = "PAL_60"; var tvArgs2 = Args(tvS, false);
+Check(tvArgs1 == tvArgs2 && !tvArgs2.Contains("PAL_60"), "Il comando ffmpeg non cambia con lo standard del grabber");
 if (args.Length > 0)
 {
     Directory.CreateDirectory(args[0]); s = Settings(); s.Encoder = "libx264";

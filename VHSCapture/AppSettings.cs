@@ -29,6 +29,9 @@ namespace VHSCapture
         public string DeinterlaceMode { get; set; } = "off";
         public bool? Deinterlace { get; set; } = null;          // solo migrazione dalle versioni precedenti
         public int RtBufMB { get; set; } = 512;
+        /// <summary>Standard del grabber (scheda "Decoder video" del driver) che VHSCapture imposta prima di avviare la cattura:
+        /// PAL_B, NTSC_M, PAL_60, NTSC_433… "" = non toccarlo (lo imposti a mano da Driver video…).</summary>
+        public string TvStandard { get; set; } = "";
         /// <summary>bilinear, bicubic, lanczos, area (come "Filtro di ridimensionamento" di OBS).</summary>
         public string ScaleFilter { get; set; } = "bicubic";
         /// <summary>Ritardo audio in ms (come "Ritardo di sincronizzazione" di OBS). Positivo = audio più tardi.</summary>
@@ -75,6 +78,7 @@ namespace VHSCapture
             Type == o.Type && Visible == o.Visible && VideoDevice == o.VideoDevice && AudioDevice == o.AudioDevice &&
             InputSize == o.InputSize && InputFps == o.InputFps && DeinterlaceMode == o.DeinterlaceMode && RtBufMB == o.RtBufMB &&
             VideoFormat == o.VideoFormat && ScaleFilter == o.ScaleFilter && AudioOffsetMs == o.AudioOffsetMs &&
+            (TvStandard ?? "") == (o.TvStandard ?? "") &&
             ImagePath == o.ImagePath && Color == o.Color;
 
         public void CopyStructuralFrom(Source o)
@@ -82,6 +86,7 @@ namespace VHSCapture
             Type = o.Type; Visible = o.Visible; VideoDevice = o.VideoDevice; AudioDevice = o.AudioDevice;
             InputSize = o.InputSize; InputFps = o.InputFps; DeinterlaceMode = o.DeinterlaceMode; RtBufMB = o.RtBufMB;
             VideoFormat = o.VideoFormat; ScaleFilter = o.ScaleFilter; AudioOffsetMs = o.AudioOffsetMs;
+            TvStandard = o.TvStandard ?? "";
             ImagePath = o.ImagePath; Color = o.Color;
         }
 
@@ -147,19 +152,41 @@ namespace VHSCapture
         public void Center(int cw, int ch) { X = (cw - W) / 2; Y = (ch - H) / 2; }
     }
 
-    /// <summary>Standard video analogici: tutto ciò che passa dal grabber (VHS, S-VHS, Hi8, Video8, MiniDV) è PAL o NTSC.</summary>
+    /// <summary>
+    /// Standard video analogici: tutto ciò che passa dal grabber (VHS, S-VHS, Hi8, Video8, MiniDV) è PAL o NTSC.
+    /// Ogni standard porta con sé anche lo standard del grabber (Tv), così risoluzione, fps e decoder vanno sempre insieme.
+    /// Le cassette NTSC lette da un videoregistratore PAL escono a 525 righe / 60 Hz ma col colore a 4,43 MHz
+    /// (PAL-60 o NTSC 4.43): col grabber su NTSC_M vengono in bianco e nero, su PAL_B tagliate o che sfarfallano.
+    /// </summary>
     public class VideoStandard
     {
-        public string Name, Size, InFps, CanvasFps, Deint; public int CropB;
-        public static readonly VideoStandard PAL = new VideoStandard { Name = "PAL", Size = "720x576", InFps = "25", CanvasFps = "50", Deint = "yadif2x", CropB = 8 };
-        public static readonly VideoStandard NTSC = new VideoStandard { Name = "NTSC", Size = "720x480", InFps = "29.97", CanvasFps = "59.94", Deint = "yadif2x", CropB = 6 };
+        public string Name, Size, InFps, CanvasFps, Deint, Tv; public int CropB;
+        public static readonly VideoStandard PAL = new VideoStandard { Name = "PAL", Size = "720x576", InFps = "25", CanvasFps = "50", Deint = "yadif2x", CropB = 8, Tv = "PAL_B" };
+        public static readonly VideoStandard NTSC = new VideoStandard { Name = "NTSC", Size = "720x480", InFps = "29.97", CanvasFps = "59.94", Deint = "yadif2x", CropB = 6, Tv = "NTSC_M" };
+        /// <summary>Cassetta NTSC su videoregistratore PAL che esce in PAL-60 (il caso più comune).</summary>
+        public static readonly VideoStandard NTSC_PAL60 = new VideoStandard { Name = "NTSC su VCR PAL (PAL-60)", Size = "720x480", InFps = "29.97", CanvasFps = "59.94", Deint = "yadif2x", CropB = 6, Tv = "PAL_60" };
+        /// <summary>Cassetta NTSC su videoregistratore PAL che esce in NTSC 4.43 (alcuni VCR, soprattutto vecchi).</summary>
+        public static readonly VideoStandard NTSC_443 = new VideoStandard { Name = "NTSC su VCR PAL (NTSC 4.43)", Size = "720x480", InFps = "29.97", CanvasFps = "59.94", Deint = "yadif2x", CropB = 6, Tv = "NTSC_433" };
 
-        /// <summary>Lo standard a cui corrispondono i valori della sorgente, o null se sono stati personalizzati.</summary>
+        /// <summary>Nell'ordine del menu «Standard video» delle Proprietà (dopo c'è «Personalizzato»).</summary>
+        public static readonly VideoStandard[] All = { PAL, NTSC, NTSC_PAL60, NTSC_443 };
+
+        static bool SameValues(Source s, VideoStandard v) =>
+            s.InputSize == v.Size && s.InputFps == v.InFps && s.DeinterlaceMode == v.Deint &&
+            s.CropL == 0 && s.CropT == 0 && s.CropR == 0 && s.CropB == v.CropB;
+
+        /// <summary>Lo standard a cui corrispondono i valori della sorgente (grabber compreso), o null se sono stati personalizzati.</summary>
         public static VideoStandard Detect(Source s)
         {
-            foreach (var v in new[] { PAL, NTSC })
-                if (s.InputSize == v.Size && s.InputFps == v.InFps && s.DeinterlaceMode == v.Deint &&
-                    s.CropL == 0 && s.CropT == 0 && s.CropR == 0 && s.CropB == v.CropB) return v;
+            foreach (var v in All)
+                if (SameValues(s, v) && (s.TvStandard ?? "") == v.Tv) return v;
+            return null;
+        }
+
+        /// <summary>Solo per la migrazione: PAL o NTSC guardando risoluzione/fps, senza lo standard del grabber.</summary>
+        public static VideoStandard DetectValues(Source s)
+        {
+            foreach (var v in new[] { PAL, NTSC }) if (SameValues(s, v)) return v;
             return null;
         }
     }
@@ -296,6 +323,18 @@ namespace VHSCapture
                 s.VideoDevice = ""; s.AudioDevice = ""; s.InputSize = ""; s.InputFps = "";
                 s.Save();
             }
+            // 1.3.1: lo standard PAL/NTSC imposta anche il grabber (prima andava cambiato a mano nel driver e i due si mescolavano)
+            if (s.FormatVersion < 6)
+            {
+                foreach (var src in s.Sources)
+                {
+                    if (src.Type != SourceType.Capture || !string.IsNullOrEmpty(src.TvStandard)) continue;
+                    var v = VideoStandard.DetectValues(src);
+                    if (v != null) src.TvStandard = v.Tv;
+                }
+                s.FormatVersion = 6;
+            }
+            foreach (var src in s.Sources) src.TvStandard ??= "";
             return s;
         }
 

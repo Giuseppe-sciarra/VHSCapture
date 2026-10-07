@@ -4,6 +4,7 @@
     <Compile Include="../VHSCapture/FFmpeg.cs" Link="FFmpeg.cs" />
     <Compile Include="../VHSCapture/NoSignalDetector.cs" Link="NoSignalDetector.cs" />
     <Compile Include="../VHSCapture/AppSettings.cs" Link="AppSettings.cs" />
+    <Compile Include="../VHSCapture/DShowProps.cs" Link="DShowProps.cs" />
     <PackageReference Include="NetMQ" Version="4.0.1.13" />
     <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
   </ItemGroup>

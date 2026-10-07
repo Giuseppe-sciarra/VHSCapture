@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
@@ -88,6 +89,187 @@ namespace VHSCapture
             }
             catch (Exception ex) { log?.Invoke("dshow: " + ex.Message); return false; }
             finally { if (filter != null) Marshal.ReleaseComObject(filter); }
+        }
+
+        // ================= standard video del grabber (IAMAnalogVideoDecoder) =================
+        // È la stessa impostazione della scheda "Decoder video" del driver: VHSCapture la scrive da solo
+        // prima di avviare ffmpeg, così risoluzione/fps e standard del grabber non vanno mai per conto loro.
+
+        [ComImport, Guid("C6E13350-30AC-11d0-A18C-00A0C9118956"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IAMAnalogVideoDecoder
+        {
+            [PreserveSig] int get_AvailableTVFormats(out int lAnalogVideoStandard);
+            [PreserveSig] int put_TVFormat(int lAnalogVideoStandard);
+            [PreserveSig] int get_TVFormat(out int plAnalogVideoStandard);
+            [PreserveSig] int get_HorizontalLocked(out int plLocked);
+            [PreserveSig] int put_VCRHorizontalLocking(int lVCRHorizontalLocking);
+            [PreserveSig] int get_VCRHorizontalLocking(out int plVCRHorizontalLocking);
+            [PreserveSig] int get_NumberOfLines(out int plNumberOfLines);
+            [PreserveSig] int put_OutputEnable(int lOutputEnable);
+            [PreserveSig] int get_OutputEnable(out int plOutputEnable);
+        }
+
+        /// <summary>Valori di AnalogVideoStandard (strmif.h), con lo stesso nome che mostra il driver.</summary>
+        static readonly (string key, int flag)[] TvFlags =
+        {
+            ("NTSC_M", 0x1), ("NTSC_M_J", 0x2), ("NTSC_433", 0x4),
+            ("PAL_B", 0x10), ("PAL_D", 0x20), ("PAL_G", 0x40), ("PAL_H", 0x80), ("PAL_I", 0x100),
+            ("PAL_M", 0x200), ("PAL_N", 0x400), ("PAL_60", 0x800),
+            ("SECAM_B", 0x1000), ("SECAM_D", 0x2000), ("SECAM_G", 0x4000), ("SECAM_H", 0x8000),
+            ("SECAM_K", 0x10000), ("SECAM_K1", 0x20000), ("SECAM_L", 0x40000), ("SECAM_L1", 0x80000),
+            ("PAL_N_COMBO", 0x100000),
+        };
+
+        public static int TvFlag(string key) { foreach (var t in TvFlags) if (t.key == key) return t.flag; return 0; }
+        public static string TvName(int flag) { foreach (var t in TvFlags) if (t.flag == flag) return t.key; return flag == 0 ? "nessuno" : $"0x{flag:X}"; }
+        public static List<string> TvNames(int mask) { var l = new List<string>(); foreach (var t in TvFlags) if ((mask & t.flag) != 0) l.Add(t.key); return l; }
+
+        /// <summary>Varianti che su un ingresso composito/S-Video si decodificano uguali (cambiano solo l'audio in antenna).</summary>
+        static string TvGroup(string key) => key switch
+        {
+            "PAL_B" or "PAL_D" or "PAL_G" or "PAL_H" or "PAL_I" => "PAL",
+            "NTSC_M" or "NTSC_M_J" => "NTSC",
+            "SECAM_B" or "SECAM_D" or "SECAM_G" or "SECAM_H" or "SECAM_K" or "SECAM_K1" => "SECAM",
+            "SECAM_L" or "SECAM_L1" => "SECAM_L",
+            _ => key ?? "",
+        };
+        public static bool TvSame(string a, string b) => !string.IsNullOrEmpty(a) && TvGroup(a) == TvGroup(b);
+
+        /// <summary>Se il driver non ha lo standard chiesto, quello che ci va più vicino (per le cassette NTSC su VCR PAL l'altro dei due).</summary>
+        static string[] TvCandidates(string want) => want switch
+        {
+            "PAL_60" => new[] { "PAL_60", "NTSC_433" },
+            "NTSC_433" => new[] { "NTSC_433", "PAL_60" },
+            "PAL_B" => new[] { "PAL_B", "PAL_G", "PAL_D", "PAL_I", "PAL_H" },
+            "NTSC_M" => new[] { "NTSC_M", "NTSC_M_J" },
+            "SECAM_D" => new[] { "SECAM_D", "SECAM_K", "SECAM_B", "SECAM_G" },
+            "SECAM_L" => new[] { "SECAM_L", "SECAM_L1" },
+            _ => new[] { want },
+        };
+
+        public class TvInfo
+        {
+            public bool Found, Supported;
+            public int Available, Current, Lines = -1, Locked = -1;
+            public string CurrentKey => TvName(Current);
+            public List<string> AvailableKeys => TvNames(Available);
+        }
+
+        /// <summary>Apre il filtro DirectShow del dispositivo per nome (null se non c'è).</summary>
+        static object BindFilter(string friendlyName, bool video, Action<string> log)
+        {
+            var devEnum = (ICreateDevEnum)new SystemDeviceEnum();
+            var cat = video ? CLSID_VideoInputDeviceCategory : CLSID_AudioInputDeviceCategory;
+            int hr = devEnum.CreateClassEnumerator(ref cat, out IEnumMoniker en, 0);
+            if (hr != 0 || en == null) { log?.Invoke("dshow: nessun dispositivo nella categoria"); return null; }
+            object filter = null;
+            try
+            {
+                var monikers = new IMoniker[1];
+                while (filter == null && en.Next(1, monikers, IntPtr.Zero) == 0)
+                {
+                    var mon = monikers[0];
+                    try
+                    {
+                        var bagGuid = typeof(IPropertyBag).GUID;
+                        mon.BindToStorage(null, null, ref bagGuid, out object bagObj);
+                        var bag = (IPropertyBag)bagObj;
+                        object name = null;
+                        bag.Read("FriendlyName", ref name, IntPtr.Zero);
+                        Marshal.ReleaseComObject(bagObj);
+                        if (!string.Equals(name as string, friendlyName, StringComparison.OrdinalIgnoreCase)) continue;
+                        var iid = IID_IUnknown;
+                        mon.BindToObject(null, null, ref iid, out filter);
+                    }
+                    finally { Marshal.ReleaseComObject(mon); }
+                }
+            }
+            finally { Marshal.ReleaseComObject(en); }
+            return filter;
+        }
+
+        static TvInfo Read(IAMAnalogVideoDecoder dec)
+        {
+            var i = new TvInfo { Found = true, Supported = true };
+            if (dec.get_AvailableTVFormats(out int av) == 0) i.Available = av;
+            if (dec.get_TVFormat(out int cur) == 0) i.Current = cur;
+            if (dec.get_NumberOfLines(out int ln) == 0) i.Lines = ln;
+            if (dec.get_HorizontalLocked(out int lk) == 0) i.Locked = lk;
+            return i;
+        }
+
+        /// <summary>Legge lo standard del grabber (anche mentre l'anteprima gira, come la pagina del driver).</summary>
+        public static TvInfo ReadTv(string friendlyName)
+        {
+            object filter = null;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(friendlyName)) return new TvInfo();
+                filter = BindFilter(friendlyName, true, null);
+                if (filter == null) return new TvInfo();
+                if (!(filter is IAMAnalogVideoDecoder dec)) return new TvInfo { Found = true };
+                return Read(dec);
+            }
+            catch { return new TvInfo { Found = filter != null }; }
+            finally { if (filter != null) try { Marshal.ReleaseComObject(filter); } catch { } }
+        }
+
+        /// <summary>
+        /// Porta il grabber sullo standard voluto (es. PAL_60 per le cassette NTSC su videoregistratore PAL).
+        /// Non tocca niente se è già giusto. Ritorna lo standard attivo alla fine, o null se il driver non lo permette.
+        /// recheck = controllo a pipeline avviata: scrive nel Log solo se deve correggere.
+        /// </summary>
+        public static string ApplyTv(string friendlyName, string want, Action<string> log, bool recheck = false)
+        {
+            if (string.IsNullOrWhiteSpace(friendlyName) || string.IsNullOrEmpty(want)) return null;
+            object filter = null;
+            try
+            {
+                filter = BindFilter(friendlyName, true, recheck ? null : log);
+                if (filter == null) { if (!recheck) log?.Invoke($"Standard grabber: dispositivo «{friendlyName}» non trovato"); return null; }
+                if (!(filter is IAMAnalogVideoDecoder dec))
+                {
+                    if (!recheck) log?.Invoke($"Standard grabber: «{friendlyName}» non permette di cambiarlo da programma — impostalo da «Driver video…» (scheda Decoder video) su {want}");
+                    return null;
+                }
+                var info = Read(dec);
+                if (TvSame(info.CurrentKey, want))
+                {
+                    if (!recheck) log?.Invoke($"Standard grabber: {info.CurrentKey} (già impostato){Det(info)}");
+                    return info.CurrentKey;
+                }
+                string target = null;
+                foreach (var c in TvCandidates(want))
+                    if (info.Available == 0 || (info.Available & TvFlag(c)) != 0) { target = c; break; }
+                if (target == null)
+                {
+                    log?.Invoke($"Standard grabber: il driver non ha {want} (ha: {string.Join(", ", info.AvailableKeys)}) — resta {info.CurrentKey}");
+                    return info.CurrentKey;
+                }
+                if (TvSame(info.CurrentKey, target)) return info.CurrentKey;
+                int hr = dec.put_TVFormat(TvFlag(target));
+                if (hr != 0)
+                {
+                    log?.Invoke($"Standard grabber: il driver ha rifiutato {target} (hr=0x{hr:X8}) — resta {info.CurrentKey}");
+                    return info.CurrentKey;
+                }
+                System.Threading.Thread.Sleep(200);   // il decoder ci mette un attimo a riagganciarsi
+                var after = Read(dec);
+                string why = recheck ? " (il driver l'aveva cambiato all'apertura)" : "";
+                string alt = target != want ? $" — {want} non c'è, uso {target}" : "";
+                log?.Invoke($"Standard grabber: {info.CurrentKey} → {after.CurrentKey}{why}{alt}{Det(after)}");
+                return after.CurrentKey;
+            }
+            catch (Exception ex) { log?.Invoke("Standard grabber: " + ex.Message); return null; }
+            finally { if (filter != null) try { Marshal.ReleaseComObject(filter); } catch { } }
+        }
+
+        static string Det(TvInfo i)
+        {
+            string s = "";
+            if (i.Lines > 0) s += $" · righe {i.Lines}";
+            if (i.Locked >= 0) s += i.Locked != 0 ? " · segnale agganciato" : " · segnale non agganciato";
+            return s;
         }
 
         /// <summary>Fallback: fa mostrare il dialogo a ffmpeg (richiede il dispositivo libero). kind: "video", "crossbar", "audio".</summary>

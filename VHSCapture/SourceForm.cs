@@ -33,6 +33,20 @@ namespace VHSCapture
         readonly Func<string, string> getInputInfo;
         // standard video (PAL/NTSC/Personalizzato)
         ComboBox cbStandard; Label lblStd; bool applyingStd;
+        // standard del grabber (scheda "Decoder video" del driver), impostato da VHSCapture prima della cattura
+        ComboBox cbTv; Label lblTv; System.Windows.Forms.Timer tvTimer;
+        static readonly (string key, string label)[] TvChoices =
+        {
+            ("", "Non toccare (lo imposti tu da «Driver video…»)"),
+            ("PAL_B", "PAL B/G  —  Italia / Europa"),
+            ("NTSC_M", "NTSC M  —  lettore NTSC vero"),
+            ("PAL_60", "PAL-60  —  cassetta NTSC su videoregistratore PAL"),
+            ("NTSC_433", "NTSC 4.43  —  cassetta NTSC su videoregistratore PAL"),
+            ("PAL_M", "PAL M  —  Brasile"),
+            ("PAL_N", "PAL N  —  Argentina / Uruguay / Paraguay"),
+            ("SECAM_L", "SECAM L  —  Francia"),
+            ("SECAM_D", "SECAM D/K  —  Est Europa / Russia"),
+        };
         /// <summary>Frame rate della registrazione richiesto dallo standard scelto qui (null = nessuna richiesta).</summary>
         public string CanvasFpsRequest { get; private set; }
         TextBox txtImage;
@@ -69,7 +83,14 @@ namespace VHSCapture
             pvTimer.Tick += (o, e) => UpdatePreview();
             pvTimer.Start();
             structTimer = new System.Windows.Forms.Timer { Interval = 600 };
-            structTimer.Tick += (o, e) => { structTimer.Stop(); PullStructural(); structuralSent = true; onStructural?.Invoke(work); };
+            structTimer.Tick += (o, e) => { structTimer.Stop(); PullStructural(); structuralSent = true; onStructural?.Invoke(work); tvTimer?.Stop(); tvTimer?.Start(); };
+            if (cbTv != null)
+            {
+                // dopo un riavvio dell'anteprima rileggo dal driver standard, righe e aggancio
+                tvTimer = new System.Windows.Forms.Timer { Interval = 2500 };
+                tvTimer.Tick += (o, e) => { tvTimer.Stop(); RefreshTvInfo(); };
+                RefreshTvInfo();
+            }
 
             if (cbStandard != null)
             {
@@ -77,6 +98,7 @@ namespace VHSCapture
                 cbFps.TextChanged += (o, e) => DetectStandard();
                 cbDeint.SelectedIndexChanged += (o, e) => DetectStandard();
                 foreach (var n in new[] { nCropL, nCropT, nCropR, nCropB }) n.ValueChanged += (o, e) => DetectStandard();
+                if (cbTv != null) cbTv.SelectedIndexChanged += (o, e) => DetectStandard();
                 DetectStandard();
                 if (structuralLocked) cbStandard.Enabled = false;   // in registrazione non si cambia
             }
@@ -96,6 +118,7 @@ namespace VHSCapture
                 cbSize.Text = v.Size;
                 cbFps.Text = v.InFps;
                 cbDeint.SelectedIndex = 2;   // Yadif 2x
+                SelTv(v.Tv);                 // e lo standard del grabber che va con risoluzione e fps
                 nCropL.Value = 0; nCropT.Value = 0; nCropR.Value = 0; nCropB.Value = v.CropB;
                 // proporzioni 4:3 al centro del canvas 1920x1080, bande ai lati
                 work.InputSize = v.Size; PullCrop();
@@ -118,9 +141,10 @@ namespace VHSCapture
                 InputFps = string.IsNullOrWhiteSpace(cbFps.Text) ? "auto" : cbFps.Text.Trim(),
                 DeinterlaceMode = cbDeint.SelectedIndex switch { 1 => "yadif", 2 => "yadif2x", 3 => "bwdif", 4 => "bwdif2x", _ => "off" },
                 CropL = (int)nCropL.Value, CropT = (int)nCropT.Value, CropR = (int)nCropR.Value, CropB = (int)nCropB.Value,
+                TvStandard = TvKey(),
             };
             var d = VideoStandard.Detect(tmp);
-            int idx = d == VideoStandard.PAL ? 0 : d == VideoStandard.NTSC ? 1 : 2;
+            int idx = d == null ? VideoStandard.All.Length : Array.IndexOf(VideoStandard.All, d);
             if (cbStandard.SelectedIndex != idx)
             {
                 bool was = applyingStd; applyingStd = true;
@@ -136,23 +160,38 @@ namespace VHSCapture
             lblStd.Text = cbStandard.SelectedIndex switch
             {
                 0 => "PAL  —  VHS, S-VHS, Hi8, Video8, MiniDV (Italia/Europa)\n" +
+                     "Grabber:           PAL B/G (lo imposta VHSCapture)\n" +
                      "Ingresso:          720 × 576  ·  25 fps (50 semiquadri)\n" +
                      "Deinterlaccio:   Yadif 2x  →  50 fotogrammi pieni\n" +
                      "Ritaglio:           8 righe in basso (striscia di rumore)\n" +
                      "Immagine:        4:3 al centro, bande nere ai lati\n" +
                      "Registrazione:  1920 × 1080  ·  50 fps",
-                1 => "NTSC  —  cassette americane / giapponesi\n" +
+                1 => "NTSC  —  cassette NTSC con un lettore NTSC vero\n" +
+                     "Grabber:           NTSC M (lo imposta VHSCapture)\n" +
                      "Ingresso:          720 × 480  ·  29,97 fps (59,94 semiquadri)\n" +
                      "Deinterlaccio:   Yadif 2x  →  59,94 fotogrammi pieni\n" +
                      "Ritaglio:           6 righe in basso\n" +
                      "Immagine:        4:3 al centro, bande nere ai lati\n" +
                      "Registrazione:  1920 × 1080  ·  59,94 fps\n" +
-                     "⚠ Grabber su NTSC_M (Driver video…) e lettore che riproduca l'NTSC",
+                     "⚠ Con un videoregistratore PAL viene in bianco e nero: usa «NTSC su videoregistratore PAL»",
+                2 => "NTSC su videoregistratore PAL  —  PAL-60\n" +
+                     "Cassette NTSC (USA, Sudamerica, Giappone…) lette da un VCR PAL: il VCR manda 525 righe\n" +
+                     "a 60 Hz ma col colore PAL. Il grabber va su PAL-60: immagine intera E a colori.\n" +
+                     "Grabber:           PAL-60 (lo imposta VHSCapture)\n" +
+                     "Ingresso:          720 × 480  ·  29,97 fps  →  Yadif 2x  →  59,94 fotogrammi pieni\n" +
+                     "Registrazione:  1920 × 1080  ·  59,94 fps, 4:3 al centro\n" +
+                     "Colori sbagliati o a strisce orizzontali? Prova la variante «NTSC 4.43».",
+                3 => "NTSC su videoregistratore PAL  —  NTSC 4.43\n" +
+                     "Come PAL-60, per i VCR (soprattutto vecchi) che mandano NTSC 4.43 invece di PAL-60.\n" +
+                     "Grabber:           NTSC 4.43 (lo imposta VHSCapture)\n" +
+                     "Ingresso:          720 × 480  ·  29,97 fps  →  Yadif 2x  →  59,94 fotogrammi pieni\n" +
+                     "Registrazione:  1920 × 1080  ·  59,94 fps, 4:3 al centro\n" +
+                     "Colori sbagliati o a strisce orizzontali? Torna su «PAL-60».",
                 _ => "Personalizzato  —  valori scelti a mano, lo standard non è applicato.\n" +
-                     "Scegli PAL o NTSC per rimettere i valori standard.",
+                     "Scegli uno standard dal menu per rimettere i valori giusti (grabber compreso).",
             };
             bool dark = Theme.Dark;
-            lblStd.BackColor = cbStandard.SelectedIndex == 2
+            lblStd.BackColor = cbStandard.SelectedIndex >= VideoStandard.All.Length
                 ? (dark ? Color.FromArgb(60, 50, 30) : Color.FromArgb(255, 244, 220))     // personalizzato: tono ambra
                 : (dark ? Color.FromArgb(32, 44, 60) : Color.FromArgb(230, 240, 252));    // standard: tono blu
             lblStd.ForeColor = dark ? Color.FromArgb(230, 230, 235) : Color.FromArgb(30, 30, 35);
@@ -160,7 +199,7 @@ namespace VHSCapture
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
-            pvTimer?.Stop(); structTimer?.Stop();
+            pvTimer?.Stop(); structTimer?.Stop(); tvTimer?.Stop();
             var old = pv.Image; pv.Image = null; old?.Dispose();
             if (DialogResult != DialogResult.OK)
             {
@@ -205,7 +244,9 @@ namespace VHSCapture
                 cbStandard = Combo();
                 cbStandard.Items.AddRange(new object[] {
                     "PAL  —  720×576 @ 25  →  1080p @ 50",
-                    "NTSC  —  720×480 @ 29,97  →  1080p @ 59,94",
+                    "NTSC  —  lettore NTSC  —  720×480 @ 29,97  →  1080p @ 59,94",
+                    "NTSC su videoregistratore PAL  —  PAL-60  →  1080p @ 59,94",
+                    "NTSC su videoregistratore PAL  —  NTSC 4.43  →  1080p @ 59,94",
                     "Personalizzato" });
                 Row(tGen, "Standard video", cbStandard, null);
                 cbStandard.Width = 360;
@@ -215,8 +256,8 @@ namespace VHSCapture
                 cbStandard.SelectedIndexChanged += (o, e) =>
                 {
                     if (loading || applyingStd) return;
-                    if (cbStandard.SelectedIndex == 0) ApplyStandard(VideoStandard.PAL);
-                    else if (cbStandard.SelectedIndex == 1) ApplyStandard(VideoStandard.NTSC);
+                    int si = cbStandard.SelectedIndex;
+                    if (si >= 0 && si < VideoStandard.All.Length) ApplyStandard(VideoStandard.All[si]);
                     UpdateStdNote();
                 };
                 cbVideo = Combo(); cbAudio = Combo();
@@ -224,6 +265,12 @@ namespace VHSCapture
                 btnRefresh.Click += (o, e) => RefreshDevices(true);
                 Row(tGen, "Dispositivo video", cbVideo, btnRefresh);
                 Row(tGen, "Dispositivo audio", cbAudio, null);
+                cbTv = Combo();
+                foreach (var t in TvChoices) cbTv.Items.Add(t.label);
+                Row(tGen, "Standard nel grabber", cbTv, null);
+                lblTv = Muted("", 560);
+                Full(tGen, lblTv);
+                cbTv.SelectedIndexChanged += (o, e) => StructChanged();
                 cbSize = Combo(); cbSize.DropDownStyle = ComboBoxStyle.DropDown;
                 cbFps = Combo(); cbFps.DropDownStyle = ComboBoxStyle.DropDown;
                 cbFps.Items.AddRange(new object[] { "auto", "5", "10", "15", "20", "23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60", "75", "90", "100", "120", "144" });
@@ -249,16 +296,17 @@ namespace VHSCapture
                 bCross.Click += (o, e) => OpenDriverPage("crossbar");
                 bDrvAudio.Click += (o, e) => OpenDriverPage("audio");
                 Full(tGen, ButtonRow(bDrvVideo, bCross, bDrvAudio));
-                Full(tGen, Muted("Finestre del driver: standard video (PAL/NTSC), ingresso, regolazioni hardware.", 560));
+                Full(tGen, Muted("Finestre del driver: ingresso, regolazioni hardware. Lo standard del grabber lo imposta VHSCapture " +
+                                 "(riga «Standard nel grabber»): se lo cambi dal driver, VHSCapture si adegua.", 560));
 
-                cbVideo.SelectedIndexChanged += (o, e) => { RefreshSizes(); StructChanged(); };
+                cbVideo.SelectedIndexChanged += (o, e) => { RefreshSizes(); StructChanged(); if (!loading) RefreshTvInfo(); };
                 cbAudio.SelectedIndexChanged += (o, e) => StructChanged();
                 cbSize.TextChanged += (o, e) => StructChanged();
                 cbFps.TextChanged += (o, e) => StructChanged();
                 cbDeint.SelectedIndexChanged += (o, e) => StructChanged();
                 cbFormat.SelectedIndexChanged += (o, e) => StructChanged();
                 nRtBuf.ValueChanged += (o, e) => StructChanged();
-                if (structuralLocked) foreach (Control c in new Control[] { cbVideo, cbAudio, cbSize, cbFps, nRtBuf, cbDeint, cbFormat, btnRefresh, bCross }) c.Enabled = false;
+                if (structuralLocked) foreach (Control c in new Control[] { cbVideo, cbAudio, cbSize, cbFps, nRtBuf, cbDeint, cbFormat, btnRefresh, bCross, cbTv }) c.Enabled = false;
             }
             else if (work.Type == SourceType.Image)
             {
@@ -512,6 +560,7 @@ namespace VHSCapture
                 nRtBuf.Value = Math.Clamp(work.RtBufMB, 64, 4096);
                 cbDeint.SelectedIndex = work.DeinterlaceMode switch { "yadif" => 1, "yadif2x" => 2, "bwdif" => 3, "bwdif2x" => 4, _ => 0 };
                 cbFormat.SelectedIndex = work.VideoFormat switch { "mjpeg" => 1, "yuyv422" => 2, "nv12" => 3, _ => 0 };
+                SelTv(work.TvStandard);
                 nCropL.Value = Math.Clamp(work.CropL, 0, 4000); nCropT.Value = Math.Clamp(work.CropT, 0, 4000);
                 nCropR.Value = Math.Clamp(work.CropR, 0, 4000); nCropB.Value = Math.Clamp(work.CropB, 0, 4000);
                 nAudioOff.Value = Math.Clamp(work.AudioOffsetMs, -2000, 2000);
@@ -576,6 +625,7 @@ namespace VHSCapture
                 work.DeinterlaceMode = cbDeint.SelectedIndex switch { 1 => "yadif", 2 => "yadif2x", 3 => "bwdif", 4 => "bwdif2x", _ => "off" };
                 work.VideoFormat = cbFormat.SelectedIndex switch { 1 => "mjpeg", 2 => "yuyv422", 3 => "nv12", _ => "auto" };
                 work.AudioOffsetMs = (int)nAudioOff.Value;
+                work.TvStandard = TvKey();
             }
             else if (work.Type == SourceType.Image) { if (File.Exists(txtImage.Text)) work.ImagePath = txtImage.Text; }
             else work.Color = ColorTranslator.ToHtml(Color.FromArgb(colorSwatch.BackColor.R, colorSwatch.BackColor.G, colorSwatch.BackColor.B));
@@ -606,10 +656,75 @@ namespace VHSCapture
             bool audio = kind == "audio";
             string dev = audio ? (cbAudio.Text.StartsWith("(") ? "" : cbAudio.Text) : (cbVideo.Text.StartsWith("(") ? "" : cbVideo.Text);
             if (string.IsNullOrEmpty(dev)) { MessageBox.Show(this, "Seleziona prima il dispositivo.", "VHSCapture"); return; }
-            if (kind != "crossbar" && DShowProps.ShowNative(Handle, dev, !audio, log)) return;
+            if (kind != "crossbar" && DShowProps.ShowNative(Handle, dev, !audio, log)) { if (kind == "video") AfterDriverPage(dev); return; }
             if (structuralLocked) { MessageBox.Show(this, "Ferma la registrazione per aprire questa pagina.", "VHSCapture"); return; }
             if (withDeviceFree != null) withDeviceFree(() => DShowProps.ShowViaFFmpeg(dev, kind, log));
             else DShowProps.ShowViaFFmpeg(dev, kind, log);
+            if (kind == "video") AfterDriverPage(dev);
+        }
+
+        // ================= standard del grabber =================
+        string TvKey() => cbTv != null && cbTv.SelectedIndex > 0 && cbTv.SelectedIndex < TvChoices.Length ? TvChoices[cbTv.SelectedIndex].key : "";
+
+        void SelTv(string key)
+        {
+            if (cbTv == null) return;
+            int i = Array.FindIndex(TvChoices, t => t.key == (key ?? ""));
+            if (i < 0) i = Array.FindIndex(TvChoices, t => DShowProps.TvSame(t.key, key));   // es. PAL_G → PAL B/G
+            cbTv.SelectedIndex = i < 0 ? 0 : i;
+        }
+
+        /// <summary>Cosa c'è adesso nel grabber: standard, righe rilevate, aggancio e standard che il driver accetta.</summary>
+        void RefreshTvInfo()
+        {
+            if (lblTv == null || IsDisposed) return;
+            if (structuralLocked)
+            {
+                // in registrazione non apro il driver: mostro solo cosa è stato scelto
+                lblTv.Text = "In registrazione: lo standard non si cambia.";
+                return;
+            }
+            string dev = cbVideo.Text.StartsWith("(") ? "" : cbVideo.Text;
+            if (string.IsNullOrEmpty(dev)) { lblTv.Text = ""; return; }
+            var i = DShowProps.ReadTv(dev);
+            if (!i.Found) { lblTv.Text = "Dispositivo non trovato."; return; }
+            if (!i.Supported)
+            {
+                lblTv.Text = "Questo grabber non permette di cambiare lo standard da programma: impostalo a mano da «Driver video…» (scheda Decoder video).";
+                return;
+            }
+            string righe = i.Lines > 0 ? $" · righe rilevate {i.Lines}" + (i.Lines == 525 ? " (60 Hz)" : i.Lines == 625 ? " (50 Hz)" : "") : "";
+            string agg = i.Locked >= 0 ? (i.Locked != 0 ? " · segnale agganciato" : " · segnale NON agganciato") : "";
+            string sup = i.Available != 0 ? "\nIl grabber accetta: " + string.Join(", ", i.AvailableKeys) : "";
+            string want = TvKey();
+            string warn = "";
+            if (want == "PAL_60" && i.Available != 0 && (i.Available & DShowProps.TvFlag("PAL_60")) == 0)
+                warn = "\n⚠ Questo grabber non ha PAL-60: VHSCapture usa NTSC 4.43.";
+            else if (want == "NTSC_433" && i.Available != 0 && (i.Available & DShowProps.TvFlag("NTSC_433")) == 0)
+                warn = "\n⚠ Questo grabber non ha NTSC 4.43: VHSCapture usa PAL-60.";
+            // righe rilevate col segnale agganciato che non tornano con la risoluzione scelta = standard sbagliato per questa cassetta
+            string size = (cbSize.Text ?? "").Trim();
+            if (i.Locked != 0 && i.Lines == 625 && size == "720x480")
+                warn += "\n⚠ Il segnale arriva a 625 righe (50 Hz): se il nastro è in Play il videoregistratore manda PAL → prova lo standard «PAL».";
+            else if (i.Locked != 0 && i.Lines == 525 && size == "720x576")
+                warn += "\n⚠ Il segnale arriva a 525 righe (60 Hz): cassetta NTSC → prova «NTSC su videoregistratore PAL — PAL-60».";
+            lblTv.Text = $"Ora nel grabber: {i.CurrentKey}{righe}{agg}{sup}{warn}\n" +
+                         "Le righe si leggono col nastro in Play: 525 = NTSC/PAL-60, 625 = PAL (anche il menu blu del VCR è a 625).";
+        }
+
+        /// <summary>Se dalla pagina del driver hai scelto un altro standard, lo tengo (altrimenti al riavvio rimetterei il vecchio).</summary>
+        void AfterDriverPage(string dev)
+        {
+            if (cbTv == null || structuralLocked) { RefreshTvInfo(); return; }
+            var i = DShowProps.ReadTv(dev);
+            string want = TvKey();
+            if (i.Supported && want != "" && i.Current != 0 && !DShowProps.TvSame(i.CurrentKey, want))
+            {
+                log?.Invoke($"Standard grabber: scelto {i.CurrentKey} dalla pagina del driver, lo tengo");
+                SelTv(i.CurrentKey);
+                if (!DShowProps.TvSame(TvKey(), i.CurrentKey)) SelTv("");   // standard fuori menu: non lo tocco più
+            }
+            RefreshTvInfo();
         }
 
         void RefreshDevices(bool keep)

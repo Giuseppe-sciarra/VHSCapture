@@ -83,7 +83,10 @@ namespace VHSCapture
         // stima continua: media mobile dell'indice U·V (negativo = arancio/blu = giusto); se resta positiva a lungo si gira
         double ema; int emaBad;
         public const int EmaConfirm = 30;        // ~1 s di colori "viola/verde" di fila
-        public const double EmaStrong = 0.10;
+        public const double EmaStrong = 0.25;    // alto: un vestito viola o un prato non devono bastare (misurato: fase girata ≈ +0,45, giusta ≈ −0,1…−0,5)
+        // Invertendo V un viola vero diventa blu: a posteriori l'indice non distingue «scena viola» da «fase sbagliata».
+        // Quindi il controllo lento è prudente e dopo ogni intervento sta fermo: 10 s se automatico, 60 s dopo il tasto.
+        int frames, suspendUntil = -1;
 
         /// <summary>Soglie (pubbliche per i test).</summary>
         public const int PriorMinFrames = 45, PriorMaxFrames = 300;
@@ -92,13 +95,14 @@ namespace VHSCapture
         public void Reset()
         {
             havePrev = false; priorSum = priorNorm = 0; priorFrames = 0; Decided = false; expectFlip = 0; pendingFlip = false; ema = 0; emaBad = 0;
+            suspendUntil = -1;
         }
 
         /// <summary>Da chiamare quando si inverte V (automaticamente o col tasto): il prossimo rovesciamento è nostro.</summary>
-        public void ExpectFlip() { expectFlip = 60; Toggles++; pendingFlip = false; ema = 0; emaBad = 0; }
+        public void ExpectFlip() { expectFlip = 20; Toggles++; pendingFlip = false; ema = 0; emaBad = 0; }   // lo zmq arriva in 3-6 fotogrammi
 
         /// <summary>Inversione col tasto: la scelta di chi guarda vale più della stima automatica.</summary>
-        public void ManualToggle() { ExpectFlip(); Decided = true; LastReason = "invertito a mano"; }
+        public void ManualToggle() { ExpectFlip(); Decided = true; suspendUntil = frames + 1800; LastReason = "invertito a mano (automatico fermo per 60 s)"; }
 
         static double Corr(double sxy, double sxx, double syy) => sxy / Math.Sqrt(Math.Max(1e-9, sxx * syy));
 
@@ -127,27 +131,28 @@ namespace VHSCapture
                 }
             bool toggle = false;
             bool cut = false;
+            frames++;
 
             if (havePrev)
             {
                 double cY = Corr(spy, syy, spp), cV = Corr(svp, svv, sqp), cU = Corr(sup, suu, squ);
                 double eV = Math.Sqrt(Math.Min(svv, sqp) / n);
                 cut = cY < 0.3 && cU < 0.3;   // cambio di scena: luminanza e U non hanno più niente in comune
-                // rovesciamento: U resta uguale (stessa scena, anche con movimento) ma V cambia segno in blocco
-                bool flipNow = cU > 0.5 && cV < -0.5 && eV > 2.0 && cY > -0.2;
+                // rovesciamento: stessa scena (luminanza e U correlate) ma V cambia segno in blocco, E l'immagine nuova
+                // è davvero sull'asse viola/verde (indice U·V > 0): una giunta o un disturbo di tracking non passa
+                double idxNow = pn > 0 ? ps / pn : 0;
+                bool reversal = cU > 0.6 && cV < -0.6 && eV > 2.0 && cY > 0.5;
                 if (pendingFlip)
                 {
                     // confermato solo se anche questo fotogramma sta dalla parte "nuova" (V concorde col fotogramma sospetto)
                     double cPend = Corr(svd, svv, sdd);
-                    if (cPend > 0.5)
-                    {
-                        if (expectFlip > 0) expectFlip = 0;        // è il nostro cambio che è arrivato
-                        else { toggle = true; LastReason = "colore rovesciato di colpo (fotogramma perso dal grabber o giunta del nastro)"; }
-                    }
+                    if (cPend > 0.5) { toggle = true; LastReason = "colore rovesciato di colpo (fotogramma perso dal grabber o giunta del nastro)"; }
                     pendingFlip = false;
                 }
-                else if (flipNow)
+                else if (reversal && expectFlip > 0) expectFlip = 0;   // è il nostro cambio che è arrivato (l'immagine ora è giusta)
+                else if (reversal && idxNow > 0.03 && pn / n > 40)
                 {
+                    // rovesciamento vero: stessa scena, V girato in blocco E immagine ora sull'asse viola/verde
                     pendingFlip = true;
                     for (int i = 0; i < N; i++) pendV[i] = f[2 * N + i] - 128;
                 }
@@ -175,9 +180,12 @@ namespace VHSCapture
                 }
                 else if (colored)
                 {
-                    ema = 0.9 * ema + 0.1 * frameIdx;
-                    if (ema > EmaStrong) emaBad++; else emaBad = 0;
-                    if (emaBad >= EmaConfirm) { toggle = true; emaBad = 0; LastReason = $"colori tornati viola/verdi da 1 s (indice {ema:+0.00;-0.00})"; }
+                    ema = 0.8 * ema + 0.2 * frameIdx;
+                    if (frames >= suspendUntil)
+                    {
+                        if (ema > EmaStrong) emaBad++; else emaBad = 0;
+                        if (emaBad >= EmaConfirm) { toggle = true; emaBad = 0; suspendUntil = frames + 300; LastReason = $"colori viola/verdi da 1 s (indice {ema:+0.00;-0.00})"; }
+                    }
                 }
             }
 

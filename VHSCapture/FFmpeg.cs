@@ -1021,6 +1021,8 @@ namespace VHSCapture
                             {
                                 Log?.Invoke($"Standard grabber: cambio dal vivo {DShowProps.TvOpen(std)} → {DShowProps.TvLive(std)} (cattura avviata)");
                                 DShowProps.ApplyTv(dev, DShowProps.TvLive(std), l => Log?.Invoke(l));
+                                // il colore arriva solo da adesso: la scelta della fase riparte da zero (prima giudicava immagini senza colore)
+                                foreach (var kv in palMon) if (runningSources.TryGetValue(kv.Key, out var rs) && rs.VideoDevice == dev) lock (kv.Value) kv.Value.Reset();
                             }
                         }
                         Thread.Sleep(4000);

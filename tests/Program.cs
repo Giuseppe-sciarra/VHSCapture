@@ -216,12 +216,19 @@ var mDrop = new PalPhaseMonitor(); int tD = -1; for (int i = 0; i < 70; i++) if 
 Check(tD == 61, "Monitor: rovesciamento di colpo (fotogramma perso) riconosciuto e confermato al fotogramma dopo");
 var mGl = new PalPhaseMonitor(); bool tG = false; for (int i = 0; i < 80; i++) tG |= mGl.Observe(Img(30, i == 60 ? 20 : -20, i));
 Check(!tG, "Monitor: disturbo di un solo fotogramma ignorato");
+// contenuto davvero viola (indice moderato +0.15) con fase giusta: nessuna inversione
+var mPurple = new PalPhaseMonitor(); bool tP = false; for (int i = 0; i < 200; i++) tP |= mPurple.Observe(Img(30, i < 60 ? -20 : 6, i < 60 ? i : i * 7 + 500));   // dopo lo stacco la scena è un'altra
+Check(!tP, "Monitor: scena con un po' di viola vero non fa scattare l'inversione");
+// scena fortemente viola per 10 s: al massimo UNA inversione del controllo lento, poi fermo
+var mPP = new PalPhaseMonitor(); var ev = new System.Collections.Generic.List<int>();
+for (int i = 0; i < 400; i++) { if (mPP.Observe(Img(30, i < 60 ? -20 : 25, i < 60 ? i : i * 7 + 500))) { ev.Add(i); mPP.ExpectFlip(); } }
+Check(ev.Count == 1 && ev[0] > 60 + PalPhaseMonitor.EmaConfirm && mPP.LastReason.StartsWith("colori viola"), "Monitor: controllo lento prudente, una sola inversione poi fermo");
 var mLate = new PalPhaseMonitor(); int tL = -1; for (int i = 0; i < 200; i++) if (mLate.Observe(Img(30, i < 100 ? -20 : 20, i * (i < 100 ? 1 : 9) + (i < 100 ? 0 : 500))) && tL < 0) tL = i;
 Check(tL > 100 && tL <= 100 + PalPhaseMonitor.EmaConfirm + 12, "Monitor: dopo una giunta con fase girata si corregge entro ~1,5 s");
 Check(PalSoftware.Filter("[0:v]", "[o]", "s", "0").Contains("1.5*"), "Guadagno crominanza 1,5 nel filtro");
-var mOwn = new PalPhaseMonitor(); for (int i = 0; i < 50; i++) mOwn.Observe(Img(30, -20, i)); mOwn.ExpectFlip(); bool tO = false;
-for (int i = 50; i < 70; i++) tO |= mOwn.Observe(Img(30, i < 53 ? -20 : 20, i));
-Check(!tO, "Monitor: il rovesciamento chiesto da noi non conta");
+var mOwn = new PalPhaseMonitor(); int tO1 = -1; for (int i = 0; i < 50; i++) if (mOwn.Observe(Img(30, 20, i)) && tO1 < 0) { tO1 = i; mOwn.ExpectFlip(); }
+bool tO = false; for (int i = 50; i < 110; i++) tO |= mOwn.Observe(Img(30, i < 53 ? 20 : -20, i));   // 3 fotogrammi di latenza, poi colori giusti
+Check(tO1 > 0 && !tO, "Monitor: il rovesciamento chiesto da noi non conta e dopo non si tocca più");
 var mCut = new PalPhaseMonitor(); bool tC = false; for (int i = 0; i < 70; i++) { var f = Img(30, -20, i); if (i >= 60) { f = Img(-25, 20, i * 7 + 40); for (int q = 0; q < NoSignalDetector.W * NoSignalDetector.H; q++) f[q] = (byte)(255 - f[q]); } tC |= mCut.Observe(f); }
 Check(!tC, "Monitor: cambio di scena (luce calda dopo luce fredda) non scambiato per un rovesciamento");
 var tvS = Settings(); var tvArgs1 = Args(tvS, false); tvS.Sources[0].TvStandard = "PAL_60"; var tvArgs2 = Args(tvS, false);

@@ -35,6 +35,7 @@ namespace VHSCapture
         ComboBox cbStandard; Label lblStd; bool applyingStd;
         // standard del grabber (scheda "Decoder video" del driver), impostato da VHSCapture prima della cattura
         ComboBox cbTv; Label lblTv; System.Windows.Forms.Timer tvTimer;
+        Button btnPalInv; readonly Func<string, bool> palToggle;   // PAL-60 col colore rifatto: inverte V dal vivo
         static readonly (string key, string label)[] TvChoices =
         {
             ("", "Non toccare (lo imposti tu da «Driver video…»)"),
@@ -42,6 +43,8 @@ namespace VHSCapture
             ("NTSC_M", "NTSC M  —  lettore NTSC vero"),
             ("PAL_60", "PAL-60  —  cassetta NTSC su videoregistratore PAL"),
             ("NTSC_433", "NTSC 4.43  —  cassetta NTSC su videoregistratore PAL"),
+            ("NTSC_M>PAL_B", "NTSC M → PAL B/G dal vivo  —  cassetta NTSC su VCR PAL (grabber senza PAL-60)"),
+            ("NTSC_M>" + PalSoftware.TvKey, "PAL-60 col colore rifatto da VHSCapture  —  cassetta NTSC su VCR PAL (USB 2828x)"),
             ("PAL_M", "PAL M  —  Brasile"),
             ("PAL_N", "PAL N  —  Argentina / Uruguay / Paraguay"),
             ("SECAM_L", "SECAM L  —  Francia"),
@@ -58,9 +61,10 @@ namespace VHSCapture
 
         public SourceForm(Source src, AppSettings settings, bool lockStructural,
                           Action<Source> live, Action<Source> structural, Func<string, Bitmap> preview,
-                          Action<Action> deviceFree, Action<string> logger, Func<string, string> inputInfo = null)
+                          Action<Action> deviceFree, Action<string> logger, Func<string, string> inputInfo = null,
+                          Func<string, bool> palToggle = null)
         {
-            getInputInfo = inputInfo;
+            getInputInfo = inputInfo; this.palToggle = palToggle;
             snapshot = src.Clone(); work = src.Clone(); cfg = settings;
             onLive = live; onStructural = structural; getPreview = preview;
             withDeviceFree = deviceFree; log = logger; structuralLocked = lockStructural;
@@ -77,6 +81,7 @@ namespace VHSCapture
             Build();
             LoadValues();
             loading = false;
+            UpdatePalButton();
             Theme.Apply(this, settings.DarkTheme);
 
             pvTimer = new System.Windows.Forms.Timer { Interval = 120 };
@@ -87,7 +92,7 @@ namespace VHSCapture
             if (cbTv != null)
             {
                 // dopo un riavvio dell'anteprima rileggo dal driver standard, righe e aggancio
-                tvTimer = new System.Windows.Forms.Timer { Interval = 2500 };
+                tvTimer = new System.Windows.Forms.Timer { Interval = 5500 };   // dopo il cambio dal vivo (due tempi) e il ricontrollo
                 tvTimer.Tick += (o, e) => { tvTimer.Stop(); RefreshTvInfo(); };
                 RefreshTvInfo();
             }
@@ -189,15 +194,14 @@ namespace VHSCapture
                      "Registrazione:  1920 × 1080  ·  59,94 fps, 4:3 al centro\n" +
                      "Colori sbagliati o a strisce orizzontali? Torna su «PAL-60».\n" +
                      "Se sotto «Ora nel grabber» resta NTSC_M, il grabber non ha l'NTSC 4.43: usa «PAL B/G ricostruito».",
-                4 => "NTSC su videoregistratore PAL  —  PAL B/G ricostruito\n" +
-                     "Per i grabber che non tengono PAL-60 né NTSC 4.43 (restano su NTSC_M, colori sbagliati).\n" +
-                     "Il grabber in PAL B/G decodifica il colore giusto ma impagina a 50 Hz: VHSCapture separa i due\n" +
-                     "campi di ogni fotogramma, ritaglia il quadro buono e scarta banda nera e fotogrammi vuoti.\n" +
-                     "Grabber:           PAL B/G (lo imposta VHSCapture)\n" +
-                     "Ingresso:          720 × 576  ·  25 fps  ·  campi separati (niente Yadif: era lo sfarfallio)\n" +
-                     "Ritaglio:           112 righe in basso\n" +
+                4 => "NTSC su videoregistratore PAL  —  PAL-60 col colore rifatto da VHSCapture\n" +
+                     "Per i grabber che non decodificano il PAL a 60 Hz (es. USB 2828x: colori viola e verdi).\n" +
+                     "Il grabber lavora in NTSC (quadro intero, 30 fotogrammi pieni) e il colore PAL lo rifà\n" +
+                     "VHSCapture riga per riga, scegliendo da solo la fase giusta (anche se il grabber perde un fotogramma).\n" +
+                     "Grabber:           NTSC M all'apertura → PAL_60 (il driver risponde NTSC_M: è normale)\n" +
+                     "Ingresso:          720 × 480  ·  29,97 fps  ·  Yadif 2x  →  59,94 fotogrammi pieni\n" +
                      "Registrazione:  1920 × 1080  ·  59,94 fps, 4:3 al centro\n" +
-                     "⚠ Il grabber in questo modo dà circa 21 immagini al secondo: movimento meno fluido di un PAL/NTSC normale.",
+                     "Colori viola/verdi invece di blu/arancio? Premi «Inverti colore» qui sotto.",
                 _ => "Personalizzato  —  valori scelti a mano, lo standard non è applicato.\n" +
                      "Scegli uno standard dal menu per rimettere i valori giusti (grabber compreso).",
             };
@@ -258,7 +262,7 @@ namespace VHSCapture
                     "NTSC  —  lettore NTSC  —  720×480 @ 29,97  →  1080p @ 59,94",
                     "NTSC su videoregistratore PAL  —  PAL-60  →  1080p @ 59,94",
                     "NTSC su videoregistratore PAL  —  NTSC 4.43  →  1080p @ 59,94",
-                    "NTSC su videoregistratore PAL  —  PAL B/G ricostruito  →  1080p @ 59,94",
+                    "NTSC su videoregistratore PAL  —  PAL-60 col colore rifatto  →  1080p @ 59,94",
                     "Personalizzato" });
                 Row(tGen, "Standard video", cbStandard, null);
                 cbStandard.Width = 360;
@@ -282,7 +286,17 @@ namespace VHSCapture
                 Row(tGen, "Standard nel grabber", cbTv, null);
                 lblTv = Muted("", 560);
                 Full(tGen, lblTv);
-                cbTv.SelectedIndexChanged += (o, e) => StructChanged();
+                btnPalInv = Ui.Btn("⇄ Inverti colore", "ghost");
+                btnPalInv.Click += (o, e) =>
+                {
+                    if (palToggle == null || !palToggle(work.Id))
+                        MessageBox.Show(this, "Il colore si gira dal vivo quando l'anteprima è partita con «PAL-60 col colore rifatto» " +
+                                              "e le «Modifiche delle sorgenti al volo (zmq)» sono attive nelle Impostazioni.", "VHSCapture");
+                };
+                Full(tGen, ButtonRow(btnPalInv));
+                Full(tGen, Muted("Con «PAL-60 col colore rifatto» VHSCapture sceglie da solo la fase del colore e la corregge se il grabber perde " +
+                                 "un fotogramma. Se i colori restano viola/verdi invece di blu/arancio, premi «Inverti colore» (vale anche in registrazione).", 560));
+                cbTv.SelectedIndexChanged += (o, e) => { StructChanged(); UpdatePalButton(); };
                 cbSize = Combo(); cbSize.DropDownStyle = ComboBoxStyle.DropDown;
                 cbFps = Combo(); cbFps.DropDownStyle = ComboBoxStyle.DropDown;
                 cbFps.Items.AddRange(new object[] { "auto", "5", "10", "15", "20", "23.976", "24", "25", "29.97", "30", "48", "50", "59.94", "60", "75", "90", "100", "120", "144" });
@@ -679,6 +693,12 @@ namespace VHSCapture
         }
 
         // ================= standard del grabber =================
+        void UpdatePalButton()
+        {
+            if (btnPalInv == null) return;
+            btnPalInv.Enabled = DShowProps.TvLive(TvKey()) == PalSoftware.TvKey;
+        }
+
         string TvKey() => cbTv != null && cbTv.SelectedIndex > 0 && cbTv.SelectedIndex < TvChoices.Length ? TvChoices[cbTv.SelectedIndex].key : "";
 
         void SelTv(string key)
@@ -711,7 +731,7 @@ namespace VHSCapture
             string righe = i.Lines > 0 ? $" · righe rilevate {i.Lines}" + (i.Lines == 525 ? " (60 Hz)" : i.Lines == 625 ? " (50 Hz)" : "") : "";
             string agg = i.Locked >= 0 ? (i.Locked != 0 ? " · segnale agganciato" : " · segnale NON agganciato") : "";
             string sup = i.Available != 0 ? "\nIl grabber accetta: " + string.Join(", ", i.AvailableKeys) : "";
-            string want = TvKey();
+            string want = DShowProps.TvLive(TvKey());   // per i due tempi conta quello dal vivo
             string warn = "";
             if (want == "PAL_60" && i.Available != 0 && (i.Available & DShowProps.TvFlag("PAL_60")) == 0)
                 warn = "\n⚠ Questo grabber non ha PAL-60: VHSCapture usa NTSC 4.43.";
@@ -719,7 +739,9 @@ namespace VHSCapture
                 warn = "\n⚠ Questo grabber non ha NTSC 4.43: VHSCapture usa PAL-60.";
             // il driver lo elenca ma non lo tiene (USB 2828x: PAL_60 e NTSC_433 tornano NTSC_M)
             bool alt = (want == "PAL_60" && DShowProps.TvSame(i.CurrentKey, "NTSC_433")) || (want == "NTSC_433" && DShowProps.TvSame(i.CurrentKey, "PAL_60"));
-            if (want != "" && i.Current != 0 && !DShowProps.TvSame(i.CurrentKey, want) && !alt)
+            if (want == PalSoftware.TvKey)
+                warn = "\nIl driver risponde NTSC_M anche con PAL_60 scritto: è normale, il colore PAL lo rifà VHSCapture.";
+            else if (want != "" && i.Current != 0 && !DShowProps.TvSame(i.CurrentKey, want) && !alt)
             {
                 warn += $"\n⚠ Il grabber non ha tenuto {want}: è su {i.CurrentKey}.";
                 if (want == "PAL_60" || want == "NTSC_433")
@@ -740,7 +762,8 @@ namespace VHSCapture
         {
             if (cbTv == null || structuralLocked) { RefreshTvInfo(); return; }
             var i = DShowProps.ReadTv(dev);
-            string want = TvKey();
+            string want = DShowProps.TvLive(TvKey());
+            if (want == PalSoftware.TvKey) { RefreshTvInfo(); return; }   // risponde sempre NTSC_M: non è un cambio fatto a mano
             if (i.Supported && want != "" && i.Current != 0 && !DShowProps.TvSame(i.CurrentKey, want))
             {
                 log?.Invoke($"Standard grabber: scelto {i.CurrentKey} dalla pagina del driver, lo tengo");

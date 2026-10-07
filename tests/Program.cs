@@ -176,22 +176,49 @@ var tvA = new Source { TvStandard = "PAL_B" }; var tvB = tvA.Clone(); tvB.TvStan
 Check(!tvA.StructurallyEquals(tvB), "Cambiare lo standard del grabber riavvia la cattura");
 tvA.CopyStructuralFrom(tvB);
 Check(tvA.TvStandard == "PAL_60", "Lo standard del grabber segue la sorgente nelle copie");
-// ricostruzione NTSC su grabber senza PAL-60 (USB 2828x): PAL B/G a 720×576, campi separati, ritaglio 112, fotogrammi vuoti scartati
-var rb = new Source { Type = SourceType.Capture, InputSize = "720x576", InputFps = "25", DeinterlaceMode = "fields", CropB = 112, TvStandard = "PAL_B" };
-Check(VideoStandard.Detect(rb) == VideoStandard.NTSC_PALB && rb.IsNtscRebuild && VideoStandard.NTSC_PALB.CanvasFps == "59.94", "Preset NTSC su VCR PAL (PAL B/G ricostruito) riconosciuto");
+// cassette NTSC su VCR PAL con grabber senza PAL-60 (USB 2828x): apertura NTSC_M, PAL_B dal vivo, 720×480, campi separati, ritaglio 10
+Check(DShowProps.TvOpen("NTSC_M>PAL_B") == "NTSC_M" && DShowProps.TvLive("NTSC_M>PAL_B") == "PAL_B" && DShowProps.TvOpen("PAL_B") == "PAL_B" && DShowProps.TvLive("PAL_60") == "PAL_60" && !DShowProps.TvTwoPhase("PAL_B") && DShowProps.TvOpen(null) == "", "Standard a due fasi: apertura e dal vivo");
+var rb = new Source { Type = SourceType.Capture, InputSize = "720x480", InputFps = "29.97", DeinterlaceMode = "fields", CropB = 10, TvStandard = "NTSC_M>PAL_B" };
+Check(rb.IsNtscRebuild && Array.IndexOf(VideoStandard.All, VideoStandard.NTSC_PALB) < 0, "NTSC M → PAL B/G dal vivo resta disponibile a mano (fuori dal menu dei preset)");
 Check(!new Source { Type = SourceType.Capture, InputSize = "720x576", DeinterlaceMode = "yadif2x", TvStandard = "PAL_B" }.IsNtscRebuild &&
       !new Source { Type = SourceType.Capture, InputSize = "720x480", TvStandard = "NTSC_M" }.IsNtscRebuild &&
-      new Source { Type = SourceType.Capture, InputSize = "720x480", DeinterlaceMode = "off", TvStandard = "PAL_B" }.IsNtscRebuild, "Ricostruzione solo col grabber in PAL B/G (campi separati o 720×480)");
-Check(rb.NaturalSize() == (618, 464), "Ricostruzione: 464 righe utili restano 4:3");
-var rbS = Settings(); rbS.Sources[0].InputSize = "720x576"; rbS.Sources[0].InputFps = "25"; rbS.Sources[0].DeinterlaceMode = "fields"; rbS.Sources[0].CropB = 112; rbS.Sources[0].TvStandard = "PAL_B";
+      new Source { Type = SourceType.Capture, InputSize = "720x480", DeinterlaceMode = "bwdif2x", TvStandard = "NTSC_M>PAL_B" }.IsNtscRebuild, "Ricostruzione riconosciuta anche cambiando il deinterlaccio");
+Check(rb.NaturalSize() == (626, 470), "470 righe utili restano 4:3");
+var rbS = Settings(); rbS.Sources[0].InputSize = "720x480"; rbS.Sources[0].InputFps = "29.97"; rbS.Sources[0].DeinterlaceMode = "fields"; rbS.Sources[0].CropB = 10; rbS.Sources[0].TvStandard = "NTSC_M>PAL_B";
 var rbCpu = Args(rbS, false); var rbCpuAn = Args(rbS, false, analysis: true); var rbGpu = Args(rbS, true); var rbGpuAn = Args(rbS, true, analysis: true);
 Check(rbCpu.Contains(CaptureEngine.DropEmptyFrames) && rbCpuAn.Contains(CaptureEngine.DropEmptyFrames + ",split=2") && rbGpu.Contains(CaptureEngine.DropEmptyFrames) && rbGpuAn.Contains(CaptureEngine.DropEmptyFrames + ",split=2"), "Fotogrammi vuoti scartati in CPU, GPU e con l'analisi fine cassetta");
 Check(rbCpu.Contains(CaptureEngine.FieldsFilter) && rbGpu.Contains(CaptureEngine.FieldsFilter + ",format=nv12,hwupload") && rbGpuAn.Contains(CaptureEngine.FieldsFilter), "Campi separati su CPU e prima dell'upload GPU");
-Check(!rbCpu.Contains("yadif") && !rbGpu.Contains("deinterlace=") && !rbGpu.Contains("setfield=bff") && rbCpu.Contains("h=ih-112") && rbGpu.Contains("ch=ih-112"), "Ricostruzione senza Yadif né deinterlaccio GPU, ritaglio in righe del fotogramma");
+Check(!rbCpu.Contains("yadif") && !rbGpu.Contains("deinterlace=") && !rbGpu.Contains("setfield=bff") && rbCpu.Contains("h=ih-10:") && rbGpu.Contains("ch=ih-10:"), "Niente Yadif né deinterlaccio GPU, ritaglio in righe del fotogramma");
 Check(rbCpu.IndexOf(CaptureEngine.FieldsFilter) < rbCpu.IndexOf("crop@s"), "Campi separati prima del ritaglio");
 int Conta(string a) => (a.Length - a.Replace(CaptureEngine.DropEmptyFrames, "").Length) / CaptureEngine.DropEmptyFrames.Length;
 Check(Conta(rbCpu) == 1 && Conta(rbCpuAn) == 1 && Conta(rbGpu) == 1 && Conta(rbGpuAn) == 1, "Filtro dei fotogrammi vuoti una sola volta");
 Check(!cpu.Contains("signalstats") && !gpu.Contains("signalstats") && !cpu.Contains("separatefields"), "Nessun filtro in più per PAL e NTSC normali");
+var rbB = Settings(); rbB.Sources[0].InputSize = "720x480"; rbB.Sources[0].DeinterlaceMode = "bwdif2x"; rbB.Sources[0].CropB = 10; rbB.Sources[0].TvStandard = "NTSC_M>PAL_B";
+Check(Args(rbB, false).Contains("bwdif=mode=send_field") && Args(rbB, true).Contains("deinterlace=advanced:rate=field"), "Con Bwdif 2x scelto a mano si usa il deinterlaccio normale");
+// PAL-60 col colore rifatto (USB 2828x): apertura NTSC_M, PAL_60 scritto senza verifica, V rigirato riga per riga nel grafo
+var sw = new Source { Type = SourceType.Capture, InputSize = "720x480", InputFps = "29.97", DeinterlaceMode = "yadif2x", CropB = 6, TvStandard = "NTSC_M>" + PalSoftware.TvKey };
+Check(VideoStandard.Detect(sw) == VideoStandard.NTSC_PAL60SW && sw.IsPal60Software && !sw.IsNtscRebuild && Array.IndexOf(VideoStandard.All, VideoStandard.NTSC_PAL60SW) == 4, "Preset NTSC su VCR PAL (PAL-60 col colore rifatto) riconosciuto");
+var swS = Settings(); swS.Sources[0].InputSize = "720x480"; swS.Sources[0].InputFps = "29.97"; swS.Sources[0].CropB = 6; swS.Sources[0].TvStandard = "NTSC_M>" + PalSoftware.TvKey;
+var swCpu = Args(swS, false); var swAn = Args(swS, false, analysis: true); var swGpu = Args(swS, true, analysis: true);
+Check(swCpu.Contains("streamselect@palgrabber=inputs=2:map=0[pq0]") && swCpu.Contains("[pq0]") && swCpu.IndexOf("streamselect@palgrabber") < swCpu.IndexOf("yadif"), "Colore PAL rifatto prima del deinterlaccio");
+Check(swAn.Contains("[pq0]split=2[cs0][an0]") && swGpu.Contains("[pq0]split=2[cs0][an0]") && swGpu.Contains("[cs0]setfield=tff,format=nv12,hwupload"), "Ramo di analisi e GPU dopo la correzione del colore");
+Check(!cpu.Contains("streamselect") && !swCpu.Contains("signalstats"), "Correzione solo per il PAL-60 software");
+Check(PalSoftware.SelectCommand("grabber", 1) == "streamselect@palgrabber map 1", "Comando zmq per girare il colore");
+// monitor della fase su immagini 80×60 sintetiche: scena blu (U+, V−) = fase giusta, viola (U+, V+) = da girare
+byte[] Img(int u, int v, int shift) { var f = new byte[NoSignalDetector.FrameBytes]; int w = NoSignalDetector.W, h = NoSignalDetector.H, n = w * h;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) { int i = y * w + x; double t = Math.Sin((x + shift) * 0.21) * Math.Cos(y * 0.17);
+        f[i] = (byte)(110 + 70 * t); f[n + i] = (byte)Math.Clamp(128 + u * (0.6 + 0.4 * t), 0, 255); f[2 * n + i] = (byte)Math.Clamp(128 + v * (0.6 + 0.4 * t), 0, 255); } return f; }
+var mBlu = new PalPhaseMonitor(); bool tBlu = false; for (int i = 0; i < 80; i++) tBlu |= mBlu.Observe(Img(30, -20, i));
+Check(!tBlu && mBlu.Decided, "Monitor: scena blu = fase giusta, nessuna inversione");
+var mViola = new PalPhaseMonitor(); int tV = -1; for (int i = 0; i < 80 && tV < 0; i++) if (mViola.Observe(Img(30, 20, i))) tV = i;
+Check(tV >= PalPhaseMonitor.PriorMinFrames - 1 && tV < 80, "Monitor: scena viola = fase da girare dopo ~1,5 s");
+var mDrop = new PalPhaseMonitor(); int tD = -1; for (int i = 0; i < 70; i++) if (mDrop.Observe(Img(30, i < 60 ? -20 : 20, i)) && tD < 0) tD = i;
+Check(tD == 60, "Monitor: rovesciamento di colpo (fotogramma perso) riconosciuto subito");
+var mOwn = new PalPhaseMonitor(); for (int i = 0; i < 50; i++) mOwn.Observe(Img(30, -20, i)); mOwn.ExpectFlip(); bool tO = false;
+for (int i = 50; i < 70; i++) tO |= mOwn.Observe(Img(30, i < 53 ? -20 : 20, i));
+Check(!tO, "Monitor: il rovesciamento chiesto da noi non conta");
+var mCut = new PalPhaseMonitor(); bool tC = false; for (int i = 0; i < 70; i++) { var f = Img(30, -20, i); if (i >= 60) { f = Img(-25, 20, i * 7 + 40); for (int q = 0; q < NoSignalDetector.W * NoSignalDetector.H; q++) f[q] = (byte)(255 - f[q]); } tC |= mCut.Observe(f); }
+Check(!tC, "Monitor: cambio di scena (luce calda dopo luce fredda) non scambiato per un rovesciamento");
 var tvS = Settings(); var tvArgs1 = Args(tvS, false); tvS.Sources[0].TvStandard = "PAL_60"; var tvArgs2 = Args(tvS, false);
 Check(tvArgs1 == tvArgs2 && !tvArgs2.Contains("PAL_60"), "Il comando ffmpeg non cambia con lo standard del grabber");
 if (args.Length > 0)

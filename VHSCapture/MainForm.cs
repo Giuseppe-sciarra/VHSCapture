@@ -830,7 +830,7 @@ namespace VHSCapture
                 StartPreview();
             }
 
-            using var f = new SourceForm(s, settings, false, LiveApply, StructuralApply, CropPreview, WithDeviceFree, AppendLog, id => engine.GetInputInfo(id));
+            using var f = new SourceForm(s, settings, false, LiveApply, StructuralApply, CropPreview, WithDeviceFree, AppendLog, id => engine.GetInputInfo(id), id => engine.TogglePal(id, true));
             var r = f.ShowDialog(this);
             if (r != DialogResult.OK)
             {
@@ -862,7 +862,7 @@ namespace VHSCapture
         void EditSource(Source s)
         {
             if (startingRecording || finalizing) return;
-            using var f = new SourceForm(s, settings, engine.IsRecording, LiveApply, StructuralApply, CropPreview, WithDeviceFree, AppendLog, id => engine.GetInputInfo(id));
+            using var f = new SourceForm(s, settings, engine.IsRecording, LiveApply, StructuralApply, CropPreview, WithDeviceFree, AppendLog, id => engine.GetInputInfo(id), id => engine.TogglePal(id, true));
             if (f.ShowDialog(this) != DialogResult.OK) { canvas.Invalidate(); RefreshMixerValues(); return; }
             var res = f.Result;
             bool structural = !res.StructurallyEquals(s);

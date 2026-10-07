@@ -864,6 +864,28 @@ namespace VHSCapture
         Dictionary<int, string> inputMap = new Dictionary<int, string>();
         readonly ConcurrentDictionary<string, string> inputInfo = new ConcurrentDictionary<string, string>();
         readonly ConcurrentDictionary<string, (int w, int h)> inputSize = new ConcurrentDictionary<string, (int, int)>();
+        // PAL-60 col colore rifatto: fase scelta dal monitor (0 = come calcolato, 1 = V invertito), cambiata dal vivo via zmq
+        readonly ConcurrentDictionary<string, PalPhaseMonitor> palMon = new ConcurrentDictionary<string, PalPhaseMonitor>();
+        readonly ConcurrentDictionary<string, int> palMap = new ConcurrentDictionary<string, int>();
+        bool palNoZmqLogged;
+
+        /// <summary>Inverte V della sorgente in PAL-60 software (tasto «Inverti colore» o monitor automatico), senza riavviare.</summary>
+        public bool TogglePal(string id, bool manual)
+        {
+            if (!palMon.TryGetValue(id, out var mon)) return false;
+            if (!LiveControl)
+            {
+                if (!palNoZmqLogged) Log?.Invoke("Colore PAL: per girarlo dal vivo serve «Modifiche delle sorgenti al volo (zmq)» nelle Impostazioni");
+                palNoZmqLogged = true;
+                return false;
+            }
+            int map = palMap.AddOrUpdate(id, 1, (_, m) => m ^ 1);
+            lock (mon) { if (manual) mon.ManualToggle(); else mon.ExpectFlip(); }
+            zmq.Queue(id + ":pal", PalSoftware.SelectCommand(id, map));
+            Log?.Invoke($"Colore PAL: {(manual ? "invertito a mano" : "invertito da solo — " + mon.LastReason)} (uscita {map})");
+            return true;
+        }
+        public bool IsPalSoftware(string id) => palMon.ContainsKey(id);
         static int pipeCounter;
         TimeSpan lastCpu; DateTime lastCpuAt;
 
@@ -878,6 +900,8 @@ namespace VHSCapture
             Stop();
             stopping = false;
             runningSources = s.Sources.ToDictionary(x => x.Id, x => x.Clone());
+            palMon.Clear(); palMap.Clear(); palNoZmqLogged = false;
+            foreach (var ps in s.Sources.Where(x => x.Visible && x.IsPal60Software)) { palMon[ps.Id] = new PalPhaseMonitor(); palMap[ps.Id] = 0; }
             GpuActive = !GpuDisabled && CanUseQsv(s);
             inputInfo.Clear(); inputSize.Clear(); sig.Clear(); audioActivity.Clear(); audioObserved.Clear(); inInputSection = false;
 
@@ -925,8 +949,9 @@ namespace VHSCapture
             // standard del grabber (PAL_B / NTSC_M / PAL_60…) scritto PRIMA che ffmpeg apra il dispositivo:
             // così risoluzione, fps e decoder sono sempre dello stesso standard (niente più "miscuglio" NTSC + PAL)
             var tvSet = s.Sources.Where(x => x.Visible && x.Type == SourceType.Capture && !string.IsNullOrWhiteSpace(x.VideoDevice) && !string.IsNullOrEmpty(x.TvStandard))
-                                 .Select(x => (dev: x.VideoDevice, std: x.TvStandard)).Distinct().ToList();
-            foreach (var (dev, std) in tvSet) DShowProps.ApplyTv(dev, std, l => Log?.Invoke(l));
+                                 .GroupBy(x => x.VideoDevice).Select(g => (dev: g.Key, std: g.First().TvStandard, id: g.First().Id)).ToList();
+            // con lo standard a due fasi ("NTSC_M>PAL_B") qui si scrive solo quello di apertura
+            foreach (var (dev, std, _) in tvSet) DShowProps.ApplyTv(dev, DShowProps.TvOpen(std), l => Log?.Invoke(l));
 
             string args = BuildArgs(s, PW, PH, zmqPort, names, out inputMap, GpuActive, QsvBackend);
             fastIdRunning = FastPathId;
@@ -975,7 +1000,8 @@ namespace VHSCapture
                 zmq.Start();
             }
 
-            // alcuni driver all'apertura rimettono lo standard salvato nel registro: ricontrollo a cattura avviata
+            // a cattura avviata: cambio dal vivo per gli standard a due fasi, poi ricontrollo
+            // (alcuni driver all'apertura rimettono lo standard salvato nel registro)
             if (tvSet.Count > 0)
             {
                 int run = RunId;
@@ -983,9 +1009,26 @@ namespace VHSCapture
                 {
                     try
                     {
+                        if (tvSet.Any(t => DShowProps.TvTwoPhase(t.std)))
+                        {
+                            // aspetto che ffmpeg abbia aperto il grabber e stia ricevendo (riga "Input #… Video:" letta), max 15 s
+                            var sw = Stopwatch.StartNew();
+                            while (sw.ElapsedMilliseconds < 15000 && !(stopping || RunId != run) &&
+                                   tvSet.Where(t => DShowProps.TvTwoPhase(t.std)).Any(t => !inputSize.ContainsKey(t.id))) Thread.Sleep(150);
+                            Thread.Sleep(800);
+                            if (stopping || RunId != run) return;
+                            foreach (var (dev, std, _) in tvSet.Where(t => DShowProps.TvTwoPhase(t.std)))
+                            {
+                                Log?.Invoke($"Standard grabber: cambio dal vivo {DShowProps.TvOpen(std)} → {DShowProps.TvLive(std)} (cattura avviata)");
+                                DShowProps.ApplyTv(dev, DShowProps.TvLive(std), l => Log?.Invoke(l));
+                            }
+                        }
                         Thread.Sleep(4000);
                         if (stopping || RunId != run) return;
-                        foreach (var (dev, std) in tvSet) DShowProps.ApplyTv(dev, std, l => Log?.Invoke(l), recheck: true);
+                        // il PAL-60 software non si riscrive a cattura avviata: il driver risponde sempre NTSC_M e ogni scrittura
+                        // può far perdere un fotogramma (che sposterebbe la fase del colore)
+                        foreach (var (dev, std, _) in tvSet.Where(t => DShowProps.TvLive(t.std) != PalSoftware.TvKey))
+                            DShowProps.ApplyTv(dev, DShowProps.TvLive(std), l => Log?.Invoke(l), recheck: true);
                     }
                     catch { }
                 }) { IsBackground = true, Name = "tvcheck" };
@@ -1389,6 +1432,13 @@ namespace VHSCapture
                     double now = signalClock.Elapsed.TotalSeconds;
                     string state;
                     lock (g) state = g.detector.Observe(buf, now);
+                    if (palMon.TryGetValue(id, out var pm))
+                    {
+                        bool flip; string why;
+                        lock (pm) { flip = pm.Observe(buf); why = pm.LastReason; }
+                        if (flip) TogglePal(id, false);
+                        else if (pm.Decided && why.StartsWith("fase PAL giusta") && !pm.Logged) { pm.Logged = true; Log?.Invoke("Colore PAL: " + why); }
+                    }
                     if (now - g.lastEmit >= .5)
                     {
                         g.lastEmit = now;
@@ -1585,6 +1635,14 @@ namespace VHSCapture
             {
                 var src = kv.Key; int i = kv.Value;
                 var chain = new List<string>();
+                string srcIn = $"[{i}:v]";
+                if (src.Type == SourceType.Capture && src.IsPal60Software)
+                {
+                    // PAL-60 col colore rifatto: V rigirato riga per riga PRIMA di tutto (anche del ramo di analisi,
+                    // che così vede i colori veri e serve a scegliere la fase)
+                    graph.Append(PalSoftware.Filter(srcIn, $"[pq{k}]", src.Id, k.ToString()));
+                    srcIn = $"[pq{k}]";
+                }
                 if (src.Type == SourceType.Capture)
                 {
                     if (pn.Analysis.TryGetValue(src.Id, out var anPipe))
@@ -1593,7 +1651,7 @@ namespace VHSCapture
                         // (per capire se lo schermo è uniforme non serve deinterlacciare). Sempre a piena velocità della sorgente:
                         // un'uscita decimata (es. 2 fps) resta indietro e ffmpeg 7 frena tutte le altre → anteprima a raffiche.
                         string pre0 = PreFilter(src);
-                        graph.Append($"[{i}:v]{(pre0 != null ? pre0 + "," : "")}split=2[cs{k}][an{k}];");
+                        graph.Append($"{srcIn}{(pre0 != null ? pre0 + "," : "")}split=2[cs{k}][an{k}];");
                         // 80×60 pixel yuv444p verso l'app (14 KB a fotogramma): il rilevatore guarda l'immagine, non statistiche riassuntive
                         graph.Append($"[an{k}]crop=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT}," +
                                      $"scale={NoSignalDetector.W}:{NoSignalDetector.H}:flags=area,format=yuv444p[ano{k}];");
@@ -1618,7 +1676,7 @@ namespace VHSCapture
                     chain.Add($"hue@s{src.Id}=h={F(src.Hue, "0.#")}:s={F(src.Saturation)}:b={F(src.Brightness * 10)}");
                 }
                 chain.Add($"scale@s{src.Id}=w={Math.Max(2, src.W)}:h={Math.Max(2, src.H)}:flags={ScaleFlags(src.ScaleFilter)}:eval=frame");
-                string inLabel = i >= 0 ? $"[{i}:v]" : $"[cs{k}]";
+                string inLabel = i >= 0 ? srcIn : $"[cs{k}]";
                 if (useQsv)
                 {
                     chain.Clear();

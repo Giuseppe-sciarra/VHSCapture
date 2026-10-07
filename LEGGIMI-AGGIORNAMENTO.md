@@ -9,12 +9,17 @@ Un videoregistratore PAL che legge una cassetta NTSC manda **525 righe a 60 Hz c
 - Se cambi lo standard dalla pagina del driver, VHSCapture si adegua invece di rimettere il suo al riavvio.
 - Al primo avvio le sorgenti esistenti prendono lo standard del grabber che corrisponde alla loro risoluzione (720×576 → PAL B/G, 720×480 → NTSC M). «Non toccare» lascia il driver com'è, come prima.
 - Se i colori vengono sbagliati o a strisce orizzontali con PAL-60, il VCR manda NTSC 4.43: scegli l'altra voce.
-- **«NTSC su videoregistratore PAL — PAL B/G ricostruito»** è per i grabber che elencano PAL_60 e NTSC_433 ma non li tengono. L'USB 2828x, per esempio, torna sempre su NTSC_M e dà colori viola, verdi e grigi. Il grabber va in PAL B/G, l'unico modo in cui decodifica giusto il colore, a 720×576 e 25 fps. In questo modo però impagina a 50 Hz un segnale a 60 Hz: ogni campo da 288 righe contiene il quadro (righe 0–231), una banda nera e un pezzo del quadro dopo. Misurato sui campioni del grabber del laboratorio:
-  - i due campi di un fotogramma sono istanti diversi, ma il loro allineamento verticale cambia da un fotogramma all'altro: il deinterlaccio Yadif li faceva sfarfallare;
-  - quindi i campi si separano e si raddoppiano in altezza (nuova voce di deinterlacciamento «Campi separati»), si ritagliano 112 righe in basso e restano 4:3;
-  - si scartano i fotogrammi vuoti (verdi) e si registra a 59,94 fps.
+- **«NTSC su videoregistratore PAL — PAL-60 col colore rifatto»** (nuovo preset al posto di «PAL B/G ricostruito») è per i grabber che non decodificano il PAL a 60 Hz, come l'USB 2828x. Il grabber si apre in NTSC_M e poi riceve PAL_60. Il driver risponde NTSC_M, ma demodula il colore a 4,43 MHz come se fosse NTSC: la componente V esce col segno invertito una riga sì e una no. Misurato sui campioni del laboratorio: correlazione −0,97 tra righe vicine dello stesso campo, 120 fotogrammi su 120 in 4 s, quadro intero.
+  - `PalPhase.cs` → `PalSoftware.Filter`: nel grafo di ffmpeg, prima di tutto il resto, V viene rigirato riga per riga con lo schema + − − + che si ripete ogni 2 fotogrammi. Poi si fa la media con la riga precedente dello stesso campo, come la linea di ritardo di un decoder PAL. Il geq lavora solo sulla crominanza, a piani separati. Uno `streamselect@pal<id>` sceglie tra V così com'è e V invertito, cambiabile dal vivo via zmq.
+  - `PalPhaseMonitor` guarda le immagini 80×60 del ramo di analisi, che ora parte dopo la correzione, e fa due cose:
+    - all'avvio sceglie la fase, perché nelle immagini naturali i colori stanno sull'asse arancio ↔ blu, mentre con la fase sbagliata finiscono su viola ↔ verde. Decide in circa 1,5 s;
+    - se il grabber perde un fotogramma, il colore si rovescia di colpo: lo riconosce sull'immagine stessa e lo rigira.
 
-  Immagini vere al secondo per modalità: 720×576 a campi circa 21, 720×480 16,5, 352×288 12,5, 352×240 10, 640×480 7. Il movimento resta meno fluido di un PAL o NTSC normale.
+    Provato sul campione vero: fase sbagliata corretta al fotogramma 44, fotogramma tolto a metà riconosciuto all'istante, nessun falso allarme su 5 riprese con colori già giusti.
+  - Tasto **«⇄ Inverti colore»** nelle Proprietà, che vale anche in registrazione. Nel Log compaiono le righe «Colore PAL: …».
+  - Deinterlaccio Yadif 2x (campi nell'ordine normale, prima il superiore), registrazione a 59,94 con 60 immagini diverse al secondo. Il grafo esatto generato dall'app è stato provato con ffmpeg sul campione, compreso il cambio dal vivo via zmq.
+  - Serve «Modifiche delle sorgenti al volo (zmq)» attivo nelle Impostazioni, che è il predefinito; l'ffmpeg «essentials» ha zmq. Il geq costa CPU: su 2 core lenti va a circa 29 fotogrammi al secondo, sui PC del laboratorio ci sono più core.
+- «NTSC M → PAL B/G dal vivo» (`NTSC_M>PAL_B`) resta selezionabile a mano in «Standard nel grabber». Dà colori giusti ma il grabber perde un fotogramma su tre, misurato.
 - Correzione: scegliendo uno standard dal menu, ora si imposta anche il deinterlacciamento giusto per quello standard (prima veniva messo sempre Yadif 2x).
 - Lo standard del grabber viene verificato dopo averlo impostato: se il driver non lo tiene si prova l'alternativa (PAL-60 ↔ NTSC 4.43). Nel Log e sotto «Standard nel grabber» compare «⚠ Il grabber non ha tenuto …» con lo standard da usare al suo posto.
 - Fine cliente CRM: prima si dà il **nome della cassetta**, poi arrivano riconteggio e domande.

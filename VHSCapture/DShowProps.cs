@@ -135,6 +135,16 @@ namespace VHSCapture
         };
         public static bool TvSame(string a, string b) => !string.IsNullOrEmpty(a) && TvGroup(a) == TvGroup(b);
 
+        /// <summary>
+        /// Standard a due fasi "APERTURA>DAL_VIVO" (es. "NTSC_M>PAL_B"): il grabber si apre nel primo, così il ponte USB
+        /// si imposta a 525 righe / 60 Hz con tutti i semiquadri, e a cattura avviata il decoder passa al secondo
+        /// (colore PAL). È il «miscuglio» che con l'USB 2828x dà quadro intero, colori giusti e ~40 immagini al secondo
+        /// dalle cassette NTSC lette da un videoregistratore PAL (misurato: aprendo direttamente in PAL_B sono ~20 e il quadro è tagliato).
+        /// </summary>
+        public static bool TvTwoPhase(string key) => !string.IsNullOrEmpty(key) && key.Contains(">");
+        public static string TvOpen(string key) => TvTwoPhase(key) ? key.Substring(0, key.IndexOf('>')) : (key ?? "");
+        public static string TvLive(string key) => TvTwoPhase(key) ? key.Substring(key.IndexOf('>') + 1) : (key ?? "");
+
         /// <summary>Se il driver non ha lo standard chiesto, quello che ci va più vicino (per le cassette NTSC su VCR PAL l'altro dei due).</summary>
         static string[] TvCandidates(string want) => want switch
         {
@@ -233,6 +243,18 @@ namespace VHSCapture
                     return null;
                 }
                 var info = Read(dec);
+                if (want == PalSoftware.TvKey)
+                {
+                    // PAL-60 col colore rifatto: si scrive PAL_60 e basta. L'USB 2828x risponde NTSC_M, ma il colore a 4,43 MHz
+                    // resta attivo (senza questa scrittura l'NTSC_M dà bianco e nero): niente verifica e niente ripiego su NTSC 4.43
+                    if (info.Available != 0 && (info.Available & TvFlag("PAL_60")) == 0)
+                        log?.Invoke($"Standard grabber: il driver non elenca PAL_60 (ha: {string.Join(", ", info.AvailableKeys)}) — provo lo stesso");
+                    int hr0 = dec.put_TVFormat(TvFlag("PAL_60"));
+                    System.Threading.Thread.Sleep(200);
+                    var a0 = Read(dec);
+                    log?.Invoke($"Standard grabber: PAL_60 scritto (hr=0x{hr0:X8}), il driver risponde {a0.CurrentKey}{Det(a0)} — il colore PAL lo rifà VHSCapture");
+                    return a0.CurrentKey;
+                }
                 if (TvSame(info.CurrentKey, want))
                 {
                     if (!recheck) log?.Invoke($"Standard grabber: {info.CurrentKey} (già impostato){Det(info)}");

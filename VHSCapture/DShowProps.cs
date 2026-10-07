@@ -238,27 +238,35 @@ namespace VHSCapture
                     if (!recheck) log?.Invoke($"Standard grabber: {info.CurrentKey} (già impostato){Det(info)}");
                     return info.CurrentKey;
                 }
-                string target = null;
+                string start = info.CurrentKey;
+                bool tried = false;
                 foreach (var c in TvCandidates(want))
-                    if (info.Available == 0 || (info.Available & TvFlag(c)) != 0) { target = c; break; }
-                if (target == null)
                 {
+                    if (info.Available != 0 && (info.Available & TvFlag(c)) == 0) continue;
+                    if (TvSame(info.CurrentKey, c))
+                    {
+                        if (tried) log?.Invoke($"Standard grabber: resta {info.CurrentKey} — {want} non c'è su questo grabber{Det(info)}");
+                        return info.CurrentKey;
+                    }
+                    tried = true;
+                    int hr = dec.put_TVFormat(TvFlag(c));
+                    if (hr != 0) { log?.Invoke($"Standard grabber: il driver ha rifiutato {c} (hr=0x{hr:X8})"); continue; }
+                    System.Threading.Thread.Sleep(200);   // il decoder ci mette un attimo a riagganciarsi
+                    var after = Read(dec);
+                    if (TvSame(after.CurrentKey, c))
+                    {
+                        string why = recheck ? " (il driver l'aveva cambiato all'apertura)" : "";
+                        string alt = c != want ? $" — {want} non c'è, uso {c}" : "";
+                        log?.Invoke($"Standard grabber: {start} → {after.CurrentKey}{why}{alt}{Det(after)}");
+                        return after.CurrentKey;
+                    }
+                    // il driver lo elenca ma non lo tiene (es. USB 2828x con PAL_60: torna NTSC_M)
+                    log?.Invoke($"Standard grabber: il driver accetta {c} ma non lo tiene (torna {after.CurrentKey})");
+                    info = after;
+                }
+                if (!tried)
                     log?.Invoke($"Standard grabber: il driver non ha {want} (ha: {string.Join(", ", info.AvailableKeys)}) — resta {info.CurrentKey}");
-                    return info.CurrentKey;
-                }
-                if (TvSame(info.CurrentKey, target)) return info.CurrentKey;
-                int hr = dec.put_TVFormat(TvFlag(target));
-                if (hr != 0)
-                {
-                    log?.Invoke($"Standard grabber: il driver ha rifiutato {target} (hr=0x{hr:X8}) — resta {info.CurrentKey}");
-                    return info.CurrentKey;
-                }
-                System.Threading.Thread.Sleep(200);   // il decoder ci mette un attimo a riagganciarsi
-                var after = Read(dec);
-                string why = recheck ? " (il driver l'aveva cambiato all'apertura)" : "";
-                string alt = target != want ? $" — {want} non c'è, uso {target}" : "";
-                log?.Invoke($"Standard grabber: {info.CurrentKey} → {after.CurrentKey}{why}{alt}{Det(after)}");
-                return after.CurrentKey;
+                return info.CurrentKey;
             }
             catch (Exception ex) { log?.Invoke("Standard grabber: " + ex.Message); return null; }
             finally { if (filter != null) try { Marshal.ReleaseComObject(filter); } catch { } }

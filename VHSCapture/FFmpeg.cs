@@ -1488,6 +1488,13 @@ namespace VHSCapture
             _ => null,
         };
 
+        /// <summary>
+        /// Fotogrammi vuoti (Y=U=V=0, verdi a schermo) che il grabber manda quando impagina a 50 Hz un segnale a 60 Hz:
+        /// si scartano e il filtro fps ripete il precedente. Il nero vero di una cassetta ha Y≈16, quindi resta.
+        /// </summary>
+        public const string DropEmptyFrames = "signalstats,metadata=mode=select:key=lavfi.signalstats.YAVG:value=4:function=greater";
+        static string PreFilter(Source src) => src.IsNtscRebuild ? DropEmptyFrames : null;
+
         static string ScaleFlags(string f) => f switch
         {
             "bilinear" => "bilinear", "lanczos" => "lanczos", "area" => "area", "fast_bilinear" => "fast_bilinear", _ => "bicubic",
@@ -1581,13 +1588,16 @@ namespace VHSCapture
                         // ramo di analisi per la fine cassetta PRIMA del deinterlaccio: 25 fotogrammi al secondo invece di 50
                         // (per capire se lo schermo è uniforme non serve deinterlacciare). Sempre a piena velocità della sorgente:
                         // un'uscita decimata (es. 2 fps) resta indietro e ffmpeg 7 frena tutte le altre → anteprima a raffiche.
-                        graph.Append($"[{i}:v]split=2[cs{k}][an{k}];");
+                        string pre0 = PreFilter(src);
+                        graph.Append($"[{i}:v]{(pre0 != null ? pre0 + "," : "")}split=2[cs{k}][an{k}];");
                         // 80×60 pixel yuv444p verso l'app (14 KB a fotogramma): il rilevatore guarda l'immagine, non statistiche riassuntive
                         graph.Append($"[an{k}]crop=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT}," +
                                      $"scale={NoSignalDetector.W}:{NoSignalDetector.H}:flags=area,format=yuv444p[ano{k}];");
                         analysisLabels.Add(($"[ano{k}]", anPipe));
                         i = -1;   // l'ingresso della catena ora è [cs{k}]
                     }
+                    // senza ramo di analisi il filtro dei fotogrammi vuoti va in testa alla catena
+                    if (i >= 0 && PreFilter(src) != null && !useQsv) chain.Add(PreFilter(src));
                     var d = DeintFilter(src.DeinterlaceMode);
                     if (d != null && !useQsv) chain.Add(d);
                     if (!useQsv) chain.Add($"crop@s{src.Id}=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT}:exact=1");
@@ -1609,6 +1619,7 @@ namespace VHSCapture
                 {
                     chain.Clear();
                     if (zmqFilter != null) chain.Add(zmqFilter);
+                    if (i >= 0 && PreFilter(src) != null) chain.Add(PreFilter(src));
                     // I grabber analogici spesso marcano progressivi i frame interlacciati.
                     // Come l'automatico Yadif senza metadati, si assume prima il campo superiore.
                     if (DeintFilter(src.DeinterlaceMode) != null) chain.Add("setfield=" + (s.IntelFieldOrder == "bff" ? "bff" : "tff"));

@@ -176,6 +176,18 @@ var tvA = new Source { TvStandard = "PAL_B" }; var tvB = tvA.Clone(); tvB.TvStan
 Check(!tvA.StructurallyEquals(tvB), "Cambiare lo standard del grabber riavvia la cattura");
 tvA.CopyStructuralFrom(tvB);
 Check(tvA.TvStandard == "PAL_60", "Lo standard del grabber segue la sorgente nelle copie");
+// ricostruzione NTSC su grabber senza PAL-60 (USB 2828x): PAL B/G a 720×480, niente deinterlaccio, ritaglio 110, fotogrammi vuoti scartati
+var rb = new Source { Type = SourceType.Capture, InputSize = "720x480", InputFps = "29.97", DeinterlaceMode = "off", CropB = 110, TvStandard = "PAL_B" };
+Check(VideoStandard.Detect(rb) == VideoStandard.NTSC_PALB && rb.IsNtscRebuild, "Preset NTSC su VCR PAL (PAL B/G ricostruito) riconosciuto");
+Check(!new Source { Type = SourceType.Capture, InputSize = "720x576", TvStandard = "PAL_B" }.IsNtscRebuild && !new Source { Type = SourceType.Capture, InputSize = "720x480", TvStandard = "NTSC_M" }.IsNtscRebuild, "Ricostruzione solo con PAL B/G a 720×480");
+Check(rb.NaturalSize() == (493, 370), "Ricostruzione: 370 righe utili restano 4:3");
+var rbS = Settings(); rbS.Sources[0].InputSize = "720x480"; rbS.Sources[0].InputFps = "29.97"; rbS.Sources[0].DeinterlaceMode = "off"; rbS.Sources[0].CropB = 110; rbS.Sources[0].TvStandard = "PAL_B";
+var rbCpu = Args(rbS, false); var rbCpuAn = Args(rbS, false, analysis: true); var rbGpu = Args(rbS, true); var rbGpuAn = Args(rbS, true, analysis: true);
+Check(rbCpu.Contains(CaptureEngine.DropEmptyFrames) && rbCpuAn.Contains(CaptureEngine.DropEmptyFrames + ",split=2") && rbGpu.Contains(CaptureEngine.DropEmptyFrames) && rbGpuAn.Contains(CaptureEngine.DropEmptyFrames + ",split=2"), "Fotogrammi vuoti scartati in CPU, GPU e con l'analisi fine cassetta");
+Check(!rbCpu.Contains("yadif") && !rbGpu.Contains("deinterlace=") && rbCpu.Contains("h=ih-110"), "Ricostruzione senza deinterlaccio e con il ritaglio");
+int Conta(string a) => (a.Length - a.Replace(CaptureEngine.DropEmptyFrames, "").Length) / CaptureEngine.DropEmptyFrames.Length;
+Check(Conta(rbCpu) == 1 && Conta(rbCpuAn) == 1 && Conta(rbGpu) == 1 && Conta(rbGpuAn) == 1, "Filtro dei fotogrammi vuoti una sola volta");
+Check(!cpu.Contains("signalstats") && !gpu.Contains("signalstats"), "Nessun filtro in più per PAL e NTSC normali");
 var tvS = Settings(); var tvArgs1 = Args(tvS, false); tvS.Sources[0].TvStandard = "PAL_60"; var tvArgs2 = Args(tvS, false);
 Check(tvArgs1 == tvArgs2 && !tvArgs2.Contains("PAL_60"), "Il comando ffmpeg non cambia con lo standard del grabber");
 if (args.Length > 0)

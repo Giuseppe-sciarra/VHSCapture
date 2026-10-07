@@ -9,6 +9,15 @@ Un videoregistratore PAL che legge una cassetta NTSC manda **525 righe a 60 Hz c
 - Se cambi lo standard dalla pagina del driver, VHSCapture si adegua invece di rimettere il suo al riavvio.
 - Al primo avvio le sorgenti esistenti prendono lo standard del grabber che corrisponde alla loro risoluzione (720×576 → PAL B/G, 720×480 → NTSC M). «Non toccare» lascia il driver com'è, come prima.
 - Se i colori vengono sbagliati o a strisce orizzontali con PAL-60, il VCR manda NTSC 4.43: scegli l'altra voce.
+- **«NTSC su videoregistratore PAL — PAL B/G ricostruito»** è per i grabber che elencano PAL_60 e NTSC_433 ma non li tengono. L'USB 2828x, per esempio, torna sempre su NTSC_M e dà colori viola, verdi e grigi. Il grabber va in PAL B/G, l'unico modo in cui decodifica giusto il colore, a 720×480. In questo modo però impagina a 50 Hz un segnale a 60 Hz: ogni fotogramma contiene il quadro, una banda nera e un pezzo del quadro dopo. Misurato sui campioni del grabber del laboratorio:
+  - la banda parte sempre alla riga 374;
+  - i due campi di ogni fotogramma sono dello stesso istante, quindi il deinterlaccio va spento: era lui a far sfarfallare l'immagine;
+  - si ritagliano 110 righe in basso e restano 4:3;
+  - si scartano i fotogrammi vuoti (verdi), che il grabber ogni tanto manda;
+  - si registra a 29,97 fps.
+
+  In questo modo il grabber manda circa 17 fotogrammi al secondo, quindi il movimento è meno fluido di un PAL o NTSC normale.
+- Lo standard del grabber viene verificato dopo averlo impostato: se il driver non lo tiene si prova l'alternativa (PAL-60 ↔ NTSC 4.43). Nel Log e sotto «Standard nel grabber» compare «⚠ Il grabber non ha tenuto …» con lo standard da usare al suo posto.
 - Fine cliente CRM: prima si dà il **nome della cassetta**, poi arrivano riconteggio e domande.
 
 # VHSCapture 1.2.8 — avvio veloce e anteprima fluida

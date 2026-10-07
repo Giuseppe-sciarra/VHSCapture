@@ -2012,7 +2012,8 @@ namespace VHSCapture
                     if (double.TryParse(settings.Fps, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double cf) && cf > 0 && sf > 5)
                     {
                         static bool Whole(double x) { double n = Math.Round(x); return n >= 1 && Math.Abs(x - n) < 0.06 * n; }
-                        if (!Whole(cf / sf) && !Whole(sf / cf))
+                        // con la ricostruzione NTSC (grabber in PAL B/G) la sorgente manda ~17 fps irregolari per natura: niente avviso
+                        if (!Whole(cf / sf) && !Whole(sf / cf) && !(capSrc?.IsNtscRebuild ?? false))
                             parts.Add($"⚠ sorgente {sf:0} fps e registrazione {cf:0.##} fps non combaciano: il movimento può scattare (usa lo standard PAL/NTSC)");
                     }
                 }

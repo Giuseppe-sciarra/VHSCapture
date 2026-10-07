@@ -180,13 +180,24 @@ namespace VHSCapture
                      "Grabber:           PAL-60 (lo imposta VHSCapture)\n" +
                      "Ingresso:          720 × 480  ·  29,97 fps  →  Yadif 2x  →  59,94 fotogrammi pieni\n" +
                      "Registrazione:  1920 × 1080  ·  59,94 fps, 4:3 al centro\n" +
-                     "Colori sbagliati o a strisce orizzontali? Prova la variante «NTSC 4.43».",
+                     "Colori sbagliati o a strisce orizzontali? Prova la variante «NTSC 4.43».\n" +
+                     "Se sotto «Ora nel grabber» resta NTSC_M, il grabber non ha il PAL-60: usa «PAL B/G ricostruito».",
                 3 => "NTSC su videoregistratore PAL  —  NTSC 4.43\n" +
                      "Come PAL-60, per i VCR (soprattutto vecchi) che mandano NTSC 4.43 invece di PAL-60.\n" +
                      "Grabber:           NTSC 4.43 (lo imposta VHSCapture)\n" +
                      "Ingresso:          720 × 480  ·  29,97 fps  →  Yadif 2x  →  59,94 fotogrammi pieni\n" +
                      "Registrazione:  1920 × 1080  ·  59,94 fps, 4:3 al centro\n" +
-                     "Colori sbagliati o a strisce orizzontali? Torna su «PAL-60».",
+                     "Colori sbagliati o a strisce orizzontali? Torna su «PAL-60».\n" +
+                     "Se sotto «Ora nel grabber» resta NTSC_M, il grabber non ha l'NTSC 4.43: usa «PAL B/G ricostruito».",
+                4 => "NTSC su videoregistratore PAL  —  PAL B/G ricostruito\n" +
+                     "Per i grabber che non tengono PAL-60 né NTSC 4.43 (restano su NTSC_M, colori sbagliati).\n" +
+                     "Il grabber in PAL B/G decodifica il colore giusto ma impagina a 50 Hz: VHSCapture ritaglia\n" +
+                     "il quadro buono e scarta la banda nera, il pezzo del quadro dopo e i fotogrammi vuoti.\n" +
+                     "Grabber:           PAL B/G (lo imposta VHSCapture)\n" +
+                     "Ingresso:          720 × 480  ·  29,97 fps  ·  niente deinterlaccio (era lo sfarfallio)\n" +
+                     "Ritaglio:           110 righe in basso\n" +
+                     "Registrazione:  1920 × 1080  ·  29,97 fps, 4:3 al centro\n" +
+                     "⚠ In questo modo il grabber manda circa 17 fotogrammi al secondo: movimento meno fluido.",
                 _ => "Personalizzato  —  valori scelti a mano, lo standard non è applicato.\n" +
                      "Scegli uno standard dal menu per rimettere i valori giusti (grabber compreso).",
             };
@@ -247,6 +258,7 @@ namespace VHSCapture
                     "NTSC  —  lettore NTSC  —  720×480 @ 29,97  →  1080p @ 59,94",
                     "NTSC su videoregistratore PAL  —  PAL-60  →  1080p @ 59,94",
                     "NTSC su videoregistratore PAL  —  NTSC 4.43  →  1080p @ 59,94",
+                    "NTSC su videoregistratore PAL  —  PAL B/G ricostruito  →  1080p @ 29,97",
                     "Personalizzato" });
                 Row(tGen, "Standard video", cbStandard, null);
                 cbStandard.Width = 360;
@@ -702,6 +714,14 @@ namespace VHSCapture
                 warn = "\n⚠ Questo grabber non ha PAL-60: VHSCapture usa NTSC 4.43.";
             else if (want == "NTSC_433" && i.Available != 0 && (i.Available & DShowProps.TvFlag("NTSC_433")) == 0)
                 warn = "\n⚠ Questo grabber non ha NTSC 4.43: VHSCapture usa PAL-60.";
+            // il driver lo elenca ma non lo tiene (USB 2828x: PAL_60 e NTSC_433 tornano NTSC_M)
+            bool alt = (want == "PAL_60" && DShowProps.TvSame(i.CurrentKey, "NTSC_433")) || (want == "NTSC_433" && DShowProps.TvSame(i.CurrentKey, "PAL_60"));
+            if (want != "" && i.Current != 0 && !DShowProps.TvSame(i.CurrentKey, want) && !alt)
+            {
+                warn += $"\n⚠ Il grabber non ha tenuto {want}: è su {i.CurrentKey}.";
+                if (want == "PAL_60" || want == "NTSC_433")
+                    warn += " Per le cassette NTSC usa «NTSC su videoregistratore PAL — PAL B/G ricostruito».";
+            }
             // righe rilevate col segnale agganciato che non tornano con la risoluzione scelta = standard sbagliato per questa cassetta
             string size = (cbSize.Text ?? "").Trim();
             if (i.Locked != 0 && i.Lines == 625 && size == "720x480")

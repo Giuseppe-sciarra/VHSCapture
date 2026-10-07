@@ -69,6 +69,9 @@ namespace VHSCapture
         [JsonIgnore] public bool HasAudio => Type == SourceType.Capture && !string.IsNullOrWhiteSpace(AudioDevice);
         [JsonIgnore] public double VolumeLinear => Muted ? 0 : Math.Pow(10, VolumeDb / 20.0);
         [JsonIgnore] public double VolumeGain => Math.Pow(10, VolumeDb / 20.0);
+        /// <summary>Cassetta NTSC da VCR PAL con grabber senza PAL-60: grabber in PAL B/G a 720×480 (colori giusti, quadro impaginato a 50 Hz).
+        /// Il motore scarta i fotogrammi vuoti che il grabber manda in questo modo.</summary>
+        [JsonIgnore] public bool IsNtscRebuild => Type == SourceType.Capture && InputSize == "720x480" && DShowProps.TvSame(TvStandard, "PAL_B");
         [JsonIgnore] public bool ColorIsNeutral => Math.Abs(Brightness) < 1e-6 && Math.Abs(Contrast - 1) < 1e-6 && Math.Abs(Saturation - 1) < 1e-6 && Math.Abs(Gamma - 1) < 1e-6 && Math.Abs(Hue) < 1e-6;
 
         public Source Clone() => (Source)MemberwiseClone();
@@ -168,8 +171,17 @@ namespace VHSCapture
         /// <summary>Cassetta NTSC su videoregistratore PAL che esce in NTSC 4.43 (alcuni VCR, soprattutto vecchi).</summary>
         public static readonly VideoStandard NTSC_443 = new VideoStandard { Name = "NTSC su VCR PAL (NTSC 4.43)", Size = "720x480", InFps = "29.97", CanvasFps = "59.94", Deint = "yadif2x", CropB = 6, Tv = "NTSC_433" };
 
+        /// <summary>
+        /// Cassetta NTSC su videoregistratore PAL con un grabber che non tiene PAL-60 né NTSC 4.43 (es. USB 2828x: resta su NTSC_M).
+        /// Il grabber va in PAL B/G: il colore è giusto, ma impagina a 50 Hz un segnale a 60 Hz e ogni fotogramma (720×480)
+        /// contiene il quadro (righe 0–369), la banda nera e un pezzo del quadro dopo. Misurato sui campioni: la banda parte
+        /// sempre alla riga 374 e i due campi di ogni fotogramma sono dello stesso istante → niente deinterlaccio (era lo sfarfallio),
+        /// ritaglio di 110 righe in basso. Il grabber in questo modo manda circa 17 fotogrammi al secondo.
+        /// </summary>
+        public static readonly VideoStandard NTSC_PALB = new VideoStandard { Name = "NTSC su VCR PAL (PAL B/G ricostruito)", Size = "720x480", InFps = "29.97", CanvasFps = "29.97", Deint = "off", CropB = 110, Tv = "PAL_B" };
+
         /// <summary>Nell'ordine del menu «Standard video» delle Proprietà (dopo c'è «Personalizzato»).</summary>
-        public static readonly VideoStandard[] All = { PAL, NTSC, NTSC_PAL60, NTSC_443 };
+        public static readonly VideoStandard[] All = { PAL, NTSC, NTSC_PAL60, NTSC_443, NTSC_PALB };
 
         static bool SameValues(Source s, VideoStandard v) =>
             s.InputSize == v.Size && s.InputFps == v.InFps && s.DeinterlaceMode == v.Deint &&

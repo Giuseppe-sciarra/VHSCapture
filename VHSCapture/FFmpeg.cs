@@ -1485,6 +1485,8 @@ namespace VHSCapture
             "yadif2x" => "yadif=mode=send_field",
             "bwdif" => "bwdif=mode=send_frame",
             "bwdif2x" => "bwdif=mode=send_field",
+            // ricostruzione NTSC su VCR PAL: ogni campo diventa un'immagine intera, alta come il fotogramma (il ritaglio resta in righe del fotogramma)
+            "fields" => FieldsFilter,
             _ => null,
         };
 
@@ -1494,6 +1496,8 @@ namespace VHSCapture
         /// </summary>
         public const string DropEmptyFrames = "signalstats,metadata=mode=select:key=lavfi.signalstats.YAVG:value=4:function=greater";
         static string PreFilter(Source src) => src.IsNtscRebuild ? DropEmptyFrames : null;
+        /// <summary>Campi separati senza supporre la parità (prima il superiore, misurato) e raddoppiati in altezza.</summary>
+        public const string FieldsFilter = "setfield=tff,separatefields,scale=w=iw:h=ih*2";
 
         static string ScaleFlags(string f) => f switch
         {
@@ -1622,10 +1626,12 @@ namespace VHSCapture
                     if (i >= 0 && PreFilter(src) != null) chain.Add(PreFilter(src));
                     // I grabber analogici spesso marcano progressivi i frame interlacciati.
                     // Come l'automatico Yadif senza metadati, si assume prima il campo superiore.
-                    if (DeintFilter(src.DeinterlaceMode) != null) chain.Add("setfield=" + (s.IntelFieldOrder == "bff" ? "bff" : "tff"));
+                    bool campi = src.DeinterlaceMode == "fields";
+                    if (campi) chain.Add(FieldsFilter);   // su CPU prima dell'upload: è SD, costa poco; la GPU non deve deinterlacciare
+                    else if (DeintFilter(src.DeinterlaceMode) != null) chain.Add("setfield=" + (s.IntelFieldOrder == "bff" ? "bff" : "tff"));
                     chain.Add("format=nv12");
                     chain.Add("hwupload=extra_hw_frames=64");
-                    string deint = DeintFilter(src.DeinterlaceMode) != null
+                    string deint = !campi && DeintFilter(src.DeinterlaceMode) != null
                         ? $"deinterlace=advanced:rate={(src.DeinterlaceMode.EndsWith("2x") ? "field" : "frame")}:" : "";
                     int qw = Math.Max(2, src.W & ~1), qh = Math.Max(2, src.H & ~1);
                     int qx = src.X & ~1, qy = src.Y & ~1;

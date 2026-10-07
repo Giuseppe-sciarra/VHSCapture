@@ -117,7 +117,7 @@ namespace VHSCapture
             {
                 cbSize.Text = v.Size;
                 cbFps.Text = v.InFps;
-                cbDeint.SelectedIndex = 2;   // Yadif 2x
+                cbDeint.SelectedIndex = DeintIndex(v.Deint);   // Yadif 2x per PAL/NTSC, campi separati per la ricostruzione
                 SelTv(v.Tv);                 // e lo standard del grabber che va con risoluzione e fps
                 nCropL.Value = 0; nCropT.Value = 0; nCropR.Value = 0; nCropB.Value = v.CropB;
                 // proporzioni 4:3 al centro del canvas 1920x1080, bande ai lati
@@ -139,7 +139,7 @@ namespace VHSCapture
             {
                 InputSize = string.IsNullOrWhiteSpace(cbSize.Text) ? "auto" : cbSize.Text.Trim(),
                 InputFps = string.IsNullOrWhiteSpace(cbFps.Text) ? "auto" : cbFps.Text.Trim(),
-                DeinterlaceMode = cbDeint.SelectedIndex switch { 1 => "yadif", 2 => "yadif2x", 3 => "bwdif", 4 => "bwdif2x", _ => "off" },
+                DeinterlaceMode = DeintMode(cbDeint.SelectedIndex),
                 CropL = (int)nCropL.Value, CropT = (int)nCropT.Value, CropR = (int)nCropR.Value, CropB = (int)nCropB.Value,
                 TvStandard = TvKey(),
             };
@@ -191,13 +191,13 @@ namespace VHSCapture
                      "Se sotto «Ora nel grabber» resta NTSC_M, il grabber non ha l'NTSC 4.43: usa «PAL B/G ricostruito».",
                 4 => "NTSC su videoregistratore PAL  —  PAL B/G ricostruito\n" +
                      "Per i grabber che non tengono PAL-60 né NTSC 4.43 (restano su NTSC_M, colori sbagliati).\n" +
-                     "Il grabber in PAL B/G decodifica il colore giusto ma impagina a 50 Hz: VHSCapture ritaglia\n" +
-                     "il quadro buono e scarta la banda nera, il pezzo del quadro dopo e i fotogrammi vuoti.\n" +
+                     "Il grabber in PAL B/G decodifica il colore giusto ma impagina a 50 Hz: VHSCapture separa i due\n" +
+                     "campi di ogni fotogramma, ritaglia il quadro buono e scarta banda nera e fotogrammi vuoti.\n" +
                      "Grabber:           PAL B/G (lo imposta VHSCapture)\n" +
-                     "Ingresso:          720 × 480  ·  29,97 fps  ·  niente deinterlaccio (era lo sfarfallio)\n" +
-                     "Ritaglio:           110 righe in basso\n" +
-                     "Registrazione:  1920 × 1080  ·  29,97 fps, 4:3 al centro\n" +
-                     "⚠ In questo modo il grabber manda circa 17 fotogrammi al secondo: movimento meno fluido.",
+                     "Ingresso:          720 × 576  ·  25 fps  ·  campi separati (niente Yadif: era lo sfarfallio)\n" +
+                     "Ritaglio:           112 righe in basso\n" +
+                     "Registrazione:  1920 × 1080  ·  59,94 fps, 4:3 al centro\n" +
+                     "⚠ Il grabber in questo modo dà circa 21 immagini al secondo: movimento meno fluido di un PAL/NTSC normale.",
                 _ => "Personalizzato  —  valori scelti a mano, lo standard non è applicato.\n" +
                      "Scegli uno standard dal menu per rimettere i valori giusti (grabber compreso).",
             };
@@ -258,7 +258,7 @@ namespace VHSCapture
                     "NTSC  —  lettore NTSC  —  720×480 @ 29,97  →  1080p @ 59,94",
                     "NTSC su videoregistratore PAL  —  PAL-60  →  1080p @ 59,94",
                     "NTSC su videoregistratore PAL  —  NTSC 4.43  →  1080p @ 59,94",
-                    "NTSC su videoregistratore PAL  —  PAL B/G ricostruito  →  1080p @ 29,97",
+                    "NTSC su videoregistratore PAL  —  PAL B/G ricostruito  →  1080p @ 59,94",
                     "Personalizzato" });
                 Row(tGen, "Standard video", cbStandard, null);
                 cbStandard.Width = 360;
@@ -294,7 +294,7 @@ namespace VHSCapture
                 lblModes = Muted("", 560);
                 Full(tGen, lblModes);
                 cbDeint = Combo();
-                cbDeint.Items.AddRange(new object[] { "Disattivato", "Yadif", "Yadif 2x (50p da VHS PAL, consigliato)", "Bwdif", "Bwdif 2x" });
+                cbDeint.Items.AddRange(new object[] { "Disattivato", "Yadif", "Yadif 2x (50p da VHS PAL, consigliato)", "Bwdif", "Bwdif 2x", "Campi separati (NTSC su VCR PAL ricostruito)" });
                 Row(tGen, "Deinterlacciamento", cbDeint, null);
                 nRtBuf = Num(64, 4096, 64);
                 Row(tGen, "Buffer cattura (MB)", nRtBuf, null);
@@ -500,6 +500,9 @@ namespace VHSCapture
             return (tb, lv);
         }
 
+        static int DeintIndex(string mode) => mode switch { "yadif" => 1, "yadif2x" => 2, "bwdif" => 3, "bwdif2x" => 4, "fields" => 5, _ => 0 };
+        static string DeintMode(int idx) => idx switch { 1 => "yadif", 2 => "yadif2x", 3 => "bwdif", 4 => "bwdif2x", 5 => "fields", _ => "off" };
+
         static ComboBox Combo() => new SafeCombo { DropDownStyle = ComboBoxStyle.DropDownList };
         static NumericUpDown Num(int min, int max, int step) => new SafeNumeric { Minimum = min, Maximum = max, Increment = step };
         /// <summary>Testi a capo entro la larghezza della colonna dei campi; riepilogo standard e menu non escono dalla finestra.</summary>
@@ -570,7 +573,7 @@ namespace VHSCapture
                 RefreshSizes();
                 cbFps.Text = work.InputFps;
                 nRtBuf.Value = Math.Clamp(work.RtBufMB, 64, 4096);
-                cbDeint.SelectedIndex = work.DeinterlaceMode switch { "yadif" => 1, "yadif2x" => 2, "bwdif" => 3, "bwdif2x" => 4, _ => 0 };
+                cbDeint.SelectedIndex = DeintIndex(work.DeinterlaceMode);
                 cbFormat.SelectedIndex = work.VideoFormat switch { "mjpeg" => 1, "yuyv422" => 2, "nv12" => 3, _ => 0 };
                 SelTv(work.TvStandard);
                 nCropL.Value = Math.Clamp(work.CropL, 0, 4000); nCropT.Value = Math.Clamp(work.CropT, 0, 4000);
@@ -634,7 +637,7 @@ namespace VHSCapture
                 work.InputSize = string.IsNullOrWhiteSpace(cbSize.Text) ? "auto" : cbSize.Text.Trim();
                 work.InputFps = string.IsNullOrWhiteSpace(cbFps.Text) ? "auto" : cbFps.Text.Trim();
                 work.RtBufMB = (int)nRtBuf.Value;
-                work.DeinterlaceMode = cbDeint.SelectedIndex switch { 1 => "yadif", 2 => "yadif2x", 3 => "bwdif", 4 => "bwdif2x", _ => "off" };
+                work.DeinterlaceMode = DeintMode(cbDeint.SelectedIndex);
                 work.VideoFormat = cbFormat.SelectedIndex switch { 1 => "mjpeg", 2 => "yuyv422", 3 => "nv12", _ => "auto" };
                 work.AudioOffsetMs = (int)nAudioOff.Value;
                 work.TvStandard = TvKey();

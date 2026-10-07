@@ -25,7 +25,8 @@ namespace VHSCapture
         public string InputFps { get; set; } = "25";
         /// <summary>auto, mjpeg, yuyv422, nv12 (come "Formato video" di OBS). Per 1080p60 dai grabber HDMI serve quasi sempre MJPEG.</summary>
         public string VideoFormat { get; set; } = "auto";
-        /// <summary>off, yadif, yadif2x, bwdif, bwdif2x (come il deinterlacciamento di OBS). 2x = 50p da VHS PAL.</summary>
+        /// <summary>off, yadif, yadif2x, bwdif, bwdif2x (come il deinterlacciamento di OBS). 2x = 50p da VHS PAL.
+        /// fields = campi separati e raddoppiati in altezza, senza supporre la parità (ricostruzione NTSC su VCR PAL).</summary>
         public string DeinterlaceMode { get; set; } = "off";
         public bool? Deinterlace { get; set; } = null;          // solo migrazione dalle versioni precedenti
         public int RtBufMB { get; set; } = 512;
@@ -71,7 +72,8 @@ namespace VHSCapture
         [JsonIgnore] public double VolumeGain => Math.Pow(10, VolumeDb / 20.0);
         /// <summary>Cassetta NTSC da VCR PAL con grabber senza PAL-60: grabber in PAL B/G a 720×480 (colori giusti, quadro impaginato a 50 Hz).
         /// Il motore scarta i fotogrammi vuoti che il grabber manda in questo modo.</summary>
-        [JsonIgnore] public bool IsNtscRebuild => Type == SourceType.Capture && InputSize == "720x480" && DShowProps.TvSame(TvStandard, "PAL_B");
+        [JsonIgnore] public bool IsNtscRebuild => Type == SourceType.Capture && DShowProps.TvSame(TvStandard, "PAL_B") &&
+                                                 (DeinterlaceMode == "fields" || InputSize == "720x480");
         [JsonIgnore] public bool ColorIsNeutral => Math.Abs(Brightness) < 1e-6 && Math.Abs(Contrast - 1) < 1e-6 && Math.Abs(Saturation - 1) < 1e-6 && Math.Abs(Gamma - 1) < 1e-6 && Math.Abs(Hue) < 1e-6;
 
         public Source Clone() => (Source)MemberwiseClone();
@@ -173,12 +175,13 @@ namespace VHSCapture
 
         /// <summary>
         /// Cassetta NTSC su videoregistratore PAL con un grabber che non tiene PAL-60 né NTSC 4.43 (es. USB 2828x: resta su NTSC_M).
-        /// Il grabber va in PAL B/G: il colore è giusto, ma impagina a 50 Hz un segnale a 60 Hz e ogni fotogramma (720×480)
-        /// contiene il quadro (righe 0–369), la banda nera e un pezzo del quadro dopo. Misurato sui campioni: la banda parte
-        /// sempre alla riga 374 e i due campi di ogni fotogramma sono dello stesso istante → niente deinterlaccio (era lo sfarfallio),
-        /// ritaglio di 110 righe in basso. Il grabber in questo modo manda circa 17 fotogrammi al secondo.
+        /// Il grabber va in PAL B/G: il colore è giusto, ma impagina a 50 Hz un segnale a 60 Hz. A 720×576 ogni campo da 288 righe
+        /// contiene il quadro (righe 0–231), la banda nera (da ~234) e un pezzo del quadro dopo; i due campi di un fotogramma sono
+        /// istanti diversi (prima il superiore) ma con allineamento verticale variabile, quindi niente Yadif (era lo sfarfallio):
+        /// campi separati e raddoppiati, ritaglio di 112 righe in basso. Misurato sui campioni dell'USB 2828x del laboratorio:
+        /// 720×576 = circa 21 immagini al secondo, 720×480 = 16,5, 352×288 = 12,5, 352×240 = 10, 640×480 = 7.
         /// </summary>
-        public static readonly VideoStandard NTSC_PALB = new VideoStandard { Name = "NTSC su VCR PAL (PAL B/G ricostruito)", Size = "720x480", InFps = "29.97", CanvasFps = "29.97", Deint = "off", CropB = 110, Tv = "PAL_B" };
+        public static readonly VideoStandard NTSC_PALB = new VideoStandard { Name = "NTSC su VCR PAL (PAL B/G ricostruito)", Size = "720x576", InFps = "25", CanvasFps = "59.94", Deint = "fields", CropB = 112, Tv = "PAL_B" };
 
         /// <summary>Nell'ordine del menu «Standard video» delle Proprietà (dopo c'è «Personalizzato»).</summary>
         public static readonly VideoStandard[] All = { PAL, NTSC, NTSC_PAL60, NTSC_443, NTSC_PALB };

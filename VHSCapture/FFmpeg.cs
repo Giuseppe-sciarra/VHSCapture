@@ -882,7 +882,8 @@ namespace VHSCapture
             int map = palMap.AddOrUpdate(id, 1, (_, m) => m ^ 1);
             lock (mon) { if (manual) mon.ManualToggle(); else mon.ExpectFlip(); }
             zmq.Queue(id + ":pal", PalSoftware.SelectCommand(id, map));
-            Log?.Invoke($"Colore PAL: {(manual ? "invertito a mano" : "invertito da solo — " + mon.LastReason)} (uscita {map})");
+            zmq.Queue(id + ":palm", PalSoftware.SelectCommandDelayed(id, map));
+            Log?.Invoke($"Colore PAL: {(manual ? "invertito a mano" : "invertito da solo — " + mon.LastReason)} (uscita {map}{(manual ? "" : "; " + mon.ScheduleInfo)})");
             return true;
         }
         public bool IsPalSoftware(string id) => palMon.ContainsKey(id);
@@ -1642,8 +1643,10 @@ namespace VHSCapture
                 {
                     // PAL-60 col colore rifatto: V rigirato riga per riga PRIMA di tutto (anche del ramo di analisi,
                     // che così vede i colori veri e serve a scegliere la fase)
-                    graph.Append(PalSoftware.Filter(srcIn, $"[pq{k}]", src.Id, k.ToString()));
-                    srcIn = $"[pq{k}]";
+                    // [pq{k}] immediato → analisi; [pqd{k}] ritardato → uscita. Senza ramo di analisi l'immediato va a nullsink.
+                    graph.Append(PalSoftware.Filter(srcIn, $"[pq{k}]", src.Id, k.ToString(), $"[pqd{k}]"));
+                    if (!pn.Analysis.ContainsKey(src.Id)) graph.Append($"[pq{k}]nullsink;");
+                    srcIn = $"[pqd{k}]";
                 }
                 if (src.Type == SourceType.Capture)
                 {
@@ -1653,7 +1656,12 @@ namespace VHSCapture
                         // (per capire se lo schermo è uniforme non serve deinterlacciare). Sempre a piena velocità della sorgente:
                         // un'uscita decimata (es. 2 fps) resta indietro e ffmpeg 7 frena tutte le altre → anteprima a raffiche.
                         string pre0 = PreFilter(src);
-                        graph.Append($"{srcIn}{(pre0 != null ? pre0 + "," : "")}split=2[cs{k}][an{k}];");
+                        if (src.IsPal60Software)
+                        {
+                            // l'analisi guarda il ramo immediato, l'uscita quello ritardato: nessuno split
+                            graph.Append($"[pqd{k}]null[cs{k}];[pq{k}]null[an{k}];");
+                        }
+                        else graph.Append($"{srcIn}{(pre0 != null ? pre0 + "," : "")}split=2[cs{k}][an{k}];");
                         // 80×60 pixel yuv444p verso l'app (14 KB a fotogramma): il rilevatore guarda l'immagine, non statistiche riassuntive
                         graph.Append($"[an{k}]crop=w=iw-{src.CropL + src.CropR}:h=ih-{src.CropT + src.CropB}:x={src.CropL}:y={src.CropT}," +
                                      $"scale={NoSignalDetector.W}:{NoSignalDetector.H}:flags=area,format=yuv444p[ano{k}];");
@@ -1750,6 +1758,7 @@ namespace VHSCapture
             foreach (var src in audioSrcs)
             {
                 string off = src.AudioOffsetMs != 0 ? $"asetpts=PTS+{F(src.AudioOffsetMs / 1000.0, "0.000")}/TB," : "";
+                if (src.IsPal60Software && PalSoftware.DelayFrames > 0) off = PalSoftware.AudioDelayFilter + "," + off;   // stesso ritardo del video
                 string meterPipe = pn.Meters.TryGetValue(src.Id, out var mp) ? PipeNames.InFilter(mp) : "NUL";
                 graph.Append($"[{idx[src]}:a]{off}aresample=48000:async=1,volume@a{src.Id}=volume={F(src.VolumeGain, "0.#####")},asplit=2[am{a}][ax{a}];");
                 graph.Append($"[am{a}]asetnsamples=n=1600:p=0,astats=metadata=1:reset=1:measure_perchannel=RMS_level+Peak_level:measure_overall=none," +

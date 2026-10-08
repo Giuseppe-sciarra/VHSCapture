@@ -36,9 +36,20 @@ namespace VHSCapture
         /// Pezzo di grafo: dall'ingresso <paramref name="input"/> all'etichetta <paramref name="output"/>, con lo streamselect
         /// che si chiama streamselect@pal{id} (map 0 = come calcolato, map 1 = V invertito). Serve un'altezza multipla di 4.
         /// </summary>
-        public static string Filter(string input, string output, string id, string tag)
+        /// <summary>
+        /// Due selettori: streamselect@pal{id} immediato (va al ramo di analisi) e streamselect@palm{id} sui candidati
+        /// ritardati di DelayFrames (va all'uscita). Il comando li cambia tutti e due nello stesso istante: sull'uscita
+        /// cade DelayFrames fotogrammi "indietro", cioè sul fotogramma che il monitor aveva deciso.
+        /// </summary>
+        public static string Filter(string input, string output, string id, string tag, string outputDelayed = null)
         {
             string t = "pal" + tag;
+            string tail = outputDelayed == null
+                ? $"[{t}a][{t}c]streamselect@pal{id}=inputs=2:map=0{output};"
+                : $"[{t}a]split=2[{t}a1][{t}a2];[{t}c]split=2[{t}c1][{t}c2];" +
+                  $"[{t}a1][{t}c1]streamselect@pal{id}=inputs=2:map=0{output};" +
+                  $"[{t}a2]{DelayFilter}[{t}a2d];[{t}c2]{DelayFilter}[{t}c2d];" +
+                  $"[{t}a2d][{t}c2d]streamselect@palm{id}=inputs=2:map=0{outputDelayed};";
             // NIENTE fps qui davanti: provato (riempiva i buchi dei fotogrammi persi), ma i tempi del grabber tremolano e
             // fps aggiungeva/toglieva fotogrammi ogni mezzo secondo girando il colore. Il conteggio resta sui fotogrammi
             // decodificati; un fotogramma perso vero lo corregge il monitor al fotogramma dopo.
@@ -49,11 +60,21 @@ namespace VHSCapture
                    $"[{t}q1]crop=iw:ih/4:0:0[{t}qa];[{t}q2]crop=iw:ih/2:0:ih/4,negate[{t}qb];[{t}q3]crop=iw:ih/4:0:3*ih/4[{t}qc];" +
                    $"[{t}qa][{t}qb][{t}qc]vstack=inputs=3,il=l=i,il=l=i,negate=enable='mod(n\\,2)',{Delay},{Gain}[{t}v];" +
                    $"[{t}y][{t}u][{t}v]mergeplanes=map0s=0:map1s=1:map2s=2:format=yuv422p,split=2[{t}a][{t}b];" +
-                   $"[{t}b]lutyuv=v=negval[{t}c];" +
-                   $"[{t}a][{t}c]streamselect@pal{id}=inputs=2:map=0{output};";
+                   $"[{t}b]lutyuv=v=negval[{t}c];" + tail;
         }
 
         public static string SelectCommand(string id, int map) => $"streamselect@pal{id} map {map}";
+        public static string SelectCommandDelayed(string id, int map) => $"streamselect@palm{id} map {map}";
+
+        /// <summary>
+        /// Ritardo del video a valle dell'analisi, per far cadere il comando sul fotogramma giusto. Provato con tpad: sposta
+        /// i tempi ma ffmpeg lavora i fotogrammi appena arrivano, quindi il comando cade comunque "in tempo reale"
+        /// (simulazione: 10 fotogrammi sbagliati invece di 0); un ritardo vero (realtime) bloccherebbe anche l'analisi.
+        /// Lasciato a 0: la macchina di programmazione resta, pronta se un giorno il ritardo si farà fuori da ffmpeg.
+        /// </summary>
+        public const int DelayFrames = 0;
+        public static string DelayFilter => DelayFrames > 0 ? $"tpad=start={DelayFrames}:start_mode=clone" : "null";
+        public static string AudioDelayFilter => DelayFrames > 0 ? $"adelay=delays={(int)Math.Round(DelayFrames * 1001.0 / 30.0)}:all=1" : "anull";
     }
 
     /// <summary>
@@ -98,12 +119,22 @@ namespace VHSCapture
         public void Reset()
         {
             havePrev = false; priorSum = priorNorm = 0; priorFrames = 0; Decided = false; expectFlip = 0; pendingFlip = false; ema = 0; emaBad = 0;
-            suspendUntil = -1; holdUntil = -1;
+            suspendUntil = -1; holdUntil = -1; scheduledAt = -1; decidedAt = -1; sentAt = -1;
         }
 
         /// <summary>Da chiamare quando si inverte V (automaticamente o col tasto): il prossimo rovesciamento è nostro.</summary>
-        public void ExpectFlip() { expectFlip = 20; Toggles++; pendingFlip = false; ema = 0; emaBad = 0; holdUntil = frames + 60; }   // lo zmq arriva in 3-6 fotogrammi; poi 2 s di calma
-        int holdUntil = -1;   // dopo un'inversione nessun'altra per 2 s (nel log del laboratorio: fino a 4 inversioni nello stesso secondo)
+        public void ExpectFlip() { expectFlip = Delay + 15; Toggles++; pendingFlip = false; ema = 0; emaBad = 0; holdUntil = frames + 60; sentAt = frames; scheduledAt = -1; }   // il nostro cambio compare nell'analisi dopo la latenza; intanto l'analisi mostra ancora i colori "vecchi" fino a frame deciso + Delay
+        int holdUntil = -1;   // dopo un'inversione il controllo lento sta fermo 2 s (non il veloce: un nastro rovinato perde fotogrammi ogni mezzo secondo)
+
+        // Programmazione: il video esce con DelayFrames di ritardo rispetto all'analisi. Un'inversione decisa sul fotogramma k
+        // va comandata quando l'analisi è a k + DelayFrames − Latenza, così arriva sul fotogramma k in uscita.
+        // La latenza (comando → effetto visto nell'analisi) si misura da sola a ogni inversione.
+        int scheduledAt = -1, decidedAt = -1, sentAt = -1;
+        public int Latency { get; private set; } = 6;
+        public int Delay { get; set; } = PalSoftware.DelayFrames;
+        void Schedule(string why) { if (scheduledAt >= 0) return; decidedAt = frames; scheduledAt = frames + Math.Max(0, Delay - Latency - 1); LastReason = why; }
+        /// <summary>Di quanti fotogrammi di anticipo è stato dato il comando (per il Log).</summary>
+        public string ScheduleInfo => sentAt >= 0 && decidedAt >= 0 ? $"deciso al fotogramma {decidedAt}, comandato al {sentAt} (anticipo {Delay} − latenza {Latency})" : "";
 
         /// <summary>Inversione col tasto: la scelta di chi guarda vale più della stima automatica.</summary>
         public void ManualToggle() { ExpectFlip(); Decided = true; suspendUntil = frames + 1800; LastReason = "invertito a mano (automatico fermo per 60 s)"; }
@@ -150,15 +181,21 @@ namespace VHSCapture
                 {
                     // confermato solo se anche questo fotogramma sta dalla parte "nuova" (V concorde col fotogramma sospetto)
                     double cPend = Corr(svd, svv, sdd);
-                    if (cPend > 0.5) { toggle = true; LastReason = "colore rovesciato di colpo (fotogramma perso dal grabber o giunta del nastro)"; }
+                    if (cPend > 0.5) Schedule("colore rovesciato di colpo (fotogramma perso dal grabber o giunta del nastro)");
                     pendingFlip = false;
                 }
-                else if (reversal && expectFlip > 0) expectFlip = 0;   // è il nostro cambio che è arrivato (l'immagine ora è giusta)
-                else if (reversal && idxNow > 0.03 && pn / n > 40 && frames >= holdUntil)
+                else if (reversal && expectFlip > 0)
                 {
-                    // rovesciamento vero: stessa scena, V girato in blocco E immagine ora sull'asse viola/verde
-                    pendingFlip = true;
-                    for (int i = 0; i < N; i++) pendV[i] = f[2 * N + i] - 128;
+                    // è il nostro cambio che è arrivato: misuro la latenza comando → effetto (media mobile, 2..15 fotogrammi)
+                    if (sentAt >= 0) { int l = frames - sentAt; if (l >= 1 && l <= 20) Latency = Math.Clamp((int)Math.Round(0.5 * Latency + 0.5 * l), 2, 15); }
+                    expectFlip = 0;
+                }
+                else if (reversal && idxNow > 0.03 && pn / n > 40)   // il rilevatore veloce non ha pausa: su un nastro che perde fotogrammi deve correggere ogni volta
+                {
+                    // rovesciamento vero: stessa scena, V girato in blocco E immagine ora sull'asse viola/verde.
+                    // La conferma sul fotogramma dopo costa un fotogramma, ma senza, un disturbo di un solo fotogramma
+                    // (frequente sui nastri) farebbe scattare due inversioni invece di nessuna.
+                    pendingFlip = true; for (int i = 0; i < N; i++) pendV[i] = f[2 * N + i] - 128;
                 }
             }
             bool waiting = expectFlip > 0;   // durante la latenza del nostro cambio le immagini non contano per la stima
@@ -178,23 +215,25 @@ namespace VHSCapture
                     if ((priorFrames >= PriorMinFrames && enough && Math.Abs(score) > PriorStrong) || (priorFrames >= PriorMaxFrames && enough && Math.Abs(score) > 0.03))
                     {
                         Decided = true;
-                        if (score > 0) { toggle = true; LastReason = $"colori sull'asse viola/verde (indice {score:+0.00;-0.00}): fase PAL girata"; }
+                        if (score > 0) Schedule($"colori sull'asse viola/verde (indice {score:+0.00;-0.00}): fase PAL girata");
                         else LastReason = $"fase PAL giusta (indice {score:+0.00;-0.00})";
                     }
                 }
                 else if (colored)
                 {
                     ema = 0.8 * ema + 0.2 * frameIdx;
-                    if (frames >= suspendUntil)
+                    if (frames >= suspendUntil && frames >= holdUntil)   // la pausa dopo un'inversione vale solo per il controllo lento
                     {
                         if (ema > EmaStrong) emaBad++; else emaBad = 0;
-                        if (emaBad >= EmaConfirm) { toggle = true; emaBad = 0; suspendUntil = frames + 300; LastReason = $"colori viola/verdi da 1 s (indice {ema:+0.00;-0.00})"; }
+                        if (emaBad >= EmaConfirm) { emaBad = 0; suspendUntil = frames + 300; Schedule($"colori viola/verdi da 1 s (indice {ema:+0.00;-0.00})"); }
                     }
                 }
             }
 
             for (int i = 0; i < N; i++) { prevY[i] = f[i]; prevU[i] = f[N + i] - 128; prevV[i] = f[2 * N + i] - 128; }
             havePrev = true;
+            // momento giusto per il comando: il fotogramma deciso sta per uscire dal ritardo
+            if (scheduledAt >= 0 && frames >= scheduledAt) { scheduledAt = -1; return true; }
             return toggle;
         }
     }

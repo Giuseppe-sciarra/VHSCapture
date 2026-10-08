@@ -200,8 +200,8 @@ var sw = new Source { Type = SourceType.Capture, InputSize = "720x480", InputFps
 Check(VideoStandard.Detect(sw) == VideoStandard.NTSC_PAL60SW && sw.IsPal60Software && !sw.IsNtscRebuild && Array.IndexOf(VideoStandard.All, VideoStandard.NTSC_PAL60SW) == 4, "Preset NTSC su VCR PAL (PAL-60 col colore rifatto) riconosciuto");
 var swS = Settings(); swS.Sources[0].InputSize = "720x480"; swS.Sources[0].InputFps = "29.97"; swS.Sources[0].CropB = 6; swS.Sources[0].TvStandard = "NTSC_M>" + PalSoftware.TvKey;
 var swCpu = Args(swS, false); var swAn = Args(swS, false, analysis: true); var swGpu = Args(swS, true, analysis: true);
-Check(swCpu.Contains("streamselect@palgrabber=inputs=2:map=0[pq0]") && swCpu.Contains("[pq0]") && swCpu.IndexOf("streamselect@palgrabber") < swCpu.IndexOf("yadif"), "Colore PAL rifatto prima del deinterlaccio");
-Check(swAn.Contains("[pq0]split=2[cs0][an0]") && swGpu.Contains("[pq0]split=2[cs0][an0]") && swGpu.Contains("[cs0]setfield=tff,format=nv12,hwupload"), "Ramo di analisi e GPU dopo la correzione del colore");
+Check(swCpu.Contains("streamselect@palgrabber=inputs=2:map=0[pq0]") && swCpu.Contains("streamselect@palmgrabber=inputs=2:map=0[pqd0]") && swCpu.IndexOf("streamselect@palmgrabber") < swCpu.IndexOf("yadif"), "Colore PAL rifatto prima del deinterlaccio, con selettore immediato e ritardato");
+Check(swAn.Contains("[pqd0]null[cs0];[pq0]null[an0]") && swGpu.Contains("[pqd0]null[cs0];[pq0]null[an0]") && swGpu.Contains("[cs0]setfield=tff,format=nv12,hwupload") && swCpu.Contains("[pq0]nullsink"), "Analisi sul ramo immediato, uscita su quello ritardato (CPU e GPU)");
 Check(!cpu.Contains("streamselect") && !swCpu.Contains("signalstats"), "Correzione solo per il PAL-60 software");
 Check(PalSoftware.SelectCommand("grabber", 1) == "streamselect@palgrabber map 1", "Comando zmq per girare il colore");
 // monitor della fase su immagini 80×60 sintetiche: scena blu (U+, V−) = fase giusta, viola (U+, V+) = da girare
@@ -231,6 +231,9 @@ bool tO = false; for (int i = 50; i < 110; i++) tO |= mOwn.Observe(Img(30, i < 5
 Check(tO1 > 0 && !tO, "Monitor: il rovesciamento chiesto da noi non conta e dopo non si tocca più");
 var mCut = new PalPhaseMonitor(); bool tC = false; for (int i = 0; i < 70; i++) { var f = Img(30, -20, i); if (i >= 60) { f = Img(-25, 20, i * 7 + 40); for (int q = 0; q < NoSignalDetector.W * NoSignalDetector.H; q++) f[q] = (byte)(255 - f[q]); } tC |= mCut.Observe(f); }
 Check(!tC, "Monitor: cambio di scena (luce calda dopo luce fredda) non scambiato per un rovesciamento");
+// senza ritardo video (DelayFrames = 0) il comando parte subito; con un ritardo futuro partirebbe Delay − latenza − 1 fotogrammi dopo
+var mSch = new PalPhaseMonitor { Delay = 24 }; int tS = -1; for (int i = 0; i < 80 && tS < 0; i++) if (mSch.Observe(Img(30, 20, i))) tS = i;
+Check(tS == tV + 17 && PalSoftware.DelayFrames == 0 && !swCpu.Contains("tpad") && !swCpu.Contains("adelay"), "Programmazione pronta (24 − 6 − 1 = 17), ma ritardo spento: niente tpad/adelay nel grafo");
 var tvS = Settings(); var tvArgs1 = Args(tvS, false); tvS.Sources[0].TvStandard = "PAL_60"; var tvArgs2 = Args(tvS, false);
 Check(tvArgs1 == tvArgs2 && !tvArgs2.Contains("PAL_60"), "Il comando ffmpeg non cambia con lo standard del grabber");
 if (args.Length > 0)

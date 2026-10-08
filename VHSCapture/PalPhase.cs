@@ -39,7 +39,11 @@ namespace VHSCapture
         public static string Filter(string input, string output, string id, string tag)
         {
             string t = "pal" + tag;
-            return $"{input}format=yuv422p,split=3[{t}y0][{t}u0][{t}v0];" +
+            // fps davanti a tutto: il grabber marca ogni fotogramma con l'ora, un fotogramma perso lascia un buco di tempo
+            // e fps lo riempie con un duplicato. Così il conteggio n (da cui dipende il segno di V) resta allineato al
+            // tempo reale e la fase del colore NON si gira a ogni fotogramma perso (verificato: indice −0,44 prima e dopo
+            // un fotogramma tolto, contro +0,45 senza fps). Da un nastro brutto il grabber ne perde anche 1 su 9.
+            return $"{input}fps=30000/1001:round=near,format=yuv422p,split=3[{t}y0][{t}u0][{t}v0];" +
                    $"[{t}y0]extractplanes=y[{t}y];" +
                    $"[{t}u0]extractplanes=u,{Delay},{Gain}[{t}u];" +
                    $"[{t}v0]extractplanes=v,il=l=d,il=l=d,split=3[{t}q1][{t}q2][{t}q3];" +
@@ -95,11 +99,12 @@ namespace VHSCapture
         public void Reset()
         {
             havePrev = false; priorSum = priorNorm = 0; priorFrames = 0; Decided = false; expectFlip = 0; pendingFlip = false; ema = 0; emaBad = 0;
-            suspendUntil = -1;
+            suspendUntil = -1; holdUntil = -1;
         }
 
         /// <summary>Da chiamare quando si inverte V (automaticamente o col tasto): il prossimo rovesciamento è nostro.</summary>
-        public void ExpectFlip() { expectFlip = 20; Toggles++; pendingFlip = false; ema = 0; emaBad = 0; }   // lo zmq arriva in 3-6 fotogrammi
+        public void ExpectFlip() { expectFlip = 20; Toggles++; pendingFlip = false; ema = 0; emaBad = 0; holdUntil = frames + 60; }   // lo zmq arriva in 3-6 fotogrammi; poi 2 s di calma
+        int holdUntil = -1;   // dopo un'inversione nessun'altra per 2 s (nel log del laboratorio: fino a 4 inversioni nello stesso secondo)
 
         /// <summary>Inversione col tasto: la scelta di chi guarda vale più della stima automatica.</summary>
         public void ManualToggle() { ExpectFlip(); Decided = true; suspendUntil = frames + 1800; LastReason = "invertito a mano (automatico fermo per 60 s)"; }
@@ -150,7 +155,7 @@ namespace VHSCapture
                     pendingFlip = false;
                 }
                 else if (reversal && expectFlip > 0) expectFlip = 0;   // è il nostro cambio che è arrivato (l'immagine ora è giusta)
-                else if (reversal && idxNow > 0.03 && pn / n > 40)
+                else if (reversal && idxNow > 0.03 && pn / n > 40 && frames >= holdUntil)
                 {
                     // rovesciamento vero: stessa scena, V girato in blocco E immagine ora sull'asse viola/verde
                     pendingFlip = true;

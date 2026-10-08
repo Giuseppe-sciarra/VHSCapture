@@ -39,11 +39,10 @@ namespace VHSCapture
         public static string Filter(string input, string output, string id, string tag)
         {
             string t = "pal" + tag;
-            // fps davanti a tutto: il grabber marca ogni fotogramma con l'ora, un fotogramma perso lascia un buco di tempo
-            // e fps lo riempie con un duplicato. Così il conteggio n (da cui dipende il segno di V) resta allineato al
-            // tempo reale e la fase del colore NON si gira a ogni fotogramma perso (verificato: indice −0,44 prima e dopo
-            // un fotogramma tolto, contro +0,45 senza fps). Da un nastro brutto il grabber ne perde anche 1 su 9.
-            return $"{input}fps=30000/1001:round=near,format=yuv422p,split=3[{t}y0][{t}u0][{t}v0];" +
+            // NIENTE fps qui davanti: provato (riempiva i buchi dei fotogrammi persi), ma i tempi del grabber tremolano e
+            // fps aggiungeva/toglieva fotogrammi ogni mezzo secondo girando il colore. Il conteggio resta sui fotogrammi
+            // decodificati; un fotogramma perso vero lo corregge il monitor al fotogramma dopo.
+            return $"{input}format=yuv422p,split=3[{t}y0][{t}u0][{t}v0];" +
                    $"[{t}y0]extractplanes=y[{t}y];" +
                    $"[{t}u0]extractplanes=u,{Delay},{Gain}[{t}u];" +
                    $"[{t}v0]extractplanes=v,il=l=d,il=l=d,split=3[{t}q1][{t}q2][{t}q3];" +
@@ -176,7 +175,7 @@ namespace VHSCapture
                     priorSum += ps; priorNorm += pn; priorFrames++;
                     double score = priorNorm > 0 ? priorSum / priorNorm : 0;
                     bool enough = priorNorm > 20000;
-                    if ((priorFrames >= PriorMinFrames && enough && Math.Abs(score) > PriorStrong) || priorFrames >= PriorMaxFrames)
+                    if ((priorFrames >= PriorMinFrames && enough && Math.Abs(score) > PriorStrong) || (priorFrames >= PriorMaxFrames && enough && Math.Abs(score) > 0.03))
                     {
                         Decided = true;
                         if (score > 0) { toggle = true; LastReason = $"colori sull'asse viola/verde (indice {score:+0.00;-0.00}): fase PAL girata"; }

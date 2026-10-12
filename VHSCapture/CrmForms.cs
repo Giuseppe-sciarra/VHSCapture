@@ -452,7 +452,7 @@ namespace VHSCapture
     /// Fine cassetta: ✅ Tieni (Invio) = si conta e il file resta, qualunque durata.
     /// 🗑 Scarta = cassetta vuota: non si conta, il totale del cliente scende, il file si cancella.
     /// 🔄 Ricomincia = video da buttare (es. il videoregistratore ha fatto il test testine): file cancellato,
-    ///    non si conta, stesso numero di cassetta, e la registrazione riparte subito.
+    ///    non si conta, stesso numero di cassetta; la registrazione NON riparte da sola, la riavvia l'operatore.
     /// (La partenza sbagliata non passa di qui: entro la soglia di secondi si gestisce da sola, senza domande.)
     /// Non ha la X e non si chiude da sola: aspetta l'operatore anche dopo lo stop automatico.
     /// </summary>
@@ -504,7 +504,7 @@ namespace VHSCapture
                     CrmColori.Rosso, "scartata");
                 Scelta("🔄   Ricomincia la cassetta",
                     "Il video è da rifare: test delle testine, partita nel punto sbagliato, immagine sbagliata…",
-                    $"→ NON la conto · il file appena registrato viene cancellato · la registrazione RIPARTE SUBITO, sempre come cassetta {cassetta} di {totali}",
+                    $"→ NON la conto · il file appena registrato viene cancellato · poi premi tu «Avvia registrazione» quando sei pronto, sempre come cassetta {cassetta} di {totali}",
                     CrmColori.Arancio, "ricomincia");
             }
             else
@@ -515,8 +515,8 @@ namespace VHSCapture
                     conCliente ? $"→ la conto: {Math.Min(fatti + 1, Math.Max(totali, 1))} di {totali} fatte · il file resta" : "→ il file resta nella cartella",
                     CrmColori.Verde, "completata");
                 Scelta("🔄   Elimina e ricomincia",
-                    "Sbagliata: il file appena registrato viene cancellato e la registrazione riparte subito" + (conCliente ? $", sempre come cassetta {cassetta} di {totali}." : "."),
-                    conCliente ? "→ NON la conto · il file viene cancellato · si riparte subito" : "→ il file viene cancellato · si riparte subito",
+                    "Sbagliata: il file appena registrato viene cancellato, poi premi tu «Avvia registrazione» quando sei pronto" + (conCliente ? $", sempre come cassetta {cassetta} di {totali}." : "."),
+                    conCliente ? "→ NON la conto · il file viene cancellato · riparti tu quando vuoi" : "→ il file viene cancellato · riparti tu quando vuoi",
                     CrmColori.Arancio, "ricomincia");
             }
             ClientSize = new Size(W, y + 10);

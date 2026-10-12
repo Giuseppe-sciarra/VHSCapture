@@ -38,7 +38,6 @@ namespace VHSCapture
         bool nessunCliente;                       // scelto «Nessun cliente»: non si chiede più finché non scegli un cliente dal pulsante 👤
         ClienteForm sceltaAperta;                 // «Di chi è questa cassetta?» aperta mentre si registra (non blocca niente)
         bool daSpostare;                          // cliente scelto a registrazione già partita: a fine registrazione i file si SPOSTANO nella sua cartella
-        bool ricomincia;                          // «Ricomincia la cassetta»: finita la chiusura, la registrazione riparte da sola
         ProgressoCliente prog; Panel progWrap;    // fascia dell'avanzamento del cliente in corso
         List<CrmPostazione> postazioni = new List<CrmPostazione>();
         bool CrmAttivo => crm != null && crm.Configurato;
@@ -1251,8 +1250,8 @@ namespace VHSCapture
                     if (esito == "ricomincia")
                     {
                         esito = "rifai";          // per il CRM: non contata, totale invariato, stessa cassetta
-                        ricomincia = true;
-                        AppendLog($"Ricomincia la cassetta {cassettaInCorso}: video cancellato, la registrazione riparte subito");
+                        // NON riparte da sola: la registrazione la riavvia l'operatore (Avvia registrazione / F9)
+                        AppendLog($"Ricomincia la cassetta {cassettaInCorso}: video cancellato. Premi «Avvia registrazione» (F9) quando sei pronto");
                     }
                 }
                 if (cancella)
@@ -1275,8 +1274,8 @@ namespace VHSCapture
                 ff0.ShowDialog(this);
                 if (ff0.Esito == "ricomincia")
                 {
-                    ricomincia = true;
-                    AppendLog("Registrazione eliminata su richiesta: si riparte subito");
+                    // NON riparte da sola: la registrazione la riavvia l'operatore (Avvia registrazione / F9)
+                    AppendLog("Registrazione eliminata su richiesta. Premi «Avvia registrazione» (F9) quando sei pronto");
                     if (moveTo != null) { mirror?.Abort(); mirror = null; }
                     foreach (var fdel in RecordedFiles(final).Concat(RecordedFiles(written)).Distinct(StringComparer.OrdinalIgnoreCase).ToList())
                     {
@@ -1334,20 +1333,7 @@ namespace VHSCapture
                     lblRec.Text = "";
                     if (restartPreview && !engine.IsRunning) StartPreview();
                     SetButtons();
-                    if (ricomincia)
-                    {
-                        // «Ricomincia la cassetta»: si riparte come se si premesse Registra (stesso cliente, stessa cassetta)
-                        ricomincia = false;
-                        lblRec.Text = "Riparto a registrare…";
-                        BeginInvoke(new Action(async () =>
-                        {
-                            await Task.Delay(1500);   // l'anteprima deve essere di nuovo in piedi
-                            if (IsDisposed || closingApp || engine.IsRecording || finalizing) return;
-                            StartRecording();
-                        }));
-                    }
                 }
-                else ricomincia = false;
             }
         }
 

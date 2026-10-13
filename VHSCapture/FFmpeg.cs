@@ -1446,7 +1446,7 @@ namespace VHSCapture
                     {
                         g.lastEmit = now;
                         var d = g.detector;
-                        string detail = $"{state} · sfondo {d.LastFraction:P0} (Y{d.LastBackground.y} U{d.LastBackground.u} V{d.LastBackground.v}) · movimento {d.LastMotion:P1} · audio {(d.LastAudioAlive ? "vivo" : "fermo")}";
+                        string detail = $"{state} · sfondo {d.LastFraction:P0} (Y{d.LastBackground.y} U{d.LastBackground.u} V{d.LastBackground.v}) · movimento {d.LastMotion:P1} · audio {(d.LastAudioAlive ? "vivo" : "fermo")} ({d.LastAudioWhy})";
                         SignalState?.Invoke(id, d.BlankSeconds(now), detail);
                     }
                 }

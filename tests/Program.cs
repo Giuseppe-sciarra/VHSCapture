@@ -120,6 +120,34 @@ Run(dd, t => Frame(41, 240, 110, 8), 0, 10);
 dd.Observe(Frame(41, 240, 110, 8), 14);
 Check(dd.BlankSeconds(14) == 0, "Analisi interrotta per più di 2 s: il conteggio riparte");
 Check(dd.Observe(null, 15) == "contenuto" && dd.BlankSeconds(15) == 0, "Fotogramma mancante non conta come sfondo");
+// ---------- audio sotto un'immagine nera: livelli veri misurati con la stessa catena astats dell'app (tests/audio) ----------
+// Filmato girato al buio: l'immagine sembra lo sfondo del lettore, ma se si sente qualcosa NON è un punto morto.
+string audioDir = Path.Combine(AppContext.BaseDirectory, "audio");
+foreach (var file in Directory.GetFiles(audioDir, "*.csv").OrderBy(x => x))
+{
+    var lv = File.ReadAllLines(file).Where(l => l.Trim().Length > 0).Select(l => double.Parse(l, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+    string nome = Path.GetFileNameWithoutExtension(file);
+    bool vivo = nome.StartsWith("vivo_");
+    // a) ogni finestra di 10 s (passo 1 s) classificata come deve
+    int giuste = 0, finestre = 0; string esempio = "";
+    for (int i = 0; i + 300 <= lv.Length; i += 30)
+    {
+        var (alive, why) = NoSignalDetector.ClassifyAudio(lv[i..(i + 300)]);
+        finestre++; if (alive == vivo) giuste++; else if (esempio.Length == 0) esempio = why;
+    }
+    Check(giuste == finestre, $"Audio {nome}: {(vivo ? "suono → filmato" : "nastro vuoto → sfondo")} in {giuste}/{finestre} finestre {esempio}");
+    // b) rilevatore completo: immagine nera col rumore analogico + questo audio, al ritmo vero (30 misure al secondo)
+    var det = new NoSignalDetector();
+    int ai = 0; double blankMax = 0;
+    for (double t = 0; t <= 38; t += 0.04)
+    {
+        while (ai < lv.Length && ai / 30.0 <= t) { det.AddAudio(lv[ai], ai / 30.0); ai++; }
+        det.Observe(Frame(16, 128, 128, 8), t);
+        if (t > 12) blankMax = Math.Max(blankMax, det.BlankSeconds(t));
+    }
+    Check(vivo ? blankMax < 2 : det.BlankSeconds(38) >= 25,
+        $"Immagine nera + audio {nome}: {(vivo ? "nessun punto morto" : "conta come sfondo")} (sfondo da {(vivo ? blankMax : det.BlankSeconds(38)):0} s, audio {det.LastAudioWhy})");
+}
 var an = Args(Settings(), false, analysis: true);
 Check(an.Contains($"scale={NoSignalDetector.W}:{NoSignalDetector.H}:flags=area,format=yuv444p") && an.Contains("-f rawvideo \"\\\\.\\pipe\\analysis\"") && !an.Contains("signalstats"),
     "Ramo di analisi: pixel 80×60 verso la pipe, niente statistiche testuali");

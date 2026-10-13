@@ -262,7 +262,7 @@ namespace VHSCapture
             Row(file, "Dividi file ogni (minuti)", nSplit, "0 = no. Utile per chiavette FAT32 (4 GB)");
 
             var fine = Section(p, "Fine cassetta");
-            chkAutoStop = Check(fine, "Ferma da sola quando la cassetta finisce", "Riconosce lo sfondo del lettore o della videocamera (blu, nero, grigio, neve, anche con le scritte OSD): quasi tutto il quadro dello stesso colore, niente movimento, nessuna voce o musica. Un disturbo di un attimo non azzera il conteggio. Si arma dopo 10 s di filmato.");
+            chkAutoStop = Check(fine, "Ferma da sola quando la cassetta finisce", "Riconosce lo sfondo del lettore o della videocamera (blu, nero, grigio, neve, anche con le scritte OSD): quasi tutto il quadro dello stesso colore, niente movimento E nessun suono. Se si sente qualcosa (voci, musica, rumori) è filmato anche se l'immagine è nera, come nelle riprese al buio: conta come sfondo solo il silenzio o un fruscio/ronzio costante. Un disturbo di un attimo non azzera il conteggio. Si arma dopo 10 s di filmato.");
             nAutoSec = Num(60, 900, 10);
             Row(fine, "Secondi di solo sfondo", nAutoSec, "Consigliato 120: un nero lungo dentro il filmato non ferma la registrazione");
             chkTrim = Check(fine, "Taglia la parte uniforme finale dal file", "Senza ricodifica, pochi secondi anche per file lunghi.");

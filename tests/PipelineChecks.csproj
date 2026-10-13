@@ -8,5 +8,6 @@
     <Compile Include="../VHSCapture/PalPhase.cs" Link="PalPhase.cs" />
     <PackageReference Include="NetMQ" Version="4.0.1.13" />
     <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+    <None Include="audio\*.csv" CopyToOutputDirectory="PreserveNewest" LinkBase="audio" />
   </ItemGroup>
 </Project>

@@ -12,7 +12,8 @@ namespace VHSCapture
     ///  2. movimento vero: cambi netti e COMPATTI (pixel vicini che cambiano insieme), sia tra fotogrammi consecutivi sia
     ///     rispetto a 1 s prima (movimenti lenti). Il rumore e la neve cambiano pixel sparsi e non contano;
     ///  3. oggetti colorati: anche piccoli sono filmato (le scritte OSD di lettori e videocamere sono bianche/grigie);
-    ///  4. audio "vivo": voci e musica salgono e scendono di volume; fruscio e silenzio no.
+    ///  4. audio "vivo": se si sente qualcosa (voci, musica, rumori) è filmato anche quando l'immagine è nera (riprese al
+    ///     buio). Il nastro vuoto dà silenzio oppure un fruscio/ronzio COSTANTE: è l'unico audio che conta come sfondo.
     /// Un'interruzione breve (riga di tracking, scritta che lampeggia) non azzera il conteggio: serve più di 1 s di contenuto.
     /// </summary>
     public sealed class NoSignalDetector
@@ -54,6 +55,8 @@ namespace VHSCapture
         public double LastFraction { get; private set; }
         public double LastMotion { get; private set; }
         public bool LastAudioAlive { get; private set; }
+        /// <summary>Perché l'audio è vivo o fermo, per il Log di diagnostica (es. "suono: variazione 1,2 dB").</summary>
+        public string LastAudioWhy { get; private set; } = "";
         public int LastColored { get; private set; }
         public (int y, int u, int v) LastBackground { get; private set; }
 
@@ -70,22 +73,58 @@ namespace VHSCapture
             }
         }
 
+        // soglie dell'audio (misure RMS ogni 33 ms, finestra di 10 s)
+        public const double AudioFloorDb = -66;     // sotto: silenzio o rumore di fondo del grabber
+        public const double AudioBlockStdDb = 0.45; // variazione del volume medio su blocchi da ~0,27 s
+        const int BlockLen = 8;
+
         /// <summary>
-        /// Audio "vivo": nell'ultima finestra il volume sale e scende (P90−P10 ≥ 12 dB) e non è un filo (P90 > −42 dB).
-        /// Il fruscio della neve è forte ma costante, lo schermo blu è muto: nessuno dei due blocca lo stop.
+        /// Audio "vivo" = si sente qualcosa che non è il nastro vuoto. Il nastro vuoto dà silenzio (lettore che
+        /// silenzia) oppure fruscio/ronzio STAZIONARIO: misurato su blocchi da ~0,27 s il suo volume medio è piatto
+        /// (variazione ≤ 0,3 dB). Voci, musica, rumori di una stanza o di una festa — anche bassi, anche con la musica
+        /// compressa che ha volume quasi costante — fanno salire e scendere il volume medio tra un blocco e l'altro.
+        /// Il ronzio di massa e il ticchettio delle testine sono periodici: alzano l'escursione istante per istante ma
+        /// non il volume medio dei blocchi, quindi restano "fermi".
+        /// Vivo se il volume supera il fondo (P90 &gt; −66 dB) e la variazione a blocchi è ≥ 0,45 dB.
         /// </summary>
         public bool AudioAlive(double now)
         {
             lock (audio)
             {
                 while (audio.Count > 0 && now - audio.Peek().t > 10) audio.Dequeue();
-                if (audio.Count < 40) return false;
-                var v = new double[audio.Count]; int i = 0;
-                foreach (var a in audio) v[i++] = a.db;
-                Array.Sort(v);
-                double p10 = v[(int)(v.Length * 0.10)], p90 = v[(int)(v.Length * 0.90)];
-                return p90 > -42 && p90 - p10 >= 12;
+                if (audio.Count < 40) { LastAudioWhy = audio.Count == 0 ? "non misurato" : "poche misure"; return false; }
+                var seq = new double[audio.Count]; int i = 0;
+                foreach (var a in audio) seq[i++] = a.db;
+                var (alive, why) = ClassifyAudio(seq);
+                LastAudioWhy = why;
+                return alive;
             }
+        }
+
+        /// <summary>Classifica una sequenza di livelli RMS (dB, in ordine di tempo, ~30 al secondo).</summary>
+        public static (bool alive, string why) ClassifyAudio(double[] seq)
+        {
+            if (seq == null || seq.Length < 40) return (false, "poche misure");
+            var v = (double[])seq.Clone();
+            Array.Sort(v);
+            double p10 = v[(int)(v.Length * 0.10)], p90 = v[(int)(v.Length * 0.90)];
+            if (p90 <= AudioFloorDb) return (false, $"silenzio ({p90:0} dB)");
+            double span = p90 - p10;
+            // volume medio (in potenza) su blocchi consecutivi, poi la sua deviazione standard
+            int nb = seq.Length / BlockLen;
+            double sum = 0, sum2 = 0;
+            for (int b = 0; b < nb; b++)
+            {
+                double pw = 0;
+                for (int k = 0; k < BlockLen; k++) pw += Math.Pow(10, seq[b * BlockLen + k] / 10);
+                double db = 10 * Math.Log10(Math.Max(1e-12, pw / BlockLen));
+                sum += db; sum2 += db * db;
+            }
+            double mean = sum / Math.Max(1, nb);
+            double blockStd = nb > 1 ? Math.Sqrt(Math.Max(0, sum2 / nb - mean * mean)) : 0;
+            string m = $"{p90:0} dB, escursione {span:0.0} dB, variazione {blockStd:0.00} dB";
+            if (blockStd >= AudioBlockStdDb) return (true, "suono: " + m);
+            return (false, "fruscio o ronzio costante: " + m);
         }
 
         /// <summary>Analizza un fotogramma 80×60 yuv444p. Ritorna "sfondo" o "contenuto".</summary>

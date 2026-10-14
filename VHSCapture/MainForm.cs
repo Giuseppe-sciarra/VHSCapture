@@ -436,11 +436,19 @@ namespace VHSCapture
                 if (f.ShowDialog(this) != DialogResult.OK || !f.Corretto) return false;
                 fatti = f.Fatti; totali = f.Totali;
             }
-            string risp = await crm.Manda("conteggio", new Dictionary<string, object> { ["vhs_id"] = l.id, ["fatti"] = fatti, ["totali"] = totali });
+            // perché? (vuote / non fatte pagare / errore di conteggio…): va nello storico della scheda nel CRM
+            string motivo, nota;
+            using (var m = new MotivoRiconteggioForm(settings.DarkTheme, l.cliente, f0, fatti, t0, totali))
+            {
+                m.ShowDialog(this);
+                motivo = m.Motivo; nota = m.Nota;
+            }
+            string risp = await crm.Manda("conteggio", new Dictionary<string, object> { ["vhs_id"] = l.id, ["fatti"] = fatti, ["totali"] = totali, ["motivo"] = motivo, ["nota"] = nota });
             var agg = CrmClient.Leggi<CrmLavoro>(risp);
             if (agg != null) { l.nastri_fatti = agg.nastri_fatti; l.nastri_totali = agg.nastri_totali; l.prossima = agg.prossima; l.dettaglio = agg.dettaglio; l.stato = agg.stato; }
             else { l.nastri_fatti = fatti; l.nastri_totali = totali; l.prossima = fatti + 1; }   // CRM giù: si allinea quando torna
-            AppendLog($"Conteggio corretto per {l.cliente}: fatte {f0} → {l.nastri_fatti}, totali {t0} → {l.nastri_totali}");
+            string perche = motivo == "scartata" ? "vuote / da non contare" : motivo == "omaggio" ? "tenute ma non fatte pagare" : "errore di conteggio";
+            AppendLog($"Conteggio corretto per {l.cliente}: fatte {f0} → {l.nastri_fatti}, totali {t0} → {l.nastri_totali} ({perche}{(nota.Length > 0 ? " — " + nota : "")})");
             AggiornaCliente();
             CrmBattito();
             return true;

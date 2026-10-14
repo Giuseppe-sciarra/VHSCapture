@@ -525,6 +525,90 @@ namespace VHSCapture
         }
     }
     /// <summary>
+    /// Perché hai corretto il conteggio? Si apre dopo «💾 Salva correzione» quando i numeri sono cambiati.
+    /// Il motivo va al CRM, che lo scrive nello storico della scheda con l'etichetta giusta:
+    ///   scartata   → le cassette tolte dal totale erano vuote / da non contare («🗑 Scartata (vuota)»)
+    ///   omaggio    → tolte dal totale ma tenute, non fatte pagare («🎁 Non fatta pagare»)
+    ///   correzione → errore di conteggio, cassette in più trovate, fatte sbagliate («🔢 Conteggio corretto»)
+    /// Invio = prima scelta. La nota è facoltativa.
+    /// </summary>
+    public class MotivoRiconteggioForm : Form
+    {
+        public string Motivo { get; private set; } = "correzione";
+        public string Nota => txtNota.Text.Trim();
+        readonly TextBox txtNota;
+        static readonly int W = Math.Min(960, Screen.PrimaryScreen.WorkingArea.Width - 40);
+
+        public MotivoRiconteggioForm(bool dark, string cliente, int fattePrima, int fatte, int totPrima, int tot)
+        {
+            Theme.Apply(this, dark);
+            Text = "VHSCapture — perché hai corretto il conteggio?";
+            FormBorderStyle = FormBorderStyle.FixedDialog; ControlBox = false; ShowInTaskbar = false;
+            StartPosition = FormStartPosition.CenterParent;
+            Font = new Font("Segoe UI", 9.5f);
+            KeyPreview = true;
+            int tolte = Math.Max(0, totPrima - tot), aggiunte = Math.Max(0, tot - totPrima);
+            string n(int k) => k == 1 ? "1 videocassetta" : $"{k} videocassette";
+            int y = 16;
+            Controls.Add(new Label { Text = "Perché hai corretto il conteggio?", AutoSize = true, Font = new Font("Segoe UI Semibold", 14f), Location = new Point(24, y) }); y += 34;
+            string cosa = tolte > 0 ? $"hai tolto {n(tolte)} dal totale ({totPrima} → {tot})"
+                        : aggiunte > 0 ? $"hai aggiunto {n(aggiunte)} al totale ({totPrima} → {tot})"
+                        : $"fatte {fattePrima} → {fatte}";
+            if ((tolte > 0 || aggiunte > 0) && fatte != fattePrima) cosa += $" · fatte {fattePrima} → {fatte}";
+            Controls.Add(new Label { Text = $"{cliente}  ·  {cosa}", AutoSize = true, Font = new Font("Segoe UI Semibold", 10f), Location = new Point(26, y) }); y += 30;
+            var info = new InfoBox("ℹ️", "Il motivo finisce nello storico della scheda nel CRM, così dopo si capisce cos'è successo. Premi Invio per la prima scelta.", W - 48, Theme.Accent) { Location = new Point(24, y) };
+            Controls.Add(info); y += info.Height + 10;
+            SceltaCard prima = null;
+            SceltaCard Scelta(string titolo, string spieg, string effetto, Color col, string motivo)
+            {
+                var c = new SceltaCard(titolo, spieg, effetto, col, W - 48) { Location = new Point(24, y) };
+                c.Scelta += (o, e) => { Motivo = motivo; DialogResult = DialogResult.OK; Close(); };
+                Controls.Add(c); y += c.Height + 8;
+                if (prima == null) prima = c;
+                return c;
+            }
+            if (tolte > 0)
+            {
+                Scelta("🗑   Vuote — da non contare   (Invio)",
+                    "Dentro non c'era niente (nero, neve, schermo blu) oppure non andavano riversate.",
+                    $"→ nel CRM: {n(tolte)} segnate «scartata (vuota)» · il cliente passa a {tot} videocassette (scende anche il prezzo)",
+                    CrmColori.Rosso, "scartata");
+                Scelta("🎁   Tenute, ma non fatte pagare",
+                    "I video restano (es. durano pochi minuti), ma queste cassette non le facciamo pagare.",
+                    $"→ nel CRM: {n(tolte)} segnate «non fatta pagare» · il cliente passa a {tot} videocassette (scende anche il prezzo)",
+                    Theme.Accent, "omaggio");
+                Scelta("✏️   Errore di conteggio",
+                    "Il cliente ne aveva portate meno di quante erano segnate, o il numero era sbagliato all'inizio.",
+                    $"→ nel CRM: «conteggio corretto» {totPrima} → {tot}",
+                    CrmColori.Arancio, "correzione");
+            }
+            else if (aggiunte > 0)
+            {
+                Scelta("➕   Cassette in più   (Invio)",
+                    "Nella scatola ce n'erano più di quante segnate, o il cliente ne ha portate altre.",
+                    $"→ nel CRM: «conteggio corretto» {totPrima} → {tot} (sale anche il prezzo)",
+                    CrmColori.Verde, "correzione");
+            }
+            else
+            {
+                Scelta("✏️   Correzione delle fatte   (Invio)",
+                    "Es. «Tieni» premuto per sbaglio, o una cassetta fatta su un altro PC non segnata.",
+                    $"→ nel CRM: «conteggio corretto» fatte {fattePrima} → {fatte}",
+                    CrmColori.Arancio, "correzione");
+            }
+            Controls.Add(new Label { Text = "Nota (facoltativa, finisce nello storico):", AutoSize = true, Font = new Font("Segoe UI Semibold", 10f), Location = new Point(26, y + 4) }); y += 28;
+            txtNota = new TextBox { Location = new Point(24, y), Width = W - 48, Font = new Font("Segoe UI", 11f), BorderStyle = BorderStyle.FixedSingle };
+            Controls.Add(txtNota); y += txtNota.Height + 14;
+            KeyDown += (o, e) => { if (e.KeyCode == Keys.Enter && prima != null) { e.Handled = true; e.SuppressKeyPress = true; Motivo = PrimoMotivo(tolte, aggiunte); DialogResult = DialogResult.OK; Close(); } };
+            ClientSize = new Size(W, y + 6);
+            Theme.Apply(this, dark);
+            foreach (Control c in Controls) if (c is SceltaCard sc) sc.Colori();
+        }
+
+        static string PrimoMotivo(int tolte, int aggiunte) => tolte > 0 ? "scartata" : "correzione";
+    }
+
+    /// <summary>
     /// Riconteggio del cliente: fatte e totali secondo il CRM, i video che ci sono nella sua cartella su questo PC
     /// (con dimensione e durata), e due caselle per correggere. A fine cliente: «✅ Torna tutto» (Invio) o «💾 Salva correzione».
     /// </summary>

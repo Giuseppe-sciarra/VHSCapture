@@ -242,6 +242,7 @@ namespace VHSCapture
         public string FilePrefix { get; set; } = "VHS";
         public bool SafeRecording { get; set; } = false;       // opzionale: MKV + remux MP4 a fine
         public int MaxMinutes { get; set; } = 0;
+        public int StopAnnullaSec { get; set; } = 5;           // dopo «Ferma registrazione»: secondi per annullare (0 = si ferma subito)
 
         public bool FragmentedMp4 { get; set; } = false;       // false = MP4 normale come OBS (indice unico: i lettori lo aprono subito)
         public int FormatVersion { get; set; } = 0;            // migrazioni una tantum delle impostazioni

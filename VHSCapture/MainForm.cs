@@ -30,6 +30,9 @@ namespace VHSCapture
         CrmLavoro lavoro;                         // cliente scelto (null = nessun cliente)
         int cassettaInCorso;                      // numero della cassetta che si sta registrando
         TimeSpan durataStop;                      // durata misurata al clic su Stop (al netto delle pause)
+        // «Ferma registrazione» con ripensamento: per qualche secondo il pulsante diventa «↶ Annulla stop» (StopConAnnulla.cs)
+        readonly StopConAnnulla stopAnnulla = new StopConAnnulla();
+        TimeSpan? durataAlClic;                   // durata al clic su «Ferma»: la «partenza sbagliata» la decide questa, non i secondi d'attesa
         RoundedButton btnCliente;
         RoundedButton btnConteggio;
         Label lblCrm; Panel crmWrap;
@@ -125,6 +128,7 @@ namespace VHSCapture
             crmTimer.Tick += (o, e) => CrmBattito();
             restartTimer = new System.Windows.Forms.Timer { Interval = 450 };
             restartTimer.Tick += (o, e) => { restartTimer.Stop(); if (!CaptureBusy) StartPreview(); };
+            stopAnnulla.Cambiato += () => { if (IsDisposed) return; UpdateRecButton(); UpdateStatus(); };
 
             Shown += (o, e) =>
             {
@@ -154,9 +158,11 @@ namespace VHSCapture
                 {
                     if (MessageBox.Show(this, "Stai registrando. Fermare e uscire?", "VHSCapture", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     { e.Cancel = true; return; }
+                    stopAnnulla.Annulla();
                     engine.StopRecording();   // chiude bene il file prima di uscire
                 }
                 closingApp = true;
+                stopAnnulla.Dispose();
                 engine.Stop();
                 monitor.Stop();
                 settings.WindowMax = WindowState == FormWindowState.Maximized;
@@ -184,7 +190,7 @@ namespace VHSCapture
             var flow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Tag = "panel" };
             // come OBS: un solo pulsante. Rosso = avvia, chiaro = ferma. L'anteprima parte da sola (F5 per riavviarla).
             btnRec = Ui.Btn("⏺   Avvia registrazione", "rec", (o, e) => ToggleRecording(), 230);
-            tips.SetToolTip(btnRec, "Avvia / ferma registrazione (F9)");
+            tips.SetToolTip(btnRec, "Avvia / ferma registrazione (F9). Dopo «Ferma» hai qualche secondo per annullare (Impostazioni → Generale)");
             btnPause = Ui.Btn("⏸   Pausa", "ghost", (o, e) => TogglePause(), 120);
             btnPause.Visible = false;
             tips.SetToolTip(btnPause, "Pausa / riprendi (F10): salti un pezzo senza fare due file");
@@ -1159,8 +1165,12 @@ namespace VHSCapture
         {
             if (!engine.IsRecording || finalizing || startingRecording) return;
             durataStop = DurataRegistrazione();
+            // fermata col pulsante: per la «partenza sbagliata» conta quando è stato premuto «Ferma», non i secondi per ripensarci
+            var durataDecisa = durataAlClic ?? durataStop;
+            durataAlClic = null;
             if (sceltaAperta != null) { var fa = sceltaAperta; sceltaAperta = null; fa.Close(); }   // fermata prima di scegliere: resta senza cliente
             finalizing = true;
+            stopAnnulla.Annulla();   // stop automatico (fine cassetta, errore, minuti massimi) arrivato durante il conto: si ferma adesso
             SetButtons();
             lblRec.Text = "Chiusura file…"; lblRec.Fill = Color.Transparent; lblRec.ForeColor = Theme.Fore;
             canvas.RecText = null; canvas.Invalidate();
@@ -1242,11 +1252,11 @@ namespace VHSCapture
                 bool cancella = false;
                 string esito;
                 if (!haFile) esito = "rifai";
-                else if (settings.CrmRipartenzaAttiva && durataStop.TotalSeconds < Math.Max(10, settings.CrmRipartenzaSec))
+                else if (settings.CrmRipartenzaAttiva && durataDecisa.TotalSeconds < Math.Max(10, settings.CrmRipartenzaSec))
                 {
                     // partenza sbagliata: nessuna domanda, non si conta, file breve cancellato, si riparte dalla stessa cassetta
                     esito = "rifai"; cancella = true;
-                    AppendLog($"Partenza sbagliata (fermata dopo {DurataTesto((int)durataStop.TotalSeconds)}): cassetta non contata, file cancellato. La prossima registrazione riparte dalla cassetta {cassettaInCorso}.");
+                    AppendLog($"Partenza sbagliata (fermata dopo {DurataTesto((int)durataDecisa.TotalSeconds)}): cassetta non contata, file cancellato. La prossima registrazione riparte dalla cassetta {cassettaInCorso}.");
                 }
                 else
                 {
@@ -1538,7 +1548,21 @@ namespace VHSCapture
         void ToggleRecording()
         {
             if (finalizing || startingRecording) return;
-            if (engine.IsRecording) StopRecording(true);
+            if (engine.IsRecording)
+            {
+                // secondo clic (o F9) durante il conto alla rovescia = ci ho ripensato: la registrazione continua
+                if (stopAnnulla.Annulla())
+                {
+                    durataAlClic = null;
+                    AppendLog("Stop annullato: la registrazione continua");
+                    return;
+                }
+                // «Ferma registrazione»: non si ferma subito, per i secondi scelti nelle impostazioni si può annullare (clic per sbaglio)
+                int secondi = Math.Clamp(settings.StopAnnullaSec, 0, StopConAnnulla.Massimo);
+                durataAlClic = DurataRegistrazione();
+                if (secondi > 0) AppendLog($"Stop tra {secondi} s: premi «Annulla stop» (o F9) per continuare a registrare");
+                stopAnnulla.Avvia(secondi, () => { if (engine.IsRecording && !finalizing) StopRecording(true); else durataAlClic = null; });
+            }
             else StartRecording();
         }
 
@@ -1551,6 +1575,12 @@ namespace VHSCapture
             {
                 btnRec.Text = compact ? "…" : startingRecording ? "Preparazione…" : "Chiusura file…";
                 btnRec.Variant = "stop"; btnRec.Enabled = false;
+            }
+            else if (rec && stopAnnulla.InAttesa)
+            {
+                // conto alla rovescia dello stop: il pulsante serve ad annullarlo
+                btnRec.Text = compact ? $"↶  {stopAnnulla.Restano}" : $"↶   Annulla stop  ({stopAnnulla.Restano})";
+                btnRec.Variant = "accent"; btnRec.Enabled = true;
             }
             else if (rec)
             {
@@ -2055,6 +2085,11 @@ namespace VHSCapture
                 {
                     int left = Math.Max(0, settings.AutoStopSeconds - (int)(DateTime.UtcNow - blankSince.Value).TotalSeconds);
                     canvas.RecText += $"    solo sfondo: stop tra {left} s";
+                }
+                if (stopAnnulla.InAttesa)
+                {
+                    lblRec.Text += $"   ⏹ stop tra {stopAnnulla.Restano} s — «Annulla stop» o F9 per continuare";
+                    canvas.RecText += $"    ⏹ stop tra {stopAnnulla.Restano} s (F9 = annulla)";
                 }
                 canvas.Invalidate();
                 if (settings.MaxMinutes > 0 && el.TotalMinutes >= settings.MaxMinutes)

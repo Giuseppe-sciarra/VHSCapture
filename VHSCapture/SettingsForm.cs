@@ -17,7 +17,7 @@ namespace VHSCapture
         public bool CanvasChanged { get; private set; }
 
         // Generale
-        ComboBox cbTheme; TextBox txtFolder, txtPrefix; NumericUpDown nMaxMin;
+        ComboBox cbTheme; TextBox txtFolder, txtPrefix; NumericUpDown nMaxMin, nStopAnnulla;
         // Registrazione
         ComboBox cbFormat, cbEncoder, cbRc, cbPreset; NumericUpDown nBitrate, nCrf, nSplit, nKey;
         Label lblBitrate, lblCrf, lblPreset;
@@ -249,6 +249,8 @@ namespace VHSCapture
             Row(sal, "Prefisso nome file", txtPrefix, "→ Prefisso_Nome_2026-09-27_14-30-00.mp4");
             nMaxMin = Num(0, 600, 5);
             Row(sal, "Stop automatico (minuti)", nMaxMin, "0 = mai. Es. 245 per una E-240");
+            nStopAnnulla = Num(0, StopConAnnulla.Massimo, 1);
+            Row(sal, "Annulla stop (secondi)", nStopAnnulla, "Dopo «Ferma registrazione» il pulsante diventa «Annulla stop» per questi secondi. 0 = si ferma subito");
         }
 
         void BuildRegistrazione()
@@ -396,6 +398,7 @@ namespace VHSCapture
             chkLocalFirst.Checked = s.RecordLocalFirst;
             txtPrefix.Text = s.FilePrefix;
             nMaxMin.Value = Math.Clamp(s.MaxMinutes, 0, 600);
+            nStopAnnulla.Value = Math.Clamp(s.StopAnnullaSec, 0, StopConAnnulla.Massimo);
 
             cbFormat.SelectedIndex = s.SafeRecording ? 2 : (s.FragmentedMp4 ? 1 : 0);
             nSplit.Value = Math.Clamp(s.SplitMinutes, 0, 600);
@@ -469,6 +472,7 @@ namespace VHSCapture
             s.RecordLocalFirst = chkLocalFirst.Checked;
             s.FilePrefix = string.IsNullOrWhiteSpace(txtPrefix.Text) ? "VHS" : txtPrefix.Text.Trim();
             s.MaxMinutes = (int)nMaxMin.Value;
+            s.StopAnnullaSec = (int)nStopAnnulla.Value;
 
             s.SafeRecording = cbFormat.SelectedIndex == 2;
             s.FragmentedMp4 = cbFormat.SelectedIndex == 1;
